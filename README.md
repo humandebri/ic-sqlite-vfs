@@ -16,9 +16,14 @@ stable memory.
 
 ## Status
 
-Alpha. The core VFS, transaction facade, import/export flow, and upgrade
-persistence tests are in place. The API is still expected to change before a
-stable crates.io release.
+Initial public release: `0.1.0`.
+
+The core VFS, transaction facade, import/export flow, and upgrade persistence
+tests are in place. This project has not promised compatibility for deployed
+canisters yet. `0.x` releases may introduce breaking changes.
+
+See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `0.x` compatibility
+contract.
 
 ## Why
 
@@ -93,15 +98,22 @@ only for this repository's reference canister.
 
 ```toml
 [dependencies]
-ic-sqlite-vfs = { version = "0.1", default-features = false }
+ic-sqlite-vfs = { version = "0.1.0", default-features = false }
 ```
 
 Consumers must build bundled SQLite with `SQLITE_OS_OTHER=1` and a C compiler
-that can emit `wasm32-unknown-unknown` compatible objects. This repository uses
-[.cargo/config.toml](.cargo/config.toml) and
-[scripts/wasm32-unknown-unknown-cc.sh](scripts/wasm32-unknown-unknown-cc.sh) as
-the reference setup. Copy the same settings into the consuming canister
-workspace until this crate ships a dedicated build helper.
+that can emit `wasm32-unknown-unknown` compatible objects. Install the reference
+support files into the consuming canister workspace:
+
+```sh
+scripts/install-build-support.sh /path/to/canister-workspace
+```
+
+The installer adds `.cargo/config.toml`, `scripts/wasm32-unknown-unknown-cc.sh`,
+and `c/include/*`. It refuses to overwrite existing files unless `--force` is
+passed.
+
+See [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) for details and rationale.
 
 Minimal canister pattern:
 
@@ -239,8 +251,10 @@ pager I/O directly to stable memory offsets.
 cargo fmt --check
 bash scripts/check-no-await.sh
 cargo test
+cargo test --features canister-api
 icp build
 npm run test:pocketic
+cargo package --no-verify --offline
 ```
 
 Current coverage:
@@ -263,6 +277,10 @@ See [docs/OPERATIONS.md](docs/OPERATIONS.md) for transaction rules, import
 recovery, capacity handling, and integrity checks.
 
 See [docs/RELEASE.md](docs/RELEASE.md) for release gates.
+
+See [docs/API_STABILITY.md](docs/API_STABILITY.md) for `0.x` compatibility.
+
+See [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) for consumer build setup.
 
 ## Limitations
 

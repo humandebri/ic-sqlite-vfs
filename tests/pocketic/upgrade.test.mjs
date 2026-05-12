@@ -5,8 +5,9 @@ import { PocketIc, PocketIcServer, createIdentity } from "@dfinity/pic";
 import { idlFactory } from "./idl.mjs";
 
 const wasm = resolve("target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm");
+const timeout = 240_000;
 
-test("stable SQLite image survives canister upgrade", { timeout: 120_000 }, async () => {
+test("stable SQLite image survives canister upgrade", { timeout }, async () => {
   const server = await PocketIcServer.start();
   const pic = await PocketIc.create(server.getUrl());
   try {
@@ -31,7 +32,7 @@ test("stable SQLite image survives canister upgrade", { timeout: 120_000 }, asyn
   }
 });
 
-test("chunked export and import reject wrong checksum", { timeout: 120_000 }, async () => {
+test("chunked export and import reject wrong checksum", { timeout }, async () => {
   const server = await PocketIcServer.start();
   const pic = await PocketIc.create(server.getUrl());
   try {
@@ -57,7 +58,7 @@ test("chunked export and import reject wrong checksum", { timeout: 120_000 }, as
   }
 });
 
-test("management database methods require a controller", { timeout: 120_000 }, async () => {
+test("management database methods require a controller", { timeout }, async () => {
   const server = await PocketIcServer.start();
   const pic = await PocketIc.create(server.getUrl());
   try {

@@ -8,9 +8,11 @@ Release 前に以下を全て通す。
 cargo fmt --check
 bash scripts/check-no-await.sh
 cargo test
+cargo test --features canister-api
 cargo build --target wasm32-unknown-unknown
 cargo build --target wasm32-unknown-unknown --features canister-api
 npm run test:pocketic
+cargo package --no-verify --offline
 wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm
 ```
 
