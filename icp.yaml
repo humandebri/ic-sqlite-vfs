@@ -1,0 +1,9 @@
+canisters:
+  - name: ic_sqlite_vfs
+    build:
+      steps:
+        - type: script
+          commands:
+            - cargo build --package ic-sqlite-vfs --target wasm32-unknown-unknown --release --features canister-api
+            - cp target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm "$ICP_WASM_OUTPUT_PATH"
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata candid:service -f src/ic_sqlite_vfs.did -v public --keep-name-section

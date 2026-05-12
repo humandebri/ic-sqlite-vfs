@@ -1,0 +1,14 @@
+{
+  "name": "ic-sqlite-vfs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "cargo build --target wasm32-unknown-unknown --features canister-api",
+    "test:pocketic": "npm run build:wasm && node --test tests/pocketic/*.test.mjs"
+  },
+  "devDependencies": {
+    "@dfinity/candid": "3.4.0",
+    "@dfinity/pic": "0.21.0"
+  }
+}

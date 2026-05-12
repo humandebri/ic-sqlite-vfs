@@ -1,0 +1,11 @@
+{
+  "canisters": {
+    "ic_sqlite_vfs": {
+      "type": "custom",
+      "candid": "src/ic_sqlite_vfs.did",
+      "wasm": "target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm",
+      "build": "cargo build --target wasm32-unknown-unknown --features canister-api"
+    }
+  },
+  "version": 1
+}

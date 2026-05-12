@@ -1,0 +1,35 @@
+[package]
+name = "ic-sqlite-vfs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "SQLite VFS backed directly by Internet Computer stable memory"
+readme = "README.md"
+documentation = "https://docs.rs/ic-sqlite-vfs"
+keywords = ["sqlite", "internet-computer", "stable-memory", "vfs", "icp"]
+categories = ["database", "embedded", "wasm"]
+exclude = [
+  "/.github/",
+  "/.icp/",
+  "/node_modules/",
+  "/target/",
+  "/package-lock.json",
+  "/package.json",
+]
+
+[features]
+default = []
+canister-api = []
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+candid = "0.10"
+ic-cdk = "0.20.1"
+libsqlite3-sys = { version = "0.37.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serial_test = "3"

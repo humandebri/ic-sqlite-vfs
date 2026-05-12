@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install WASI SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wasi-libc clang wabt
+          sudo ln -sf "$(command -v clang)" /usr/local/bin/wasm32-wasi-clang
+      - run: npm ci
+      - run: cargo fmt --check
+      - run: bash scripts/check-no-await.sh
+      - run: cargo test
+      - run: cargo build --target wasm32-unknown-unknown
+      - run: cargo build --target wasm32-unknown-unknown --features canister-api
+      - run: npm run test:pocketic
+      - name: Check wasm imports
+        run: |
+          if wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm | grep '<- env\\.'; then
+            echo "unexpected env import" >&2
+            exit 1
+          fi
