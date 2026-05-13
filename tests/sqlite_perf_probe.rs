@@ -3,6 +3,8 @@
 //! 通常CIからは除外し、DBサイズ増加時の更新・読取・checksum傾向を手元で確認する。
 
 use ic_sqlite_vfs::db::migrate::Migration;
+#[cfg(debug_assertions)]
+use ic_sqlite_vfs::read_metrics;
 use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
 use ic_sqlite_vfs::stable::memory;
 use ic_sqlite_vfs::stable::meta::Superblock;
@@ -32,6 +34,39 @@ fn meta() -> (u64, u64, u64) {
 
 fn print_metric(name: &str, rows: u64, elapsed_ms: u128, db_size: u64, pages: u64) {
     println!("{name}, rows={rows}, elapsed_ms={elapsed_ms}, db_size={db_size}, pages={pages}");
+}
+
+#[cfg(debug_assertions)]
+fn reset_read_metrics() {
+    read_metrics::reset_read_metrics();
+}
+
+#[cfg(not(debug_assertions))]
+fn reset_read_metrics() {}
+
+#[cfg(debug_assertions)]
+fn print_read_metric(name: &str, rows: u64, elapsed_ms: u128, db_size: u64, pages: u64) {
+    let metrics = read_metrics::read_metrics_snapshot();
+    println!(
+        "{name}, rows={rows}, elapsed_ms={elapsed_ms}, db_size={db_size}, pages={pages}, \
+         x_read_calls={}, x_read_bytes={}, stable_data_read_calls={}, \
+         stable_data_read_bytes={}, page_table_root_hits={}, page_table_root_misses={}, \
+         page_table_segment_hits={}, page_table_segment_misses={}, superblock_loads={}",
+        metrics.x_read_calls,
+        metrics.x_read_bytes,
+        metrics.stable_data_read_calls,
+        metrics.stable_data_read_bytes,
+        metrics.page_table_root_hits,
+        metrics.page_table_root_misses,
+        metrics.page_table_segment_hits,
+        metrics.page_table_segment_misses,
+        metrics.superblock_loads
+    );
+}
+
+#[cfg(not(debug_assertions))]
+fn print_read_metric(name: &str, rows: u64, elapsed_ms: u128, db_size: u64, pages: u64) {
+    print_metric(name, rows, elapsed_ms, db_size, pages);
 }
 
 #[test]
@@ -110,16 +145,14 @@ fn indexed_read_scan_and_export_scale() {
     })
     .unwrap();
 
+    reset_read_metrics();
     let start = Instant::now();
     let mut found = 0_u64;
     Db::query(|connection| {
         let mut statement = connection.prepare("SELECT v FROM bench WHERE k = ?1")?;
         for index in 0..rows {
             let key = format!("k{index:08}");
-            if statement
-                .query_optional_scalar::<String>(params![key])?
-                .is_some()
-            {
+            if statement.query_optional_string_text(&key)?.is_some() {
                 found += 1;
             }
         }
@@ -127,7 +160,7 @@ fn indexed_read_scan_and_export_scale() {
     })
     .unwrap();
     let (db_size, _page_count, pages) = meta();
-    print_metric(
+    print_read_metric(
         "indexed_point_reads",
         rows,
         start.elapsed().as_millis(),
@@ -136,6 +169,7 @@ fn indexed_read_scan_and_export_scale() {
     );
     assert_eq!(found, rows);
 
+    reset_read_metrics();
     let start = Instant::now();
     let count = Db::query(|connection| {
         connection.query_scalar::<i64>(
@@ -145,7 +179,7 @@ fn indexed_read_scan_and_export_scale() {
     })
     .unwrap();
     let (db_size, _page_count, pages) = meta();
-    print_metric(
+    print_read_metric(
         "full_scan_like",
         rows,
         start.elapsed().as_millis(),
@@ -154,9 +188,10 @@ fn indexed_read_scan_and_export_scale() {
     );
     assert_eq!(count, i64::try_from(rows).unwrap());
 
+    reset_read_metrics();
     let start = Instant::now();
     let exported = Db::export_chunk(0, db_size).unwrap();
-    print_metric(
+    print_read_metric(
         "export_full_image",
         rows,
         start.elapsed().as_millis(),

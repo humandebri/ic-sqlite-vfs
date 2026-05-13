@@ -29,6 +29,7 @@ pub struct StepFailpoint {
 pub struct Statement<'connection> {
     db: *mut ffi::sqlite3,
     raw: NonNull<ffi::sqlite3_stmt>,
+    parameter_count: usize,
     _connection: std::marker::PhantomData<&'connection ()>,
 }
 
@@ -39,9 +40,13 @@ pub struct Rows<'statement, 'connection> {
 
 impl<'connection> Statement<'connection> {
     pub(crate) fn new(db: *mut ffi::sqlite3, raw: NonNull<ffi::sqlite3_stmt>) -> Self {
+        let parameter_count =
+            usize::try_from(unsafe { ffi::sqlite3_bind_parameter_count(raw.as_ptr()) })
+                .unwrap_or(0);
         Self {
             db,
             raw,
+            parameter_count,
             _connection: std::marker::PhantomData,
         }
     }
@@ -195,6 +200,15 @@ impl<'connection> Statement<'connection> {
         self.query_optional(values, |row| row.get(0))
     }
 
+    pub fn query_optional_string_text(&mut self, value: &str) -> Result<Option<String>, DbError> {
+        self.reset_and_bind_single_text(value)?;
+        match step(self.raw.as_ptr())? {
+            ffi::SQLITE_ROW => read_string_column_zero(self.raw.as_ptr()).map(Some),
+            ffi::SQLITE_DONE => Ok(None),
+            rc => Err(sqlite_error(self.db, rc)),
+        }
+    }
+
     pub fn query_optional_scalar_named<T: FromColumn>(
         &mut self,
         values: &[(&str, &dyn ToSql)],
@@ -228,6 +242,34 @@ impl<'connection> Statement<'connection> {
         bind_all(self.raw.as_ptr(), values)
     }
 
+    fn reset_and_bind_single_text(&mut self, value: &str) -> Result<(), DbError> {
+        if self.parameter_count != 1 {
+            return Err(DbError::ParameterCountMismatch {
+                expected: self.parameter_count,
+                actual: 1,
+            });
+        }
+        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
+        if reset_rc != ffi::SQLITE_OK {
+            return Err(sqlite_error(self.db, reset_rc));
+        }
+        let len = std::ffi::c_int::try_from(value.len()).map_err(|_| DbError::TextTooLarge)?;
+        let bind_rc = unsafe {
+            ffi::sqlite3_bind_text(
+                self.raw.as_ptr(),
+                1,
+                value.as_ptr().cast(),
+                len,
+                ffi::SQLITE_TRANSIENT(),
+            )
+        };
+        if bind_rc == ffi::SQLITE_OK {
+            Ok(())
+        } else {
+            Err(DbError::Sqlite(bind_rc, "sqlite bind failed".to_string()))
+        }
+    }
+
     fn reset_and_bind_named(&mut self, values: &[(&str, &dyn ToSql)]) -> Result<(), DbError> {
         let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
         if reset_rc != ffi::SQLITE_OK {
@@ -238,6 +280,36 @@ impl<'connection> Statement<'connection> {
             return Err(sqlite_error(self.db, clear_rc));
         }
         bind_named_all(self.raw.as_ptr(), values)
+    }
+}
+
+fn read_string_column_zero(statement: *mut ffi::sqlite3_stmt) -> Result<String, DbError> {
+    let actual = unsafe { ffi::sqlite3_column_type(statement, 0) };
+    if actual != ffi::SQLITE_TEXT {
+        return Err(DbError::TypeMismatch {
+            index: 0,
+            expected: "TEXT",
+            actual: sqlite_type_name(actual),
+        });
+    }
+    let text = unsafe { ffi::sqlite3_column_text(statement, 0) };
+    let len = unsafe { ffi::sqlite3_column_bytes(statement, 0) };
+    let len = usize::try_from(len).map_err(|_| DbError::TextTooLarge)?;
+    if len == 0 || text.is_null() {
+        return Ok(String::new());
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), len) };
+    Ok(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn sqlite_type_name(code: std::ffi::c_int) -> &'static str {
+    match code {
+        ffi::SQLITE_INTEGER => "INTEGER",
+        ffi::SQLITE_FLOAT => "REAL",
+        ffi::SQLITE_TEXT => "TEXT",
+        ffi::SQLITE_BLOB => "BLOB",
+        ffi::SQLITE_NULL => "NULL",
+        _ => "UNKNOWN",
     }
 }
 

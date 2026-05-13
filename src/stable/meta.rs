@@ -67,6 +67,8 @@ impl Superblock {
     }
 
     pub fn load() -> Result<Self, StableMemoryError> {
+        #[cfg(any(test, debug_assertions))]
+        crate::read_metrics::record_superblock_load();
         memory::ensure_capacity(SUPERBLOCK_OFFSET + SUPERBLOCK_SIZE)?;
         let mut bytes = [0_u8; ENCODED_LEN];
         memory::read(SUPERBLOCK_OFFSET, &mut bytes)?;

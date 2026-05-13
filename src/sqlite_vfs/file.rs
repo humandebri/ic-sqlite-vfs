@@ -90,10 +90,14 @@ unsafe extern "C" fn x_read(
     let dst = std::slice::from_raw_parts_mut(buf.cast::<u8>(), amount);
     let file = &mut *file.cast::<IcStableFile>();
     let complete = match &mut file.kind {
-        FileKind::Main => match stable_blob::read_at(offset, dst) {
-            Ok(value) => value,
-            Err(_) => return ffi::SQLITE_IOERR_READ,
-        },
+        FileKind::Main => {
+            #[cfg(any(test, debug_assertions))]
+            crate::read_metrics::record_x_read(amount);
+            match stable_blob::read_at(offset, dst) {
+                Ok(value) => value,
+                Err(_) => return ffi::SQLITE_IOERR_READ,
+            }
+        }
         FileKind::Temp(temp) => temp.read(offset, dst),
     };
     if complete {

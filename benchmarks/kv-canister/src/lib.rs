@@ -69,9 +69,7 @@ fn bench_read(rows: u32) -> Result<BenchReport, String> {
         let mut statement = connection.prepare("SELECT value FROM bench WHERE key = ?1")?;
         for index in 0..rows {
             let key = format!("k{index:08}");
-            if let Some(value) =
-                statement.query_optional_scalar::<String>(ic_sqlite_vfs::params![key])?
-            {
+            if let Some(value) = statement.query_optional_string_text(&key)? {
                 total = total.wrapping_add(value.len() as u64);
             }
         }

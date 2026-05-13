@@ -288,6 +288,15 @@ impl Connection {
         self.query_optional(sql, values, |row| row.get(0))
     }
 
+    pub fn query_optional_string_text(
+        &self,
+        sql: &str,
+        value: &str,
+    ) -> Result<Option<String>, DbError> {
+        let mut statement = self.prepare(sql)?;
+        statement.query_optional_string_text(value)
+    }
+
     pub fn query_optional_scalar_named<T: FromColumn>(
         &self,
         sql: &str,

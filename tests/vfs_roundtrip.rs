@@ -1,3 +1,4 @@
+use ic_sqlite_vfs::config::SQLITE_CACHE_SIZE_KIB;
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
 use ic_sqlite_vfs::stable::memory;
@@ -62,12 +63,9 @@ fn reusable_statement_handles_repeated_binds() {
         let mut values = Vec::new();
         for index in [0, 7, 15] {
             let key = format!("k{index}");
-            values.push(
-                statement
-                    .query_optional_scalar::<String>(params![key])?
-                    .unwrap(),
-            );
+            values.push(statement.query_optional_string_text(&key)?.unwrap());
         }
+        assert!(statement.query_optional_string_text("missing")?.is_none());
         Ok(values.join(","))
     })
     .unwrap();
@@ -123,6 +121,24 @@ fn query_connection_rejects_writes() {
     });
 
     assert!(result.is_err());
+}
+
+#[test]
+#[serial]
+fn read_only_connection_applies_cache_size_pragma() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE cache_size_guard(id INTEGER PRIMARY KEY);",
+    }])
+    .unwrap();
+
+    let cache_size = Db::query(|connection| {
+        connection.query_scalar::<i64>("PRAGMA cache_size", ic_sqlite_vfs::params![])
+    })
+    .unwrap();
+
+    assert_eq!(cache_size, -i64::from(SQLITE_CACHE_SIZE_KIB));
 }
 
 #[test]

@@ -23,7 +23,8 @@ pub fn apply_read_write(connection: &Connection) -> Result<(), DbError> {
 
 pub fn apply_read_only(connection: &Connection) -> Result<(), DbError> {
     connection.execute_batch(&format!(
-        "PRAGMA query_only = ON;
+        "PRAGMA cache_size = -{SQLITE_CACHE_SIZE_KIB};
+         PRAGMA query_only = ON;
          PRAGMA foreign_keys = ON;
          PRAGMA temp_store = MEMORY;
          PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};"

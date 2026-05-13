@@ -77,7 +77,7 @@ run `db_refresh_checksum` to recompute the checksum, store it, and clear
 
 ## SQLite Settings
 
-The reference facade uses:
+Update connections use:
 
 ```sql
 PRAGMA page_size = 16384;
@@ -87,6 +87,16 @@ PRAGMA temp_store = MEMORY;
 PRAGMA locking_mode = EXCLUSIVE;
 PRAGMA foreign_keys = ON;
 PRAGMA cache_size = -32768;
+PRAGMA busy_timeout = 0;
+```
+
+Read-only query connections use:
+
+```sql
+PRAGMA cache_size = -32768;
+PRAGMA query_only = ON;
+PRAGMA foreign_keys = ON;
+PRAGMA temp_store = MEMORY;
 PRAGMA busy_timeout = 0;
 ```
 
@@ -288,7 +298,7 @@ icp deploy
 
 The reference canister exposes:
 
-- `kv_put`, `kv_get`, `kv_count`
+- `kv_put`, `kv_get`, `kv_get_many`, `kv_count`
 - `db_meta`
 - `db_integrity_check`
 - `db_checksum`
@@ -346,15 +356,21 @@ KV workload, 1000 rows:
 
 | Workload | ic-sqlite-vfs | wasi2ic + ic-rusqlite | Result |
 |---|---:|---:|---:|
-| reset + insert | 20.64M | 149.36M | 7.2x fewer instructions |
-| point read | 23.36M | 44.53M | 1.9x fewer instructions |
-| insert/update | 22.65M | 172.56M | 7.6x fewer instructions |
+| reset + insert | 18.27M | 125.49M | 6.9x fewer instructions |
+| repeated point read | 23.99M | 18.71M | API-loop dominated |
+| bulk read | 4.11M | not measured | use for multi-key reads |
+| insert/update | 20.37M | 127.97M | 6.3x fewer instructions |
+
+Repeated point reads execute one SQLite statement per key inside the canister.
+They mostly measure bind/reset/step wrapper overhead, not stable-memory I/O.
+Prefer batched reads such as `kv_get_many` or a single SQL query when one
+canister method needs many keys.
 
 Memory after the 1000-row run:
 
 | Implementation | Canister memory |
 |---|---:|
-| ic-sqlite-vfs | 3.96 MB |
+| ic-sqlite-vfs | 4.28 MB |
 | wasi2ic + ic-rusqlite | 89.64 MB |
 
 Wasm size:
@@ -372,14 +388,19 @@ Native performance probe, measured locally on 2026-05-13 with
 
 | Rows | batch insert | single update after insert | refresh checksum | db_size |
 |---:|---:|---:|---:|---:|
-| 100 | 0 ms | 0 ms | 0 ms | 64 KiB |
-| 1,000 | 1 ms | 1 ms | 0 ms | 144 KiB |
-| 10,000 | 15 ms | 0 ms | 3 ms | 672 KiB |
-| 20,000 | 31 ms | 0 ms | 5 ms | 1.25 MiB |
-| 100,000 | 155 ms | 1 ms | 24 ms | 6.09 MiB |
+| 100 | 1 ms | 1 ms | 0 ms | 64 KiB |
+| 1,000 | 5 ms | 1 ms | 1 ms | 144 KiB |
+| 10,000 | 35 ms | 1 ms | 6 ms | 672 KiB |
+| 20,000 | 65 ms | 1 ms | 13 ms | 1.25 MiB |
+| 100,000 | 355 ms | 1 ms | 67 ms | 6.09 MiB |
 
-For 20,000 rows, indexed point reads took 90 ms, `LIKE '%stable%'` scan took
-2 ms, and full logical export took 0 ms in the same native probe.
+For 20,000 rows in the same native probe:
+
+| Workload | elapsed | xRead calls | stable data reads | root hit/miss | segment hit/miss | superblock loads |
+|---|---:|---:|---:|---:|---:|---:|
+| indexed point reads | 207 ms | 20,080 | 20,080 | 20,079 / 1 | 20,079 / 1 | 40,085 |
+| `LIKE '%stable%'` scan | 7 ms | 56 | 56 | 56 / 0 | 56 / 0 | 62 |
+| full logical export | 0 ms | 0 | 80 | 80 / 0 | 80 / 0 | 3 |
 
 The write workload numbers exclude a full DB checksum scan from the commit
 path. `db_refresh_checksum` and `db_refresh_checksum_chunk` are separate

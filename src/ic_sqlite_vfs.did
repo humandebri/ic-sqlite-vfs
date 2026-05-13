@@ -31,6 +31,7 @@ type ChecksumRefresh = record {
 service : {
   kv_put : (text, text) -> (variant { Ok : null; Err : text });
   kv_get : (text) -> (variant { Ok : opt text; Err : text }) query;
+  kv_get_many : (vec text) -> (variant { Ok : vec opt text; Err : text }) query;
   kv_set_note : (text, text) -> (variant { Ok : null; Err : text });
   kv_get_note : (text) -> (variant { Ok : opt text; Err : text }) query;
   kv_count : () -> (variant { Ok : nat64; Err : text }) query;

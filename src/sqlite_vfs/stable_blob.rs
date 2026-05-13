@@ -187,6 +187,8 @@ pub(crate) fn read_base_page(page_no: u64) -> Result<Vec<u8>, StableMemoryError>
     }
     let physical = page_offset_for(&block, page_no)?;
     if physical != 0 {
+        #[cfg(any(test, debug_assertions))]
+        crate::read_metrics::record_stable_data_read(page.len());
         memory::read(physical, &mut page)?;
     }
     Ok(page)
@@ -601,6 +603,8 @@ fn read_logical_range(
                 physical,
                 u64::try_from(in_page).map_err(|_| StableMemoryError::OffsetOverflow)?,
             )?;
+            #[cfg(any(test, debug_assertions))]
+            crate::read_metrics::record_stable_data_read(copied);
             memory::read(stable_offset, &mut dst[copied_total..copied_total + copied])?;
         }
         copied_total += copied;
@@ -640,7 +644,12 @@ fn cached_page_offset_for(block: &Superblock, page_no: u64) -> Result<u64, Stabl
         let mut cache = cache.borrow_mut();
         cache.ensure_key(key);
         if cache.root.is_empty() {
+            #[cfg(any(test, debug_assertions))]
+            crate::read_metrics::record_page_table_root_miss();
             cache.root = read_root_table(block)?;
+        } else {
+            #[cfg(any(test, debug_assertions))]
+            crate::read_metrics::record_page_table_root_hit();
         }
         let Some(segment_offset) = cache
             .root
@@ -653,8 +662,12 @@ fn cached_page_offset_for(block: &Superblock, page_no: u64) -> Result<u64, Stabl
             return Ok(0);
         }
         if cache.segments.contains_key(&segment_no) {
+            #[cfg(any(test, debug_assertions))]
+            crate::read_metrics::record_page_table_segment_hit();
             cache.touch_segment(segment_no);
         } else {
+            #[cfg(any(test, debug_assertions))]
+            crate::read_metrics::record_page_table_segment_miss();
             let table = read_segment_table_at(segment_offset)?;
             cache.insert_segment(segment_no, table);
         }
@@ -982,5 +995,30 @@ mod tests {
             imported_page_table(&block),
             Err(StableMemoryError::OffsetOverflow)
         ));
+    }
+
+    #[test]
+    fn read_metrics_separate_table_cache_from_data_reads() {
+        crate::stable::memory::reset_for_tests();
+        invalidate_read_cache();
+
+        let page = vec![7_u8; page_len()];
+        write_at(0, &page).unwrap();
+        invalidate_read_cache();
+        crate::read_metrics::reset_read_metrics();
+
+        let first = read_base_page(0).unwrap();
+        let second = read_base_page(0).unwrap();
+        let metrics = crate::read_metrics::read_metrics_snapshot();
+
+        assert_eq!(first, page);
+        assert_eq!(second, page);
+        assert_eq!(metrics.stable_data_read_calls, 2);
+        assert_eq!(metrics.stable_data_read_bytes, page_size() * 2);
+        assert_eq!(metrics.page_table_root_misses, 1);
+        assert_eq!(metrics.page_table_root_hits, 1);
+        assert_eq!(metrics.page_table_segment_misses, 1);
+        assert_eq!(metrics.page_table_segment_hits, 1);
+        assert_eq!(metrics.superblock_loads, 2);
     }
 }

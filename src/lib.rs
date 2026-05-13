@@ -7,6 +7,9 @@
 pub mod api;
 pub mod config;
 pub mod db;
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub mod read_metrics;
 #[doc(hidden)]
 pub mod sqlite_vfs;
 #[doc(hidden)]
