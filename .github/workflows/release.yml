@@ -29,6 +29,14 @@ jobs:
       - run: cargo test
       - run: cargo build --target wasm32-unknown-unknown --features canister-api
       - run: npm run test:pocketic
+      - name: Check wasm imports
+        run: |
+          imports="$(wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm | grep '<-' || true)"
+          echo "$imports"
+          if echo "$imports" | grep -v '<- ic0\.'; then
+            echo "unexpected non-ic0 import" >&2
+            exit 1
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           files: target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm

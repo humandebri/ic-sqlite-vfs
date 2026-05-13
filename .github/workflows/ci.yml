@@ -31,7 +31,9 @@ jobs:
       - run: npm run test:pocketic
       - name: Check wasm imports
         run: |
-          if wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm | grep '<- env\\.'; then
-            echo "unexpected env import" >&2
+          imports="$(wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm | grep '<-' || true)"
+          echo "$imports"
+          if echo "$imports" | grep -v '<- ic0\.'; then
+            echo "unexpected non-ic0 import" >&2
             exit 1
           fi

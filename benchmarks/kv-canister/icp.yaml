@@ -1,0 +1,15 @@
+canisters:
+  - name: ic-sqlite-vfs-kv-bench
+    build:
+      steps:
+        - type: script
+          commands:
+            - cargo build --target wasm32-unknown-unknown --release
+            - cp target/wasm32-unknown-unknown/release/ic_sqlite_vfs_kv_bench.wasm "$ICP_WASM_OUTPUT_PATH"
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata candid:service -f kv_bench.did -v public --keep-name-section
+
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 8001

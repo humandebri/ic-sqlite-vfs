@@ -1,0 +1,11 @@
+type BenchReport = record {
+  rows : nat64;
+  instructions : nat64;
+  checksum : nat64;
+};
+
+service : {
+  bench_reset : (nat32) -> (variant { Ok : BenchReport; Err : text });
+  bench_read : (nat32) -> (variant { Ok : BenchReport; Err : text }) query;
+  bench_write : (nat32) -> (variant { Ok : BenchReport; Err : text });
+}

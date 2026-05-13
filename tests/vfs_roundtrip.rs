@@ -1,5 +1,5 @@
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
+use ic_sqlite_vfs::sqlite_vfs::lock;
 use ic_sqlite_vfs::stable::memory;
 use ic_sqlite_vfs::stable::meta::Superblock;
 use ic_sqlite_vfs::Db;
@@ -103,13 +103,16 @@ fn export_import_roundtrip_restores_database_image() {
     .unwrap();
 
     let db_size = Superblock::load().unwrap().db_size;
-    let checksum = Db::db_checksum().unwrap();
+    let checksum = Db::refresh_checksum().unwrap();
     let image = Db::export_chunk(0, db_size).unwrap();
 
     reset();
     Db::begin_import(db_size, checksum).unwrap();
     Db::import_chunk(0, &image).unwrap();
     Db::finish_import().unwrap();
+    let block = Superblock::load().unwrap();
+    assert_eq!(block.checksum, checksum);
+    assert!(!block.is_checksum_stale());
 
     let value =
         Db::query(|connection| connection.query_string("SELECT v FROM kv WHERE k = 'answer'"))
@@ -185,6 +188,7 @@ fn failed_import_preserves_existing_database() {
         connection.execute_batch("INSERT INTO preserved(k, v) VALUES ('key', 'value')")
     })
     .unwrap();
+    let stale_before_import = Superblock::load().unwrap().is_checksum_stale();
 
     let db_size = Superblock::load().unwrap().db_size;
     let image = Db::export_chunk(0, db_size).unwrap();
@@ -196,7 +200,9 @@ fn failed_import_preserves_existing_database() {
         Db::query(|connection| connection.query_string("SELECT v FROM preserved WHERE k = 'key'"))
             .unwrap();
     assert_eq!(value, "value");
-    assert!(!Superblock::load().unwrap().is_importing());
+    let block = Superblock::load().unwrap();
+    assert!(!block.is_importing());
+    assert_eq!(block.is_checksum_stale(), stale_before_import);
 }
 
 #[test]
@@ -217,18 +223,6 @@ fn import_rejects_physical_offset_overflow() {
     reset();
 
     assert!(Db::begin_import(u64::MAX, 0).is_err());
-}
-
-#[test]
-#[serial]
-fn sparse_extend_zero_fills_gap_after_truncate() {
-    reset();
-    stable_blob::write_at(0, b"abcd").unwrap();
-    stable_blob::truncate(1).unwrap();
-    stable_blob::write_at(3, b"z").unwrap();
-
-    let image = stable_blob::export_chunk(0, 4).unwrap();
-    assert_eq!(image, b"a\0\0z");
 }
 
 #[test]

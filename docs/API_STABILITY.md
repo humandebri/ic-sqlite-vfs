@@ -13,7 +13,7 @@ For all `0.x` releases, breaking changes may include:
 - `Db` facade signatures
 - migration API
 - import/export API
-- checksum algorithm
+- checksum meaning and algorithm
 - compile-time SQLite flags
 
 Patch releases should remain bug-fix only when practical. Production users
@@ -39,10 +39,18 @@ changes the stable layout, migrate with export/import:
 
 ```text
 offset 0..64KiB      superblock
-offset 64KiB..       SQLite database image
+offset 64KiB..       active and inactive SQLite database images
 ```
 
-The SQLite database image itself is portable through the chunked export API.
+The superblock stores the active DB image offset and logical size. The SQLite
+database image itself is portable through the chunked export API.
+
+In `0.1.0`, `checksum` is last verified checksum metadata. It is not a
+durability boundary. Update commits use a heap write overlay, publish a new
+active DB image through the superblock, advance `last_tx_id`, and may set
+`checksum_stale`. `db_refresh_checksum` and `db_refresh_checksum_chunk` are the
+only operations that persistently update the stored checksum after a normal
+commit.
 
 ## Road To Stable
 

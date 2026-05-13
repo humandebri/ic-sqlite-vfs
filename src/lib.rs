@@ -13,7 +13,7 @@ pub mod stable;
 pub use db::{Db, DbError};
 
 #[cfg(feature = "canister-api")]
-use api::DbMeta;
+use api::{ChecksumRefresh, DbMeta};
 
 #[cfg(feature = "canister-api")]
 ic_cdk::export_candid!();

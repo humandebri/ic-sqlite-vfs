@@ -20,6 +20,8 @@ exclude = [
 [features]
 default = []
 canister-api = []
+canister-api-test-failpoints = ["canister-api"]
+canister-api-v1-schema = ["canister-api"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

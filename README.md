@@ -58,12 +58,17 @@ Stable memory layout:
 
 ```text
 offset 0..64KiB      superblock
-offset 64KiB..       SQLite database image
+offset 64KiB..       active and inactive SQLite database images
 ```
 
 The superblock stores magic, schema version, logical DB size, transaction id,
-checksum, import state, and flags. The SQLite database header starts at byte 0
-of the DB image region.
+active DB image offset, last verified checksum, import state, and flags. The
+SQLite database header starts at byte 0 of the active DB image.
+
+`checksum` is verification metadata. Normal update commits do not scan the full
+DB image. They advance `last_tx_id` and set `checksum_stale`. A controller can
+run `db_refresh_checksum` to recompute the checksum, store it, and clear
+`checksum_stale`.
 
 ## SQLite Settings
 
@@ -80,7 +85,10 @@ PRAGMA cache_size = -32768;
 PRAGMA busy_timeout = 0;
 ```
 
-Durability is based on IC message atomicity, not `fsync`.
+Durability is based on IC message atomicity and a heap write overlay, not
+`fsync`. During an update call, VFS writes stay in heap memory until SQLite
+`COMMIT` succeeds. The committed image is then written to inactive stable
+memory and made active by the final superblock update.
 
 Rules:
 
@@ -90,6 +98,54 @@ Rules:
 - WAL is disabled
 - journal and temp data stay in heap memory
 - only the DB image is stored in stable memory
+- failed update calls return `Err` without changing the active DB image
+
+Query complexity is the consuming canister's responsibility. This crate does
+not inspect arbitrary SQL for index use or planner cost. Public APIs should
+expose bounded application queries with explicit `WHERE` clauses, indexes,
+`LIMIT`/pagination, and input length caps. The reference canister intentionally
+does not expose an arbitrary SQL endpoint.
+
+Treat these patterns as unsafe for public canister APIs unless they are tightly
+bounded and measured:
+
+- full table scans and filters without a primary key or index
+- huge result sets or unpaginated reads
+- `LIKE '%foo%'`
+- join-heavy queries
+- unbounded `ORDER BY`
+- huge `BLOB` values
+
+An IC update or query has a finite instruction/cycles budget. Fetching many rows
+in one call can exhaust that budget and trap even when SQLite itself is working
+as designed. Prefer point reads, indexed range reads, and explicit page sizes.
+
+## Why Not ic-stable-structures?
+
+Use `ic-stable-structures` when the data model is a key-value store, BTree, or
+append-only log. It is simpler, has fewer moving parts, and avoids SQL planner
+costs.
+
+Use this crate only when SQLite is worth the extra surface area: schema
+migrations, compound indexes, relational constraints, or ad-hoc queries that
+would otherwise become custom storage logic.
+
+## Why Not rusqlite?
+
+`rusqlite` is the usual choice for SQLite in normal Rust programs. This crate
+is for IC canisters that store SQLite directly in stable memory.
+
+The bundled SQLite build uses `SQLITE_THREADSAFE=0`, which removes SQLite's
+internal mutex code. That fits the canister model because a `Db::update` or
+`Db::query` closure runs synchronously inside one IC message and must not cross
+an `await` boundary.
+
+`rusqlite` assumes SQLite was built with thread-safety support before exposing
+its safe Rust API. A `SQLITE_THREADSAFE=0` build violates that assumption, so
+this crate uses a small SQLite C FFI facade instead of `rusqlite`.
+
+Use this crate when SQLite must persist in IC stable memory. Use `rusqlite` for
+ordinary Rust applications that store SQLite in regular files.
 
 ## Usage
 
@@ -168,6 +224,52 @@ Db::query(|connection| {
 })
 ```
 
+Typed parameters and row reads are available for SQLite `TEXT`, `INTEGER`,
+`REAL`, `BLOB`, and `NULL` values:
+
+```rust
+use ic_sqlite_vfs::db::NULL;
+
+Db::update(|connection| {
+    let blob = vec![0, 1, 2, 255];
+    connection.execute(
+        "INSERT INTO records(name, count, score, payload, note)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        &[&"alpha", &42_i64, &3.5_f64, &blob, &NULL],
+    )
+})?;
+
+let values = Db::query(|connection| {
+    connection.query_one(
+        "SELECT name, count, score, payload, note FROM records WHERE name = ?1",
+        &[&"alpha"],
+        |row| {
+            Ok((
+                row.get::<String>(0)?,
+                row.get::<i64>(1)?,
+                row.get::<f64>(2)?,
+                row.get::<Vec<u8>>(3)?,
+                row.get::<Option<String>>(4)?,
+            ))
+        },
+    )
+})?;
+```
+
+`Db::update` exposes savepoints only inside the update closure:
+
+```rust
+Db::update(|connection| {
+    connection.execute("INSERT INTO logs(body) VALUES (?1)", &[&"outer"])?;
+    let inner = connection.savepoint(|connection| {
+        connection.execute("INSERT INTO logs(body) VALUES (?1)", &[&"inner"])?;
+        connection.execute("INSERT INTO missing_table(value) VALUES (?1)", &[&1_i64])
+    });
+    assert!(inner.is_err());
+    Ok(())
+})?;
+```
+
 ## Reference Canister
 
 This repository includes a reference canister behind the `canister-api` feature.
@@ -184,10 +286,23 @@ The reference canister exposes:
 - `db_meta`
 - `db_integrity_check`
 - `db_checksum`
+- `db_refresh_checksum`
+- `db_refresh_checksum_chunk`
 - `db_export_chunk`
 - `db_begin_import`, `db_import_chunk`, `db_finish_import`
 
 Admin import/export and integrity methods require the caller to be a controller.
+
+Recommended export sequence:
+
+1. run `db_refresh_checksum_chunk(max_bytes)` until it returns `complete = true`
+2. read `db_meta` and record `db_size`, `checksum`, and `last_tx_id`
+3. read all chunks with `db_export_chunk`
+4. read `db_meta` again and confirm `last_tx_id` did not change
+
+`db_refresh_checksum` still exists for small databases. Large databases should
+use the chunked API so checksum verification does not depend on one update
+message scanning the whole DB image.
 
 ## Build Flags
 
@@ -211,19 +326,28 @@ crate provides `sqlite3_os_init()` and registers only the `icstable` VFS.
 Measured locally on 2026-05-13 with `icp` local network. The main metric is IC
 instructions from `ic_cdk::api::performance_counter(0)`.
 
+The benchmark harness lives in `benchmarks/kv-canister` and can be run with:
+
+```sh
+scripts/bench-kv-local.sh 1000
+```
+
+The benchmark project uses local gateway port `8001` to avoid clashing with the
+default `icp` local network on `8000`.
+
 KV workload, 1000 rows:
 
 | Workload | ic-sqlite-vfs | wasi2ic + ic-rusqlite | Result |
 |---|---:|---:|---:|
-| reset + insert | 21.27M | 149.36M | 7.0x fewer instructions |
-| point read | 22.63M | 44.53M | 2.0x fewer instructions |
-| insert/update | 23.78M | 172.56M | 7.3x fewer instructions |
+| reset + insert | 20.64M | 149.36M | 7.2x fewer instructions |
+| point read | 23.36M | 44.53M | 1.9x fewer instructions |
+| insert/update | 22.65M | 172.56M | 7.6x fewer instructions |
 
 Memory after the 1000-row run:
 
 | Implementation | Canister memory |
 |---|---:|
-| ic-sqlite-vfs | 3.58 MB |
+| ic-sqlite-vfs | 3.96 MB |
 | wasi2ic + ic-rusqlite | 89.64 MB |
 
 Wasm size:
@@ -238,12 +362,16 @@ include `icp canister call` process startup:
 
 | Workload | ic-sqlite-vfs | wasi2ic + ic-rusqlite |
 |---|---:|---:|
-| reset + insert 1000 | 0.26s | 0.20s |
-| point read 1000 | 0.04s | 0.06s |
-| insert/update 1000 | 0.21s | 0.22s |
+| reset + insert 1000 | 0.27s | 0.20s |
+| point read 1000 | 0.45s | 0.06s |
+| insert/update 1000 | 0.31s | 0.22s |
 
 The instruction gap comes from removing WASI fd emulation and mapping SQLite
 pager I/O directly to stable memory offsets.
+
+The write workload numbers exclude a full DB checksum scan from the commit
+path. `db_refresh_checksum` and `db_refresh_checksum_chunk` are separate
+controller verification operations.
 
 ## Tests
 
@@ -252,9 +380,12 @@ cargo fmt --check
 bash scripts/check-no-await.sh
 cargo test
 cargo test --features canister-api
+cargo build --target wasm32-unknown-unknown
+cargo build --target wasm32-unknown-unknown --features canister-api
 icp build
 npm run test:pocketic
 cargo package --no-verify --offline
+wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm
 ```
 
 Current coverage:
@@ -266,9 +397,11 @@ Current coverage:
 - chunked export/import with checksum verification
 - failed import preserving the existing database
 - capacity and sparse write bounds
+- failpoints for overlay write, truncate, commit capacity, DB image flush, and superblock publish
+- stable write trap, grow failure, SQLite step error, and panic during update
 - fuzz-style deterministic operation sequences
 - long-running transaction endurance
-- PocketIC upgrade persistence
+- PocketIC upgrade persistence and schema migration persistence
 - wasm import audit: only `ic0.*`
 
 ## Operations

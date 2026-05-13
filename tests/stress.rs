@@ -82,7 +82,7 @@ fn capacity_and_import_bounds_are_rejected() {
     .unwrap();
 
     let db_size = Superblock::load().unwrap().db_size;
-    let checksum = Db::db_checksum().unwrap();
+    let checksum = Db::refresh_checksum().unwrap();
     Db::begin_import(db_size, checksum).unwrap();
     let result = Db::import_chunk(db_size + 1, &[1, 2, 3]);
 

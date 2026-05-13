@@ -4,17 +4,31 @@ type DbMeta = record {
   last_tx_id : nat64;
   flags : nat64;
   checksum : nat64;
+  checksum_stale : bool;
+  checksum_refreshing : bool;
+  checksum_refresh_offset : nat64;
   importing : bool;
   import_written_until : nat64;
+};
+
+type ChecksumRefresh = record {
+  complete : bool;
+  checksum : nat64;
+  scanned_bytes : nat64;
+  db_size : nat64;
 };
 
 service : {
   kv_put : (text, text) -> (variant { Ok : null; Err : text });
   kv_get : (text) -> (variant { Ok : opt text; Err : text }) query;
+  kv_set_note : (text, text) -> (variant { Ok : null; Err : text });
+  kv_get_note : (text) -> (variant { Ok : opt text; Err : text }) query;
   kv_count : () -> (variant { Ok : nat64; Err : text }) query;
   db_meta : () -> (variant { Ok : DbMeta; Err : text }) query;
   db_integrity_check : () -> (variant { Ok : text; Err : text }) query;
   db_checksum : () -> (variant { Ok : nat64; Err : text }) query;
+  db_refresh_checksum : () -> (variant { Ok : nat64; Err : text });
+  db_refresh_checksum_chunk : (nat64) -> (variant { Ok : ChecksumRefresh; Err : text });
   db_export_chunk : (nat64, nat64) -> (variant { Ok : vec nat8; Err : text }) query;
   db_begin_import : (nat64, nat64) -> (variant { Ok : null; Err : text });
   db_import_chunk : (nat64, vec nat8) -> (variant { Ok : null; Err : text });

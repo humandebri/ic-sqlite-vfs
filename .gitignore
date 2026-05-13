@@ -1,3 +1,5 @@
 .icp/cache/
 target/
 node_modules/
+benchmarks/kv-canister/.icp/cache/
+benchmarks/kv-canister/target/

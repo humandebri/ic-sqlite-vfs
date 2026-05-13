@@ -4,7 +4,11 @@
 //! VFS behavior can be verified without a replica.
 
 use crate::config::STABLE_PAGE_SIZE;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    test,
+    feature = "canister-api-test-failpoints"
+))]
 use std::cell::RefCell;
 
 #[derive(Debug, thiserror::Error)]
@@ -30,13 +34,45 @@ pub enum StableMemoryError {
     ImportIncomplete { written_until: u64, db_size: u64 },
     #[error("checksum mismatch: expected={expected}, actual={actual}")]
     ChecksumMismatch { expected: u64, actual: u64 },
+    #[error("checksum refresh chunk size must be greater than zero")]
+    ChecksumRefreshChunkEmpty,
+    #[error("stable blob failpoint: {0}")]
+    Failpoint(&'static str),
     #[error("superblock metadata checksum mismatch")]
     MetaChecksumMismatch,
+}
+
+#[cfg(any(test, feature = "canister-api-test-failpoints"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryFailpoint {
+    GrowFailed { ordinal: u64 },
+    TrapAfterWrite { ordinal: u64 },
+}
+
+#[cfg(any(test, feature = "canister-api-test-failpoints"))]
+thread_local! {
+    static FAILPOINT: RefCell<Option<MemoryFailpoint>> = const { RefCell::new(None) };
+    static GROW_COUNT: RefCell<u64> = const { RefCell::new(0) };
+    static WRITE_COUNT: RefCell<u64> = const { RefCell::new(0) };
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     static TEST_MEMORY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(any(test, feature = "canister-api-test-failpoints"))]
+pub fn set_failpoint(failpoint: MemoryFailpoint) {
+    FAILPOINT.with(|slot| *slot.borrow_mut() = Some(failpoint));
+    GROW_COUNT.with(|count| *count.borrow_mut() = 0);
+    WRITE_COUNT.with(|count| *count.borrow_mut() = 0);
+}
+
+#[cfg(any(test, feature = "canister-api-test-failpoints"))]
+pub fn clear_failpoint() {
+    FAILPOINT.with(|slot| *slot.borrow_mut() = None);
+    GROW_COUNT.with(|count| *count.borrow_mut() = 0);
+    WRITE_COUNT.with(|count| *count.borrow_mut() = 0);
 }
 
 pub fn size_pages() -> u64 {
@@ -66,6 +102,14 @@ pub fn ensure_capacity(end_offset: u64) -> Result<(), StableMemoryError> {
         .checked_sub(current_bytes)
         .ok_or(StableMemoryError::OffsetOverflow)?;
     let pages = missing.div_ceil(STABLE_PAGE_SIZE);
+
+    #[cfg(any(test, feature = "canister-api-test-failpoints"))]
+    if hit_grow_failpoint() {
+        return Err(StableMemoryError::GrowFailed {
+            current_pages: current_bytes / STABLE_PAGE_SIZE,
+            required_pages: current_bytes / STABLE_PAGE_SIZE + pages,
+        });
+    }
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -151,12 +195,29 @@ pub fn write(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
         })?;
     }
 
+    #[cfg(any(test, feature = "canister-api-test-failpoints"))]
+    if hit_write_trap_failpoint() {
+        fail_after_stable_write();
+    }
+
     Ok(())
 }
 
 pub fn reset_for_tests() {
     #[cfg(not(target_arch = "wasm32"))]
     TEST_MEMORY.with(|memory| memory.borrow_mut().clear());
+    #[cfg(any(test, feature = "canister-api-test-failpoints"))]
+    clear_failpoint();
+}
+
+#[cfg(test)]
+pub fn snapshot_for_tests() -> Vec<u8> {
+    TEST_MEMORY.with(|memory| memory.borrow().clone())
+}
+
+#[cfg(test)]
+pub fn restore_for_tests(snapshot: Vec<u8>) {
+    TEST_MEMORY.with(|memory| *memory.borrow_mut() = snapshot);
 }
 
 fn checked_end(offset: u64, len: usize) -> Result<u64, StableMemoryError> {
@@ -164,4 +225,53 @@ fn checked_end(offset: u64, len: usize) -> Result<u64, StableMemoryError> {
     offset
         .checked_add(len)
         .ok_or(StableMemoryError::OffsetOverflow)
+}
+
+#[cfg(any(test, feature = "canister-api-test-failpoints"))]
+fn hit_grow_failpoint() -> bool {
+    GROW_COUNT.with(|count| {
+        let mut count = count.borrow_mut();
+        *count += 1;
+        let current = *count;
+        FAILPOINT.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if *slot == Some(MemoryFailpoint::GrowFailed { ordinal: current }) {
+                *slot = None;
+                true
+            } else {
+                false
+            }
+        })
+    })
+}
+
+#[cfg(any(test, feature = "canister-api-test-failpoints"))]
+fn hit_write_trap_failpoint() -> bool {
+    WRITE_COUNT.with(|count| {
+        let mut count = count.borrow_mut();
+        *count += 1;
+        let current = *count;
+        FAILPOINT.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if *slot == Some(MemoryFailpoint::TrapAfterWrite { ordinal: current }) {
+                *slot = None;
+                true
+            } else {
+                false
+            }
+        })
+    })
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "canister-api-test-failpoints"))]
+fn fail_after_stable_write() -> ! {
+    ic_cdk::trap("stable write failpoint");
+}
+
+#[cfg(all(
+    any(test, feature = "canister-api-test-failpoints"),
+    not(all(target_arch = "wasm32", feature = "canister-api-test-failpoints"))
+))]
+fn fail_after_stable_write() -> ! {
+    panic!("stable write failpoint");
 }
