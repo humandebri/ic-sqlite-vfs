@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "SQLite VFS backed directly by Internet Computer stable memory"
 readme = "README.md"
 documentation = "https://docs.rs/ic-sqlite-vfs"
+repository = "https://github.com/humandebri/ic-sqlite-vfs"
 keywords = ["sqlite", "internet-computer", "stable-memory", "vfs", "icp"]
 categories = ["database", "embedded", "wasm"]
 exclude = [
