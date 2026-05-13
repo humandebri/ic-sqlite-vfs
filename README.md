@@ -1,5 +1,9 @@
 # ic-sqlite-vfs
 
+[![crates.io](https://img.shields.io/crates/v/ic-sqlite-vfs.svg)](https://crates.io/crates/ic-sqlite-vfs)
+[![docs.rs](https://docs.rs/ic-sqlite-vfs/badge.svg)](https://docs.rs/ic-sqlite-vfs)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 SQLite VFS for the Internet Computer that stores the SQLite database image
 directly in IC stable memory.
 
@@ -11,8 +15,8 @@ SQLite pager
 ```
 
 `ic-sqlite-vfs` does not use POSIX files, WASI files, stable-fs, or wasi2ic.
-SQLite sees `/main.db`; the canister stores it as a contiguous byte range in
-stable memory.
+SQLite sees `/main.db`; the VFS maps logical SQLite pages to immutable stable
+memory pages through a segmented page table.
 
 ## Status
 
@@ -58,12 +62,13 @@ Stable memory layout:
 
 ```text
 offset 0..64KiB      superblock
-offset 64KiB..       active and inactive SQLite database images
+offset 64KiB..       immutable SQLite pages, segment tables, and root tables
 ```
 
 The superblock stores magic, schema version, logical DB size, transaction id,
-active DB image offset, last verified checksum, import state, and flags. The
-SQLite database header starts at byte 0 of the active DB image.
+active root table offset, active segment count, last verified checksum, import
+state, and flags. The SQLite database header is logical page 0; the VFS resolves
+logical pages through a root table and fixed 256-page segment tables.
 
 `checksum` is verification metadata. Normal update commits do not scan the full
 DB image. They advance `last_tx_id` and set `checksum_stale`. A controller can
@@ -87,8 +92,8 @@ PRAGMA busy_timeout = 0;
 
 Durability is based on IC message atomicity and a heap write overlay, not
 `fsync`. During an update call, VFS writes stay in heap memory until SQLite
-`COMMIT` succeeds. The committed image is then written to inactive stable
-memory and made active by the final superblock update.
+`COMMIT` succeeds. Dirty logical pages and a new page table are appended to
+stable memory, then made active by the final superblock update.
 
 Rules:
 
@@ -98,7 +103,7 @@ Rules:
 - WAL is disabled
 - journal and temp data stay in heap memory
 - only the DB image is stored in stable memory
-- failed update calls return `Err` without changing the active DB image
+- failed update calls return `Err` without changing the active page table
 
 Query complexity is the consuming canister's responsibility. This crate does
 not inspect arbitrary SQL for index use or planner cost. Public APIs should
@@ -154,7 +159,7 @@ only for this repository's reference canister.
 
 ```toml
 [dependencies]
-ic-sqlite-vfs = { version = "0.1.0", default-features = false }
+ic-sqlite-vfs = { version = "0.1.2", default-features = false }
 ```
 
 Consumers must build bundled SQLite with `SQLITE_OS_OTHER=1` and a C compiler
@@ -175,7 +180,7 @@ Minimal canister pattern:
 
 ```rust
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::Db;
+use ic_sqlite_vfs::{params, Db};
 
 const MIGRATIONS: &[Migration] = &[Migration {
     version: 1,
@@ -193,10 +198,10 @@ fn init() {
 #[ic_cdk::update]
 fn put(key: String, value: String) -> Result<(), String> {
     Db::update(|connection| {
-        connection.execute_with_texts(
+        connection.execute(
             "INSERT INTO kv(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            &[key.as_str(), value.as_str()],
+            params![key, value],
         )
     })
     .map_err(|error| error.to_string())
@@ -205,9 +210,9 @@ fn put(key: String, value: String) -> Result<(), String> {
 #[ic_cdk::query]
 fn get(key: String) -> Result<Option<String>, String> {
     Db::query(|connection| {
-        connection.query_optional_string_with_text(
+        connection.query_optional_scalar::<String>(
             "SELECT value FROM kv WHERE key = ?1",
-            &key,
+            params![key],
         )
     })
     .map_err(|error| error.to_string())
@@ -219,7 +224,7 @@ For repeated operations in one message, reuse a prepared statement:
 ```rust
 Db::query(|connection| {
     let mut statement = connection.prepare("SELECT value FROM kv WHERE key = ?1")?;
-    let value = statement.query_optional_string_with_text("alpha")?;
+    let value = statement.query_optional_scalar::<String>(params!["alpha"])?;
     Ok(value)
 })
 ```
@@ -229,20 +234,21 @@ Typed parameters and row reads are available for SQLite `TEXT`, `INTEGER`,
 
 ```rust
 use ic_sqlite_vfs::db::NULL;
+use ic_sqlite_vfs::params;
 
 Db::update(|connection| {
     let blob = vec![0, 1, 2, 255];
     connection.execute(
         "INSERT INTO records(name, count, score, payload, note)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        &[&"alpha", &42_i64, &3.5_f64, &blob, &NULL],
+        params!["alpha", 42_i64, 3.5_f64, blob, NULL],
     )
 })?;
 
 let values = Db::query(|connection| {
     connection.query_one(
         "SELECT name, count, score, payload, note FROM records WHERE name = ?1",
-        &[&"alpha"],
+        params!["alpha"],
         |row| {
             Ok((
                 row.get::<String>(0)?,
@@ -260,10 +266,10 @@ let values = Db::query(|connection| {
 
 ```rust
 Db::update(|connection| {
-    connection.execute("INSERT INTO logs(body) VALUES (?1)", &[&"outer"])?;
+    connection.execute("INSERT INTO logs(body) VALUES (?1)", params!["outer"])?;
     let inner = connection.savepoint(|connection| {
-        connection.execute("INSERT INTO logs(body) VALUES (?1)", &[&"inner"])?;
-        connection.execute("INSERT INTO missing_table(value) VALUES (?1)", &[&1_i64])
+        connection.execute("INSERT INTO logs(body) VALUES (?1)", params!["inner"])?;
+        connection.execute("INSERT INTO missing_table(value) VALUES (?1)", params![1_i64])
     });
     assert!(inner.is_err());
     Ok(())
@@ -289,7 +295,8 @@ The reference canister exposes:
 - `db_refresh_checksum`
 - `db_refresh_checksum_chunk`
 - `db_export_chunk`
-- `db_begin_import`, `db_import_chunk`, `db_finish_import`
+- `db_begin_import`, `db_import_chunk`, `db_finish_import`, `db_cancel_import`
+- `db_compact`
 
 Admin import/export and integrity methods require the caller to be a controller.
 
@@ -360,6 +367,20 @@ Wasm size:
 The instruction gap comes from removing WASI fd emulation and mapping SQLite
 pager I/O directly to stable memory offsets.
 
+Native performance probe, measured locally on 2026-05-13 with
+`cargo test --test sqlite_perf_probe -- --ignored --nocapture`:
+
+| Rows | batch insert | single update after insert | refresh checksum | db_size |
+|---:|---:|---:|---:|---:|
+| 100 | 0 ms | 0 ms | 0 ms | 64 KiB |
+| 1,000 | 1 ms | 1 ms | 0 ms | 144 KiB |
+| 10,000 | 15 ms | 0 ms | 3 ms | 672 KiB |
+| 20,000 | 31 ms | 0 ms | 5 ms | 1.25 MiB |
+| 100,000 | 155 ms | 1 ms | 24 ms | 6.09 MiB |
+
+For 20,000 rows, indexed point reads took 90 ms, `LIKE '%stable%'` scan took
+2 ms, and full logical export took 0 ms in the same native probe.
+
 The write workload numbers exclude a full DB checksum scan from the commit
 path. `db_refresh_checksum` and `db_refresh_checksum_chunk` are separate
 controller verification operations.
@@ -384,15 +405,16 @@ Current coverage:
 - VFS read/write/truncate/filesize behavior
 - rollback on SQL error
 - read-only query mode
-- reusable prepared statements
+- reusable statements and 32-entry LRU cached prepared statements
 - chunked export/import with checksum verification
 - failed import preserving the existing database
 - capacity and sparse write bounds
-- failpoints for overlay write, truncate, commit capacity, DB image flush, and superblock publish
+- failpoints for overlay write, truncate, commit capacity, page write, page table write, and superblock publish
+- segmented page-map commit and truncate behavior
 - stable write trap, grow failure, SQLite step error, and panic during update
 - fuzz-style deterministic operation sequences
 - long-running transaction endurance
-- PocketIC upgrade persistence and schema migration persistence
+- PocketIC upgrade persistence
 - wasm import audit: only `ic0.*`
 
 ## Operations

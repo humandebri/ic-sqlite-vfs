@@ -26,6 +26,8 @@ pub enum StableMemoryError {
     ImportAlreadyStarted,
     #[error("import session not started")]
     ImportNotStarted,
+    #[error("database update already in progress")]
+    UpdateInProgress,
     #[error("import chunk out of order: offset={offset}, expected={expected}")]
     ImportOutOfOrder { offset: u64, expected: u64 },
     #[error("import chunk out of bounds: offset={offset}, len={len}, db_size={db_size}")]
@@ -40,6 +42,8 @@ pub enum StableMemoryError {
     Failpoint(&'static str),
     #[error("superblock metadata checksum mismatch")]
     MetaChecksumMismatch,
+    #[error("unsupported stable layout version: {0}")]
+    UnsupportedLayoutVersion(u64),
 }
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]

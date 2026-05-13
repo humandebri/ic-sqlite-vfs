@@ -24,6 +24,7 @@ struct Snapshot {
 fn reset() {
     stable_blob::clear_failpoint();
     stable_blob::rollback_update();
+    stable_blob::invalidate_read_cache();
     statement::clear_step_failpoint();
     memory::reset_for_tests();
     lock::reset_for_tests();
@@ -32,6 +33,7 @@ fn reset() {
 fn restart_after_failed_message(snapshot: Vec<u8>) {
     stable_blob::clear_failpoint();
     stable_blob::rollback_update();
+    stable_blob::invalidate_read_cache();
     statement::clear_step_failpoint();
     memory::clear_failpoint();
     memory::restore_for_tests(snapshot);
@@ -64,8 +66,10 @@ fn snapshot() -> Snapshot {
 fn assert_database_unchanged(before: &Snapshot) {
     assert_eq!(&snapshot(), before);
     assert_eq!(Db::integrity_check().unwrap(), "ok");
-    let count =
-        Db::query(|connection| connection.query_i64("SELECT COUNT(*) FROM durable")).unwrap();
+    let count = Db::query(|connection| {
+        connection.query_scalar::<i64>("SELECT COUNT(*) FROM durable", crate::params![])
+    })
+    .unwrap();
     assert_eq!(count, 1);
 }
 
@@ -114,6 +118,51 @@ fn sparse_extend_zero_fills_gap_after_truncate() {
 
 #[test]
 #[serial]
+fn segmented_commit_rewrites_only_dirty_segment_tables() {
+    reset();
+    let segment_size = u64::from(crate::config::SQLITE_PAGE_SIZE) * 256;
+    blob::write_at(0, b"a").unwrap();
+    blob::write_at(segment_size, b"b").unwrap();
+    let root = stable_blob::debug_root_table_for_tests().unwrap();
+    assert_eq!(root.len(), 2);
+
+    blob::write_at(7, b"x").unwrap();
+    let updated = stable_blob::debug_root_table_for_tests().unwrap();
+    assert_eq!(changed_root_entries(&root, &updated), vec![0]);
+
+    stable_blob::begin_update().unwrap();
+    blob::write_at(8, b"y").unwrap();
+    blob::write_at(segment_size + 8, b"z").unwrap();
+    stable_blob::commit_update().unwrap();
+    let multi = stable_blob::debug_root_table_for_tests().unwrap();
+    assert_eq!(changed_root_entries(&updated, &multi), vec![0, 1]);
+}
+
+#[test]
+#[serial]
+fn segmented_truncate_shrinks_root_and_zero_fills_boundary_tail() {
+    reset();
+    let page_size = u64::from(crate::config::SQLITE_PAGE_SIZE);
+    let segment_size = page_size * 256;
+    blob::write_at(segment_size, b"a").unwrap();
+    blob::write_at(segment_size + page_size, b"stale").unwrap();
+    assert_eq!(stable_blob::debug_root_table_for_tests().unwrap().len(), 2);
+
+    blob::truncate(segment_size + 1).unwrap();
+    blob::write_at(segment_size + page_size + 2, b"n").unwrap();
+    let image = blob::export_chunk(segment_size, page_size + 3).unwrap();
+    assert_eq!(image[0], b'a');
+    assert!(image[1..usize::try_from(page_size + 2).unwrap()]
+        .iter()
+        .all(|byte| *byte == 0));
+    assert_eq!(image[usize::try_from(page_size + 2).unwrap()], b'n');
+
+    blob::truncate(1).unwrap();
+    assert_eq!(stable_blob::debug_root_table_for_tests().unwrap().len(), 1);
+}
+
+#[test]
+#[serial]
 fn failed_commit_capacity_keeps_active_image_unchanged() {
     assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::CommitCapacity);
 }
@@ -128,6 +177,12 @@ fn failed_commit_chunk_write_keeps_active_image_unchanged() {
 #[serial]
 fn failed_commit_superblock_store_keeps_active_image_unchanged() {
     assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::CommitSuperblockStore);
+}
+
+#[test]
+#[serial]
+fn failed_commit_page_table_write_keeps_active_image_unchanged() {
+    assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::CommitPageTableWrite);
 }
 
 fn assert_commit_failpoint_preserves_snapshot(failpoint: StableBlobFailpoint) {
@@ -158,7 +213,7 @@ fn stable_write_trap_ordinals_preserve_active_image_after_restart() {
             let _ = Db::update(|connection| {
                 connection.execute(
                     "INSERT INTO durable(k, v) VALUES (?1, ?2)",
-                    &[&"after", &"trap"],
+                    crate::params!["after", "trap"],
                 )
             });
         }));
@@ -180,7 +235,7 @@ fn stable_grow_failure_keeps_active_image_unchanged() {
     let result = Db::update(|connection| {
         connection.execute(
             "INSERT INTO durable(k, v) VALUES (?1, ?2)",
-            &[&"after", &"grow"],
+            crate::params!["after", "grow"],
         )
     });
 
@@ -202,7 +257,7 @@ fn sqlite_step_error_rolls_back_without_changing_active_image() {
     let result = Db::update(|connection| {
         connection.execute(
             "INSERT INTO durable(k, v) VALUES (?1, ?2)",
-            &[&"after", &"step"],
+            crate::params!["after", "step"],
         )
     });
 
@@ -226,4 +281,13 @@ fn panic_inside_update_drops_overlay_without_changing_active_image() {
 
     assert!(result.is_err());
     assert_database_unchanged(&before);
+}
+
+fn changed_root_entries(before: &[u64], after: &[u64]) -> Vec<usize> {
+    before
+        .iter()
+        .zip(after)
+        .enumerate()
+        .filter_map(|(index, (before, after))| (before != after).then_some(index))
+        .collect()
 }

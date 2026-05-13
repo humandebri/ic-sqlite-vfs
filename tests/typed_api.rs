@@ -1,11 +1,12 @@
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::db::{DbError, NULL};
-use ic_sqlite_vfs::sqlite_vfs::lock;
+use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
 use ic_sqlite_vfs::stable::memory;
-use ic_sqlite_vfs::Db;
+use ic_sqlite_vfs::{named_params, params, Db};
 use serial_test::serial;
 
 fn reset() {
+    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
 }
@@ -33,7 +34,7 @@ fn typed_bind_and_column_read_cover_sqlite_storage_classes() {
             "INSERT INTO typed_values(
                 id, text_value, integer_value, real_value, blob_value, null_value
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            &[&1_i64, &"alpha", &42_i64, &3.5_f64, &blob, &NULL],
+            params![1_i64, "alpha", 42_i64, 3.5_f64, blob, NULL],
         )
     })
     .unwrap();
@@ -42,7 +43,7 @@ fn typed_bind_and_column_read_cover_sqlite_storage_classes() {
         connection.query_one(
             "SELECT text_value, integer_value, real_value, blob_value, null_value
              FROM typed_values WHERE id = ?1",
-            &[&1_i64],
+            params![1_i64],
             |row| {
                 Ok((
                     row.get::<String>(0)?,
@@ -75,7 +76,7 @@ fn text_column_read_preserves_embedded_nul_bytes() {
     .unwrap();
 
     let value = Db::query(|connection| {
-        connection.query_string("SELECT body FROM text_values WHERE id = 1")
+        connection.query_scalar::<String>("SELECT body FROM text_values WHERE id = 1", params![])
     })
     .unwrap();
 
@@ -94,16 +95,14 @@ fn query_helpers_report_missing_rows_and_collect_rows() {
 
     Db::update(|connection| {
         let mut statement = connection.prepare("INSERT INTO items(id, name) VALUES (?1, ?2)")?;
-        statement.execute(&[&1_i64, &"one"])?;
-        statement.execute(&[&2_i64, &"two"])?;
+        statement.execute(params![1_i64, "one"])?;
+        statement.execute(params![2_i64, "two"])?;
         Ok(())
     })
     .unwrap();
 
     let names = Db::query(|connection| {
-        connection.query_all("SELECT name FROM items ORDER BY id", &[], |row| {
-            row.get::<String>(0)
-        })
+        connection.query_column::<String>("SELECT name FROM items ORDER BY id", params![])
     })
     .unwrap();
     assert_eq!(names, vec!["one".to_string(), "two".to_string()]);
@@ -111,24 +110,21 @@ fn query_helpers_report_missing_rows_and_collect_rows() {
     let exists = Db::query(|connection| {
         connection.exists(
             "SELECT EXISTS(SELECT 1 FROM items WHERE id = ?1)",
-            &[&2_i64],
+            params![2_i64],
         )
     })
     .unwrap();
     assert!(exists);
 
     let optional = Db::query(|connection| {
-        connection.query_optional("SELECT name FROM items WHERE id = ?1", &[&3_i64], |row| {
-            row.get::<String>(0)
-        })
+        connection
+            .query_optional_scalar::<String>("SELECT name FROM items WHERE id = ?1", params![3_i64])
     })
     .unwrap();
     assert_eq!(optional, None);
 
     let missing = Db::query(|connection| {
-        connection.query_one("SELECT name FROM items WHERE id = ?1", &[&3_i64], |row| {
-            row.get::<String>(0)
-        })
+        connection.query_scalar::<String>("SELECT name FROM items WHERE id = ?1", params![3_i64])
     });
     assert!(matches!(missing, Err(DbError::NotFound)));
 }
@@ -146,7 +142,7 @@ fn named_parameters_bind_by_sql_name() {
     Db::update(|connection| {
         connection.execute_named(
             "INSERT INTO named_items(id, name, score) VALUES (:id, @name, $score)",
-            &[(":id", &1_i64), ("@name", &"named"), ("$score", &2.5_f64)],
+            named_params![":id" => 1_i64, "@name" => "named", "$score" => 2.5_f64],
         )
     })
     .unwrap();
@@ -154,7 +150,7 @@ fn named_parameters_bind_by_sql_name() {
     let row = Db::query(|connection| {
         connection.query_one_named(
             "SELECT name, score FROM named_items WHERE id = :id",
-            &[(":id", &1_i64)],
+            named_params![":id" => 1_i64],
             |row| Ok((row.get::<String>(0)?, row.get::<f64>(1)?)),
         )
     })
@@ -162,20 +158,18 @@ fn named_parameters_bind_by_sql_name() {
     assert_eq!(row, ("named".to_string(), 2.5));
 
     let missing = Db::query(|connection| {
-        connection.query_optional_named(
+        connection.query_optional_scalar_named::<String>(
             "SELECT name FROM named_items WHERE id = :id",
-            &[(":id", &2_i64)],
-            |row| row.get::<String>(0),
+            named_params![":id" => 2_i64],
         )
     })
     .unwrap();
     assert_eq!(missing, None);
 
     let error = Db::query(|connection| {
-        connection.query_one_named(
+        connection.query_scalar_named::<String>(
             "SELECT name FROM named_items WHERE id = :id",
-            &[(":missing", &1_i64)],
-            |row| row.get::<String>(0),
+            named_params![":missing" => 1_i64],
         )
     });
     assert!(matches!(error, Err(DbError::ParameterNotFound(_))));
@@ -193,27 +187,29 @@ fn statement_row_iterator_steps_until_done() {
     Db::update(|connection| {
         connection.execute(
             "INSERT INTO iter_items(id, name) VALUES (?1, ?2)",
-            &[&1_i64, &"a"],
+            params![1_i64, "a"],
         )?;
         connection.execute(
             "INSERT INTO iter_items(id, name) VALUES (?1, ?2)",
-            &[&2_i64, &"b"],
+            params![2_i64, "b"],
         )
     })
     .unwrap();
 
     let values = Db::query(|connection| {
         let mut statement = connection.prepare("SELECT name FROM iter_items ORDER BY id")?;
-        let mut rows = statement.query(&[])?;
-        let mut values = Vec::new();
-        while let Some(row) = rows.next_row()? {
-            values.push(row.get::<String>(0)?);
-        }
-        Ok(values)
+        statement.query_column::<String>(params![])
     })
     .unwrap();
 
     assert_eq!(values, vec!["a".to_string(), "b".to_string()]);
+
+    let count = Db::query(|connection| {
+        let mut statement = connection.prepare("SELECT COUNT(*) FROM iter_items")?;
+        statement.query_scalar::<i64>(params![])
+    })
+    .unwrap();
+    assert_eq!(count, 2);
 }
 
 #[test]
@@ -227,13 +223,18 @@ fn typed_errors_preserve_constraint_and_type_information() {
     .unwrap();
 
     let duplicate = Db::update(|connection| {
-        connection.execute("INSERT INTO unique_items(name) VALUES (?1)", &[&"same"])?;
-        connection.execute("INSERT INTO unique_items(name) VALUES (?1)", &[&"same"])
+        connection.execute(
+            "INSERT INTO unique_items(name) VALUES (?1)",
+            params!["same"],
+        )?;
+        connection.execute(
+            "INSERT INTO unique_items(name) VALUES (?1)",
+            params!["same"],
+        )
     });
     assert!(matches!(duplicate, Err(DbError::Constraint(_))));
 
-    let mismatch =
-        Db::query(|connection| connection.query_one("SELECT 1", &[], |row| row.get::<String>(0)));
+    let mismatch = Db::query(|connection| connection.query_scalar::<String>("SELECT 1", params![]));
     assert!(matches!(mismatch, Err(DbError::TypeMismatch { .. })));
 }
 
@@ -248,21 +249,22 @@ fn savepoint_rolls_back_inner_work_without_escaping_update() {
     .unwrap();
 
     Db::update(|connection| {
-        connection.execute("INSERT INTO logs(body) VALUES (?1)", &[&"outer"])?;
+        connection.execute("INSERT INTO logs(body) VALUES (?1)", params!["outer"])?;
         let inner = connection.savepoint(|connection| {
-            connection.execute("INSERT INTO logs(body) VALUES (?1)", &[&"inner"])?;
-            connection.execute("INSERT INTO missing_table(value) VALUES (?1)", &[&1_i64])
+            connection.execute("INSERT INTO logs(body) VALUES (?1)", params!["inner"])?;
+            connection.execute(
+                "INSERT INTO missing_table(value) VALUES (?1)",
+                params![1_i64],
+            )
         });
         assert!(inner.is_err());
-        connection.execute("INSERT INTO logs(body) VALUES (?1)", &[&"after"])?;
+        connection.execute("INSERT INTO logs(body) VALUES (?1)", params!["after"])?;
         Ok(())
     })
     .unwrap();
 
     let bodies = Db::query(|connection| {
-        connection.query_all("SELECT body FROM logs ORDER BY id", &[], |row| {
-            row.get::<String>(0)
-        })
+        connection.query_column::<String>("SELECT body FROM logs ORDER BY id", params![])
     })
     .unwrap();
     assert_eq!(bodies, vec!["outer".to_string(), "after".to_string()]);

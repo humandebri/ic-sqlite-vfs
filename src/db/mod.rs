@@ -40,14 +40,24 @@ pub enum DbError {
     Stable(#[from] crate::stable::memory::StableMemoryError),
     #[error("migration version exceeds SQLite INTEGER range: {0}")]
     MigrationVersionOutOfRange(u64),
+    #[error("duplicate migration version: {0}")]
+    DuplicateMigrationVersion(u64),
     #[error("SQL contains an interior NUL byte")]
     InteriorNul,
+    #[error("SQL contains no statement")]
+    EmptySql,
+    #[error("SQL contains trailing text after the first statement")]
+    TrailingSql,
     #[error("text value too large")]
     TextTooLarge,
     #[error("blob value too large")]
     BlobTooLarge,
     #[error("too many SQL parameters")]
     TooManyParameters,
+    #[error("SQL parameter count mismatch: expected {expected}, actual {actual}")]
+    ParameterCountMismatch { expected: usize, actual: usize },
+    #[error("named bind cannot be used with anonymous SQL parameter at index {index}")]
+    AnonymousParameterInNamedBind { index: usize },
     #[error("SQL parameter not found: {0}")]
     ParameterNotFound(String),
 }
@@ -58,6 +68,7 @@ impl Db {
     pub fn init() -> Result<(), DbError> {
         crate::sqlite_vfs::register();
         Superblock::load()?;
+        stable_blob::ensure_page_map_layout()?;
         Ok(())
     }
 
@@ -97,7 +108,9 @@ impl Db {
     }
 
     pub fn integrity_check() -> Result<String, DbError> {
-        Self::query(|connection| connection.query_string("PRAGMA integrity_check"))
+        Self::query(|connection| {
+            connection.query_scalar::<String>("PRAGMA integrity_check", crate::params![])
+        })
     }
 
     pub fn export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, DbError> {
@@ -133,6 +146,16 @@ impl Db {
     pub fn finish_import() -> Result<(), DbError> {
         Self::init()?;
         stable_blob::finish_import().map_err(DbError::from)
+    }
+
+    pub fn cancel_import() -> Result<(), DbError> {
+        Self::init()?;
+        stable_blob::cancel_import().map_err(DbError::from)
+    }
+
+    pub fn compact() -> Result<(), DbError> {
+        Self::init()?;
+        stable_blob::compact().map_err(DbError::from)
     }
 }
 

@@ -1,13 +1,15 @@
 {
   "name": "ic-sqlite-vfs",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "scripts": {
     "build:wasm": "cargo build --target wasm32-unknown-unknown --features canister-api && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs.wasm",
-    "build:wasm:v1": "cargo build --target wasm32-unknown-unknown --no-default-features --features canister-api-v1-schema && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs_v1.wasm",
     "build:wasm:failpoints": "cargo build --target wasm32-unknown-unknown --no-default-features --features canister-api-test-failpoints && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs_failpoints.wasm",
-    "test:pocketic": "npm run build:wasm:v1 && npm run build:wasm && npm run build:wasm:failpoints && node --test tests/pocketic/*.test.mjs"
+    "build:bench:wasm": "cd benchmarks/kv-canister && cargo build --target wasm32-unknown-unknown --release && cd ../.. && mkdir -p target/pocketic && cp benchmarks/kv-canister/target/wasm32-unknown-unknown/release/ic_sqlite_vfs_kv_bench.wasm target/pocketic/ic_sqlite_vfs_kv_bench.wasm",
+    "test:pocketic:regression": "npm run build:wasm && npm run build:wasm:failpoints && node --test tests/pocketic/upgrade.test.mjs",
+    "test:pocketic:perf": "npm run build:bench:wasm && node --test tests/pocketic/perf_regression.test.mjs",
+    "test:pocketic": "npm run test:pocketic:regression && npm run test:pocketic:perf"
   },
   "devDependencies": {
     "@dfinity/candid": "3.4.0",

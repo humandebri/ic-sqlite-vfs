@@ -6,6 +6,7 @@
 pub const SQLITE_PAGE_SIZE: u32 = 16_384;
 pub const SQLITE_CACHE_SIZE_KIB: i32 = 32_768;
 pub const BUSY_TIMEOUT_MS: u64 = 0;
+pub const STATEMENT_CACHE_CAPACITY: usize = 32;
 
 pub const STABLE_PAGE_SIZE: u64 = 65_536;
 pub const SUPERBLOCK_OFFSET: u64 = 0;

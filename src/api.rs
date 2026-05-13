@@ -4,21 +4,12 @@
 //! so a SQLite transaction cannot cross an `await` boundary.
 
 use crate::db::migrate::Migration;
+use crate::stable::memory;
 use crate::stable::meta::Superblock;
 use crate::Db;
 use candid::CandidType;
 use serde::Deserialize;
 
-#[cfg(feature = "canister-api-v1-schema")]
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: "CREATE TABLE IF NOT EXISTS kv (
-        key TEXT PRIMARY KEY NOT NULL,
-        value TEXT NOT NULL
-    );",
-}];
-
-#[cfg(not(feature = "canister-api-v1-schema"))]
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -36,6 +27,8 @@ const MIGRATIONS: &[Migration] = &[
 #[derive(CandidType, Deserialize)]
 pub struct DbMeta {
     pub db_size: u64,
+    pub stable_pages: u64,
+    pub stable_bytes: u64,
     pub schema_version: u64,
     pub last_tx_id: u64,
     pub flags: u64,
@@ -45,6 +38,14 @@ pub struct DbMeta {
     pub checksum_refresh_offset: u64,
     pub importing: bool,
     pub import_written_until: u64,
+    pub layout_version: u64,
+    pub page_count: u64,
+    pub page_table_bytes: u64,
+    pub active_bytes: u64,
+    pub allocated_bytes: u64,
+    pub orphan_bytes_estimate: u64,
+    pub orphan_ratio_basis_points: u64,
+    pub compact_recommended: bool,
 }
 
 #[derive(CandidType, Deserialize)]
@@ -68,10 +69,10 @@ fn post_upgrade() {
 #[ic_cdk::update]
 fn kv_put(key: String, value: String) -> Result<(), String> {
     Db::update(|connection| {
-        connection.execute_with_texts(
+        connection.execute(
             "INSERT INTO kv(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            &[key.as_str(), value.as_str()],
+            crate::params![key, value],
         )
     })
     .map_err(error_text)
@@ -80,36 +81,42 @@ fn kv_put(key: String, value: String) -> Result<(), String> {
 #[ic_cdk::query]
 fn kv_get(key: String) -> Result<Option<String>, String> {
     Db::query(|connection| {
-        connection.query_optional_string_with_text("SELECT value FROM kv WHERE key = ?1", &key)
-    })
-    .map_err(error_text)
-}
-
-#[cfg(not(feature = "canister-api-v1-schema"))]
-#[ic_cdk::update]
-fn kv_set_note(key: String, note: String) -> Result<(), String> {
-    Db::update(|connection| {
-        connection.execute_with_texts(
-            "UPDATE kv SET note = ?1 WHERE key = ?2",
-            &[note.as_str(), key.as_str()],
+        connection.query_optional_scalar::<String>(
+            "SELECT value FROM kv WHERE key = ?1",
+            crate::params![key],
         )
     })
     .map_err(error_text)
 }
 
-#[cfg(not(feature = "canister-api-v1-schema"))]
+#[ic_cdk::update]
+fn kv_set_note(key: String, note: String) -> Result<(), String> {
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE kv SET note = ?1 WHERE key = ?2",
+            crate::params![note, key],
+        )
+    })
+    .map_err(error_text)
+}
+
 #[ic_cdk::query]
 fn kv_get_note(key: String) -> Result<Option<String>, String> {
     Db::query(|connection| {
-        connection.query_optional_string_with_text("SELECT note FROM kv WHERE key = ?1", &key)
+        connection.query_optional_scalar::<String>(
+            "SELECT note FROM kv WHERE key = ?1",
+            crate::params![key],
+        )
     })
     .map_err(error_text)
 }
 
 #[ic_cdk::query]
 fn kv_count() -> Result<u64, String> {
-    let count = Db::query(|connection| connection.query_i64("SELECT COUNT(*) FROM kv"))
-        .map_err(error_text)?;
+    let count = Db::query(|connection| {
+        connection.query_scalar::<i64>("SELECT COUNT(*) FROM kv", crate::params![])
+    })
+    .map_err(error_text)?;
     u64::try_from(count).map_err(|_| "negative row count".to_string())
 }
 
@@ -117,8 +124,15 @@ fn kv_count() -> Result<u64, String> {
 fn db_meta() -> Result<DbMeta, String> {
     require_controller()?;
     let block = Superblock::load().map_err(|error| error.to_string())?;
+    let stats =
+        crate::sqlite_vfs::stable_blob::storage_stats().map_err(|error| error.to_string())?;
+    let stable_pages = memory::size_pages();
     Ok(DbMeta {
         db_size: block.db_size,
+        stable_pages,
+        stable_bytes: stable_pages
+            .checked_mul(crate::config::STABLE_PAGE_SIZE)
+            .ok_or_else(|| "stable byte size overflow".to_string())?,
         schema_version: block.schema_version,
         last_tx_id: block.last_tx_id,
         flags: block.flags,
@@ -128,6 +142,14 @@ fn db_meta() -> Result<DbMeta, String> {
         checksum_refresh_offset: block.checksum_refresh_offset,
         importing: block.is_importing(),
         import_written_until: block.import_written_until,
+        layout_version: stats.layout_version,
+        page_count: stats.page_count,
+        page_table_bytes: stats.page_table_bytes,
+        active_bytes: stats.active_bytes,
+        allocated_bytes: stats.allocated_bytes,
+        orphan_bytes_estimate: stats.orphan_bytes_estimate,
+        orphan_ratio_basis_points: stats.orphan_ratio_basis_points,
+        compact_recommended: stats.compact_recommended,
     })
 }
 
@@ -183,6 +205,18 @@ fn db_import_chunk(offset: u64, bytes: Vec<u8>) -> Result<(), String> {
 fn db_finish_import() -> Result<(), String> {
     require_controller()?;
     Db::finish_import().map_err(error_text)
+}
+
+#[ic_cdk::update]
+fn db_cancel_import() -> Result<(), String> {
+    require_controller()?;
+    Db::cancel_import().map_err(error_text)
+}
+
+#[ic_cdk::update]
+fn db_compact() -> Result<(), String> {
+    require_controller()?;
+    Db::compact().map_err(error_text)
 }
 
 #[cfg(feature = "canister-api-test-failpoints")]

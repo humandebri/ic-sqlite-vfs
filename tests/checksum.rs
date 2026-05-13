@@ -1,11 +1,12 @@
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::sqlite_vfs::lock;
+use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
 use ic_sqlite_vfs::stable::memory;
 use ic_sqlite_vfs::stable::meta::Superblock;
-use ic_sqlite_vfs::Db;
+use ic_sqlite_vfs::{params, Db};
 use serial_test::serial;
 
 fn reset() {
+    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
 }
@@ -57,7 +58,7 @@ fn chunked_checksum_refresh_updates_metadata_only_when_complete() {
         for index in 0..32 {
             let key = format!("k{index}");
             let value = format!("value-{index}");
-            statement.execute_with_texts(&[key.as_str(), value.as_str()])?;
+            statement.execute(params![key, value])?;
         }
         Ok(())
     })
@@ -123,4 +124,25 @@ fn checksum_refresh_rejects_empty_chunk_size() {
     .unwrap();
 
     assert!(Db::refresh_checksum_chunk(0).is_err());
+}
+
+#[test]
+#[serial]
+fn noop_update_does_not_mark_checksum_stale_or_advance_tx_id() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE noop_update(id INTEGER PRIMARY KEY);",
+    }])
+    .unwrap();
+    Db::refresh_checksum().unwrap();
+    let before = Superblock::load().unwrap();
+
+    Db::update(|_connection| Ok(())).unwrap();
+
+    let after = Superblock::load().unwrap();
+    assert_eq!(after.db_size, before.db_size);
+    assert_eq!(after.last_tx_id, before.last_tx_id);
+    assert_eq!(after.checksum, before.checksum);
+    assert_eq!(after.is_checksum_stale(), before.is_checksum_stale());
 }

@@ -4,7 +4,7 @@
 //! statement, so prepared statements can be reused without leaking C resources.
 
 use crate::db::connection::sqlite_error;
-use crate::db::row::Row;
+use crate::db::row::{FromColumn, Row};
 use crate::db::value::{bind_all, bind_named_all, ToSql};
 use crate::db::DbError;
 use crate::sqlite_vfs::ffi;
@@ -46,6 +46,12 @@ impl<'connection> Statement<'connection> {
         }
     }
 
+    pub(crate) fn into_raw(self) -> NonNull<ffi::sqlite3_stmt> {
+        let raw = self.raw;
+        std::mem::forget(self);
+        raw
+    }
+
     pub fn execute(&mut self, values: &[&dyn ToSql]) -> Result<(), DbError> {
         self.reset_and_bind(values)?;
         let rc = step(self.raw.as_ptr())?;
@@ -64,14 +70,6 @@ impl<'connection> Statement<'connection> {
         } else {
             Err(sqlite_error(self.db, rc))
         }
-    }
-
-    pub fn execute_with_texts(&mut self, values: &[&str]) -> Result<(), DbError> {
-        let values = values
-            .iter()
-            .map(|value| value as &dyn ToSql)
-            .collect::<Vec<_>>();
-        self.execute(&values)
     }
 
     pub fn query<'statement>(
@@ -180,11 +178,42 @@ impl<'connection> Statement<'connection> {
         Ok(output)
     }
 
-    pub fn query_optional_string_with_text(
+    pub fn query_scalar<T: FromColumn>(&mut self, values: &[&dyn ToSql]) -> Result<T, DbError> {
+        self.query_one(values, |row| row.get(0))
+    }
+    pub fn query_scalar_named<T: FromColumn>(
         &mut self,
-        value: &str,
-    ) -> Result<Option<String>, DbError> {
-        self.query_optional(&[&value], |row| row.get(0))
+        values: &[(&str, &dyn ToSql)],
+    ) -> Result<T, DbError> {
+        self.query_one_named(values, |row| row.get(0))
+    }
+
+    pub fn query_optional_scalar<T: FromColumn>(
+        &mut self,
+        values: &[&dyn ToSql],
+    ) -> Result<Option<T>, DbError> {
+        self.query_optional(values, |row| row.get(0))
+    }
+
+    pub fn query_optional_scalar_named<T: FromColumn>(
+        &mut self,
+        values: &[(&str, &dyn ToSql)],
+    ) -> Result<Option<T>, DbError> {
+        self.query_optional_named(values, |row| row.get(0))
+    }
+
+    pub fn query_column<T: FromColumn>(
+        &mut self,
+        values: &[&dyn ToSql],
+    ) -> Result<Vec<T>, DbError> {
+        self.query_all(values, |row| row.get(0))
+    }
+
+    pub fn query_column_named<T: FromColumn>(
+        &mut self,
+        values: &[(&str, &dyn ToSql)],
+    ) -> Result<Vec<T>, DbError> {
+        self.query_all_named(values, |row| row.get(0))
     }
 
     fn reset_and_bind(&mut self, values: &[&dyn ToSql]) -> Result<(), DbError> {

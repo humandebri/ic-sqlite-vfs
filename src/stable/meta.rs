@@ -7,14 +7,9 @@ use crate::config::{SQLITE_PAGE_SIZE, SUPERBLOCK_OFFSET, SUPERBLOCK_SIZE};
 use crate::stable::memory::{self, StableMemoryError};
 
 const MAGIC: [u8; 8] = *b"ICSQLITE";
-const VERSION: u32 = 4;
-const VERSION_ONE: u32 = 1;
-const VERSION_TWO: u32 = 2;
-const VERSION_THREE: u32 = 3;
-const V1_ENCODED_LEN: usize = 80;
-const V2_ENCODED_LEN: usize = 96;
-const V3_ENCODED_LEN: usize = 120;
-const ENCODED_LEN: usize = 128;
+const VERSION: u32 = 6;
+const ENCODED_LEN: usize = 152;
+pub const PAGE_MAP_LAYOUT_VERSION: u64 = 6;
 pub const FLAG_IMPORTING: u64 = 1;
 pub const FLAG_CHECKSUM_STALE: u64 = 1 << 1;
 pub const FLAG_CHECKSUM_REFRESHING: u64 = 1 << 2;
@@ -37,6 +32,9 @@ pub struct Superblock {
     pub checksum_refresh_hash: u64,
     pub checksum_refresh_tx_id: u64,
     pub db_base_offset: u64,
+    pub page_table_offset: u64,
+    pub page_count: u64,
+    pub layout_version: u64,
     pub meta_checksum: u64,
 }
 
@@ -59,6 +57,9 @@ impl Superblock {
             checksum_refresh_hash: 0,
             checksum_refresh_tx_id: 0,
             db_base_offset: crate::config::DB_REGION_OFFSET,
+            page_table_offset: 0,
+            page_count: 0,
+            layout_version: PAGE_MAP_LAYOUT_VERSION,
             meta_checksum: 0,
         };
         block.meta_checksum = block.compute_meta_checksum();
@@ -74,27 +75,6 @@ impl Superblock {
             let fresh = Self::fresh();
             fresh.store()?;
             return Ok(fresh);
-        }
-        if block.version == VERSION_ONE {
-            let mut v1 = [0_u8; V1_ENCODED_LEN];
-            v1.copy_from_slice(&bytes[..V1_ENCODED_LEN]);
-            let upgraded = Self::decode_v1(&v1)?;
-            upgraded.store()?;
-            return Ok(upgraded);
-        }
-        if block.version == VERSION_TWO {
-            let mut v2 = [0_u8; V2_ENCODED_LEN];
-            v2.copy_from_slice(&bytes[..V2_ENCODED_LEN]);
-            let upgraded = Self::decode_v2(&v2)?;
-            upgraded.store()?;
-            return Ok(upgraded);
-        }
-        if block.version == VERSION_THREE {
-            let mut v3 = [0_u8; V3_ENCODED_LEN];
-            v3.copy_from_slice(&bytes[..V3_ENCODED_LEN]);
-            let upgraded = Self::decode_v3(&v3)?;
-            upgraded.store()?;
-            return Ok(upgraded);
         }
         if !block.verify_checksum() {
             return Err(StableMemoryError::MetaChecksumMismatch);
@@ -130,6 +110,35 @@ impl Superblock {
         block.last_tx_id = block.last_tx_id.saturating_add(1);
         block.flags |= FLAG_CHECKSUM_STALE;
         block.clear_checksum_refresh();
+        block.store()
+    }
+
+    pub fn commit_page_map(
+        page_table_offset: u64,
+        page_count: u64,
+        db_size: u64,
+    ) -> Result<(), StableMemoryError> {
+        let mut block = Self::load()?;
+        block.page_table_offset = page_table_offset;
+        block.page_count = page_count;
+        block.db_size = db_size;
+        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
+        block.last_tx_id = block.last_tx_id.saturating_add(1);
+        block.flags |= FLAG_CHECKSUM_STALE;
+        block.clear_checksum_refresh();
+        block.store()
+    }
+
+    pub fn store_page_map_without_tx(
+        page_table_offset: u64,
+        page_count: u64,
+        db_size: u64,
+    ) -> Result<(), StableMemoryError> {
+        let mut block = Self::load()?;
+        block.page_table_offset = page_table_offset;
+        block.page_count = page_count;
+        block.db_size = db_size;
+        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
         block.store()
     }
 
@@ -174,7 +183,10 @@ impl Superblock {
         out[96..104].copy_from_slice(&self.checksum_refresh_hash.to_le_bytes());
         out[104..112].copy_from_slice(&self.checksum_refresh_tx_id.to_le_bytes());
         out[112..120].copy_from_slice(&self.db_base_offset.to_le_bytes());
-        out[120..128].copy_from_slice(&self.meta_checksum.to_le_bytes());
+        out[120..128].copy_from_slice(&self.page_table_offset.to_le_bytes());
+        out[128..136].copy_from_slice(&self.page_count.to_le_bytes());
+        out[136..144].copy_from_slice(&self.layout_version.to_le_bytes());
+        out[144..152].copy_from_slice(&self.meta_checksum.to_le_bytes());
         out
     }
 
@@ -196,98 +208,11 @@ impl Superblock {
             checksum_refresh_hash: u64::from_le_bytes(eight(bytes, 96)),
             checksum_refresh_tx_id: u64::from_le_bytes(eight(bytes, 104)),
             db_base_offset: u64::from_le_bytes(eight(bytes, 112)),
-            meta_checksum: u64::from_le_bytes(eight(bytes, 120)),
+            page_table_offset: u64::from_le_bytes(eight(bytes, 120)),
+            page_count: u64::from_le_bytes(eight(bytes, 128)),
+            layout_version: u64::from_le_bytes(eight(bytes, 136)),
+            meta_checksum: u64::from_le_bytes(eight(bytes, 144)),
         }
-    }
-
-    fn decode_v1(bytes: &[u8; V1_ENCODED_LEN]) -> Result<Self, StableMemoryError> {
-        let mut block = Self {
-            magic: eight_v1(bytes, 0),
-            version: VERSION,
-            sqlite_page_size: u32::from_le_bytes(four_v1(bytes, 12)),
-            db_size: u64::from_le_bytes(eight_v1(bytes, 16)),
-            schema_version: u64::from_le_bytes(eight_v1(bytes, 24)),
-            last_tx_id: u64::from_le_bytes(eight_v1(bytes, 32)),
-            flags: u64::from_le_bytes(eight_v1(bytes, 40)),
-            checksum: u64::from_le_bytes(eight_v1(bytes, 48)),
-            import_expected_checksum: u64::from_le_bytes(eight_v1(bytes, 56)),
-            import_written_until: u64::from_le_bytes(eight_v1(bytes, 64)),
-            import_total_size: 0,
-            import_base_offset: 0,
-            checksum_refresh_offset: 0,
-            checksum_refresh_hash: 0,
-            checksum_refresh_tx_id: 0,
-            db_base_offset: crate::config::DB_REGION_OFFSET,
-            meta_checksum: u64::from_le_bytes(eight_v1(bytes, 72)),
-        };
-        let meta_checksum = block.meta_checksum;
-        let mut checksum_bytes = *bytes;
-        checksum_bytes[72..80].fill(0);
-        if meta_checksum != fnv1a64(&checksum_bytes) {
-            return Err(StableMemoryError::MetaChecksumMismatch);
-        }
-        block.meta_checksum = 0;
-        Ok(block)
-    }
-
-    fn decode_v2(bytes: &[u8; V2_ENCODED_LEN]) -> Result<Self, StableMemoryError> {
-        let mut block = Self {
-            magic: eight_v2(bytes, 0),
-            version: VERSION,
-            sqlite_page_size: u32::from_le_bytes(four_v2(bytes, 12)),
-            db_size: u64::from_le_bytes(eight_v2(bytes, 16)),
-            schema_version: u64::from_le_bytes(eight_v2(bytes, 24)),
-            last_tx_id: u64::from_le_bytes(eight_v2(bytes, 32)),
-            flags: u64::from_le_bytes(eight_v2(bytes, 40)),
-            checksum: u64::from_le_bytes(eight_v2(bytes, 48)),
-            import_expected_checksum: u64::from_le_bytes(eight_v2(bytes, 56)),
-            import_written_until: u64::from_le_bytes(eight_v2(bytes, 64)),
-            import_total_size: u64::from_le_bytes(eight_v2(bytes, 72)),
-            import_base_offset: u64::from_le_bytes(eight_v2(bytes, 80)),
-            checksum_refresh_offset: 0,
-            checksum_refresh_hash: 0,
-            checksum_refresh_tx_id: 0,
-            db_base_offset: crate::config::DB_REGION_OFFSET,
-            meta_checksum: u64::from_le_bytes(eight_v2(bytes, 88)),
-        };
-        let meta_checksum = block.meta_checksum;
-        let mut checksum_bytes = *bytes;
-        checksum_bytes[88..96].fill(0);
-        if meta_checksum != fnv1a64(&checksum_bytes) {
-            return Err(StableMemoryError::MetaChecksumMismatch);
-        }
-        block.meta_checksum = 0;
-        Ok(block)
-    }
-
-    fn decode_v3(bytes: &[u8; V3_ENCODED_LEN]) -> Result<Self, StableMemoryError> {
-        let mut block = Self {
-            magic: eight_v3(bytes, 0),
-            version: VERSION,
-            sqlite_page_size: u32::from_le_bytes(four_v3(bytes, 12)),
-            db_size: u64::from_le_bytes(eight_v3(bytes, 16)),
-            schema_version: u64::from_le_bytes(eight_v3(bytes, 24)),
-            last_tx_id: u64::from_le_bytes(eight_v3(bytes, 32)),
-            flags: u64::from_le_bytes(eight_v3(bytes, 40)),
-            checksum: u64::from_le_bytes(eight_v3(bytes, 48)),
-            import_expected_checksum: u64::from_le_bytes(eight_v3(bytes, 56)),
-            import_written_until: u64::from_le_bytes(eight_v3(bytes, 64)),
-            import_total_size: u64::from_le_bytes(eight_v3(bytes, 72)),
-            import_base_offset: u64::from_le_bytes(eight_v3(bytes, 80)),
-            checksum_refresh_offset: u64::from_le_bytes(eight_v3(bytes, 88)),
-            checksum_refresh_hash: u64::from_le_bytes(eight_v3(bytes, 96)),
-            checksum_refresh_tx_id: u64::from_le_bytes(eight_v3(bytes, 104)),
-            db_base_offset: crate::config::DB_REGION_OFFSET,
-            meta_checksum: u64::from_le_bytes(eight_v3(bytes, 112)),
-        };
-        let meta_checksum = block.meta_checksum;
-        let mut checksum_bytes = *bytes;
-        checksum_bytes[112..120].fill(0);
-        if meta_checksum != fnv1a64(&checksum_bytes) {
-            return Err(StableMemoryError::MetaChecksumMismatch);
-        }
-        block.meta_checksum = 0;
-        Ok(block)
     }
 
     fn compute_meta_checksum(&self) -> u64 {
@@ -304,42 +229,6 @@ fn four(bytes: &[u8; ENCODED_LEN], start: usize) -> [u8; 4] {
 }
 
 fn eight(bytes: &[u8; ENCODED_LEN], start: usize) -> [u8; 8] {
-    let mut out = [0_u8; 8];
-    out.copy_from_slice(&bytes[start..start + 8]);
-    out
-}
-
-fn four_v1(bytes: &[u8; V1_ENCODED_LEN], start: usize) -> [u8; 4] {
-    let mut out = [0_u8; 4];
-    out.copy_from_slice(&bytes[start..start + 4]);
-    out
-}
-
-fn eight_v1(bytes: &[u8; V1_ENCODED_LEN], start: usize) -> [u8; 8] {
-    let mut out = [0_u8; 8];
-    out.copy_from_slice(&bytes[start..start + 8]);
-    out
-}
-
-fn four_v2(bytes: &[u8; V2_ENCODED_LEN], start: usize) -> [u8; 4] {
-    let mut out = [0_u8; 4];
-    out.copy_from_slice(&bytes[start..start + 4]);
-    out
-}
-
-fn eight_v2(bytes: &[u8; V2_ENCODED_LEN], start: usize) -> [u8; 8] {
-    let mut out = [0_u8; 8];
-    out.copy_from_slice(&bytes[start..start + 8]);
-    out
-}
-
-fn four_v3(bytes: &[u8; V3_ENCODED_LEN], start: usize) -> [u8; 4] {
-    let mut out = [0_u8; 4];
-    out.copy_from_slice(&bytes[start..start + 4]);
-    out
-}
-
-fn eight_v3(bytes: &[u8; V3_ENCODED_LEN], start: usize) -> [u8; 8] {
     let mut out = [0_u8; 8];
     out.copy_from_slice(&bytes[start..start + 8]);
     out

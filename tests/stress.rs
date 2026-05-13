@@ -1,12 +1,13 @@
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::sqlite_vfs::lock;
+use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
 use ic_sqlite_vfs::stable::memory;
 use ic_sqlite_vfs::stable::meta::Superblock;
-use ic_sqlite_vfs::Db;
+use ic_sqlite_vfs::{params, Db};
 use serial_test::serial;
 use std::collections::BTreeMap;
 
 fn reset() {
+    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
 }
@@ -28,6 +29,38 @@ fn failed_migration_does_not_advance_schema_version() {
 
     assert!(result.is_err());
     assert_eq!(Superblock::load().unwrap().schema_version, 0);
+}
+
+#[test]
+#[serial]
+fn duplicate_migration_version_is_rejected_before_schema_changes() {
+    reset();
+    let result = Db::migrate(&[
+        Migration {
+            version: 1,
+            sql: "CREATE TABLE duplicate_first(id INTEGER PRIMARY KEY);",
+        },
+        Migration {
+            version: 1,
+            sql: "CREATE TABLE duplicate_second(id INTEGER PRIMARY KEY);",
+        },
+    ]);
+
+    assert!(result.is_err());
+    assert_eq!(Superblock::load().unwrap().schema_version, 0);
+    Db::migrate(&[Migration {
+        version: 2,
+        sql: "CREATE TABLE after_duplicate(id INTEGER PRIMARY KEY);",
+    }])
+    .unwrap();
+    let exists = Db::query(|connection| {
+        connection.query_scalar::<i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'duplicate_first'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(exists, 0);
 }
 
 #[test]
@@ -64,8 +97,10 @@ fn deterministic_fuzz_matches_model() {
         }
     }
 
-    let sum = Db::query(|connection| connection.query_i64("SELECT COALESCE(SUM(v), 0) FROM fuzz"))
-        .unwrap();
+    let sum = Db::query(|connection| {
+        connection.query_scalar::<i64>("SELECT COALESCE(SUM(v), 0) FROM fuzz", params![])
+    })
+    .unwrap();
     let expected = model.values().sum::<u64>();
     assert_eq!(u64::try_from(sum).unwrap(), expected);
     assert_eq!(Db::integrity_check().unwrap(), "ok");
@@ -106,8 +141,10 @@ fn long_endurance_many_transactions_keeps_integrity() {
         .unwrap();
     }
 
-    let count =
-        Db::query(|connection| connection.query_i64("SELECT COUNT(*) FROM endurance")).unwrap();
+    let count = Db::query(|connection| {
+        connection.query_scalar::<i64>("SELECT COUNT(*) FROM endurance", params![])
+    })
+    .unwrap();
     assert_eq!(count, 1_000);
     assert_eq!(Db::integrity_check().unwrap(), "ok");
 }

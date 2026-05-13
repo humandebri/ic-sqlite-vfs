@@ -1,20 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { resolve } from "node:path";
-import { PocketIc, PocketIcServer, createIdentity } from "@dfinity/pic";
+import { PocketIc, createIdentity } from "@dfinity/pic";
 import { idlFactory } from "./idl.mjs";
+import { startPocketIcServer } from "./server.mjs";
 
 const wasm = resolve("target/pocketic/ic_sqlite_vfs.wasm");
-const v1Wasm = resolve("target/pocketic/ic_sqlite_vfs_v1.wasm");
 const failpointWasm = resolve("target/pocketic/ic_sqlite_vfs_failpoints.wasm");
 const timeout = 600_000;
 
 test("PocketIC persistence and failpoint regressions", { timeout }, async () => {
-  const server = await PocketIcServer.start();
-  const pic = await PocketIc.create(server.getUrl());
+  const server = await startPocketIcServer({ timeoutMs: timeout });
+  const pic = await PocketIc.create(server.getUrl(), { processingTimeoutMs: timeout });
   try {
     await stableImageSurvivesUpgrade(pic);
-    await schemaMigrationSurvivesSecondUpgrade(pic);
     await stableWriteTrapRollsBackFailedUpdate(pic);
     await chunkedImportRejectsWrongChecksum(pic);
     await managementMethodsRequireController(pic);
@@ -43,37 +42,6 @@ async function stableImageSurvivesUpgrade(pic) {
   assert.equal(after.Ok.checksum, before.Ok.checksum);
   assert.equal(after.Ok.checksum_stale, before.Ok.checksum_stale);
   assert.equal(after.Ok.checksum_refreshing, false);
-}
-
-async function schemaMigrationSurvivesSecondUpgrade(pic) {
-  const { actor, canisterId } = await pic.setupCanister({ idlFactory, wasm: v1Wasm });
-
-  assert.deepEqual(await actor.kv_put("migrates", "v1"), { Ok: null });
-  assert.deepEqual(await actor.kv_get("migrates"), { Ok: ["v1"] });
-  const before = await actor.db_meta();
-  assert.equal("Ok" in before, true);
-  assert.equal(before.Ok.schema_version, 1n);
-
-  await pic.upgradeCanister({ canisterId, wasm });
-  const migrated = pic.createActor(idlFactory, canisterId);
-
-  assert.deepEqual(await migrated.kv_get("migrates"), { Ok: ["v1"] });
-  assert.deepEqual(await migrated.kv_set_note("migrates", "v2-note"), { Ok: null });
-  assert.deepEqual(await migrated.kv_get_note("migrates"), { Ok: ["v2-note"] });
-  assert.deepEqual(await migrated.db_integrity_check(), { Ok: "ok" });
-  const afterMigration = await migrated.db_meta();
-  assert.equal("Ok" in afterMigration, true);
-  assert.equal(afterMigration.Ok.schema_version, 2n);
-
-  await pic.upgradeCanister({ canisterId, wasm });
-  const upgradedAgain = pic.createActor(idlFactory, canisterId);
-
-  assert.deepEqual(await upgradedAgain.kv_get("migrates"), { Ok: ["v1"] });
-  assert.deepEqual(await upgradedAgain.kv_get_note("migrates"), { Ok: ["v2-note"] });
-  assert.deepEqual(await upgradedAgain.db_integrity_check(), { Ok: "ok" });
-  const afterSecondUpgrade = await upgradedAgain.db_meta();
-  assert.equal("Ok" in afterSecondUpgrade, true);
-  assert.equal(afterSecondUpgrade.Ok.schema_version, 2n);
 }
 
 async function stableWriteTrapRollsBackFailedUpdate(pic) {
@@ -124,6 +92,8 @@ async function managementMethodsRequireController(pic) {
   const denied = await attacker.db_export_chunk(0n, 1n);
   const deniedRefresh = await attacker.db_refresh_checksum();
   const deniedChunk = await attacker.db_refresh_checksum_chunk(64n);
+  assert.deepEqual(await actor.db_begin_import(1n, 0n), { Ok: null });
+  const deniedCancel = await attacker.db_cancel_import();
 
   assert.equal("Err" in denied, true);
   assert.match(denied.Err, /not a controller/);
@@ -131,4 +101,7 @@ async function managementMethodsRequireController(pic) {
   assert.match(deniedRefresh.Err, /not a controller/);
   assert.equal("Err" in deniedChunk, true);
   assert.match(deniedChunk.Err, /not a controller/);
+  assert.equal("Err" in deniedCancel, true);
+  assert.match(deniedCancel.Err, /not a controller/);
+  assert.deepEqual(await actor.db_cancel_import(), { Ok: null });
 }

@@ -14,6 +14,26 @@ pub mod stable;
 
 pub use db::{Db, DbError};
 
+#[macro_export]
+macro_rules! params {
+    () => {
+        &[]
+    };
+    ($($value:expr),+ $(,)?) => {
+        &[$($crate::db::value::to_sql_ref(&$value)),+]
+    };
+}
+
+#[macro_export]
+macro_rules! named_params {
+    () => {
+        &[]
+    };
+    ($($name:expr => $value:expr),+ $(,)?) => {
+        &[$(($name, $crate::db::value::to_sql_ref(&$value))),+]
+    };
+}
+
 #[cfg(feature = "canister-api")]
 use api::{ChecksumRefresh, DbMeta};
 

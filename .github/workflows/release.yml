@@ -5,7 +5,7 @@ on:
     tags: ["v*"]
 
 jobs:
-  wasm:
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -25,10 +25,15 @@ jobs:
           sudo ln -sf "$(command -v clang)" /usr/local/bin/wasm32-wasi-clang
       - run: npm ci
       - run: cargo fmt --check
-      - run: bash scripts/check-no-await.sh
-      - run: cargo test
+      - run: bash scripts/sqlite-critical-check.sh
+      - name: Check release tag matches crate version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "ic-sqlite-vfs"))')"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+      - run: cargo package --no-verify
+      - run: cargo build --target wasm32-unknown-unknown
       - run: cargo build --target wasm32-unknown-unknown --features canister-api
-      - run: npm run test:pocketic
+      - run: npm run test:pocketic:perf
       - name: Check wasm imports
         run: |
           imports="$(wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm | grep '<-' || true)"

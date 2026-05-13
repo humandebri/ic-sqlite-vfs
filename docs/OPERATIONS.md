@@ -6,7 +6,7 @@
 
 CI では `scripts/check-no-await.sh` で `src` 内の `.await` と `async fn` を拒否する。
 
-SQLite transaction 中の `xWrite` と `xTruncate` は stable memory へ直書きしない。heap overlay に蓄積し、SQLite `COMMIT` 成功後に inactive DB image へ書き出す。最後に superblock の active DB offset を更新する。通常の `Err`、SQL rollback、panic は active DB image を変更しない。
+SQLite transaction 中の `xWrite` と `xTruncate` は stable memory へ直書きしない。heap overlay にpage単位で蓄積し、SQLite `COMMIT` 成功後にdirty pageと新page tableを追記する。最後にsuperblockのactive page table offsetを更新する。通常の `Err`、SQL rollback、panic はactive page tableを変更しない。
 
 ## Query Policy
 
@@ -56,13 +56,13 @@ Import は controller 限定APIで実行し、checksum 一致を必須にする�
 6. offset 0 から順番に `db_import_chunk` を呼ぶ。
 7. `db_finish_import` が checksum を検証し、import flag を解除する。
 
-Import 中は SQLite VFS が `/main.db` open を拒否するため、通常 DB API は失敗する。checksum 不一致時は staging 領域を破棄し、既存DBを維持して import flag を解除する。
+Import 中は SQLite VFS が `/main.db` open を拒否するため、通常 DB API は失敗する。checksum 不一致時は staging 領域を破棄し、既存DBを維持して import flag を解除する。未完了 import を中止する場合は controller が `db_cancel_import` を呼ぶ。
 
 ## Capacity
 
 Stable memory grow 失敗時は `current_pages` と `required_pages` を含む error を返す。呼び出し側は retry せず、容量上限・cycle 残量・chunk size を確認する。
 
-通常 commit は安全な publish のため、commit 後の完全な DB image を inactive 領域へ書く。更新差分だけでなく DB image 全体分の stable memory 余裕が必要になる。
+通常 commit は安全な publish のため、dirty page、dirty segment table、新root tableを追記してからsuperblockを更新する。小更新の容量増分は概ねdirty page数とdirty segment数に比例する。`db_meta.compact_recommended == true` の場合、controllerが `db_compact` を実行する。
 
 ## Integrity
 
@@ -72,5 +72,7 @@ Stable memory grow 失敗時は `current_pages` と `required_pages` を含む e
 - `db_meta.importing == false`
 - `db_meta.checksum_stale == false` または controller の checksum refresh job が進行中
 - `db_meta.checksum_refreshing == false`
+- `db_meta.orphan_ratio_basis_points`
+- `db_meta.compact_recommended`
 
 `db_meta.checksum` は last verified checksum。`checksum_stale == true` は更新後の正常状態でも発生する。必要な場合は controller が `db_refresh_checksum_chunk` を完了まで実行して直近検証済みに戻す。

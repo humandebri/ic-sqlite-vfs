@@ -5,6 +5,7 @@
 
 use crate::db::connection::Connection;
 use crate::db::DbError;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Migration {
@@ -13,6 +14,7 @@ pub struct Migration {
 }
 
 pub fn apply(connection: &Connection, migrations: &[Migration]) -> Result<(), DbError> {
+    validate_unique_versions(migrations)?;
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS __ic_sqlite_migrations (
             version INTEGER PRIMARY KEY NOT NULL
@@ -21,9 +23,12 @@ pub fn apply(connection: &Connection, migrations: &[Migration]) -> Result<(), Db
 
     for migration in migrations {
         let version = sqlite_version(migration.version)?;
-        let exists = connection.query_i64(&format!(
-            "SELECT EXISTS(SELECT 1 FROM __ic_sqlite_migrations WHERE version = {version})"
-        ))?;
+        let exists = connection.query_scalar::<i64>(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM __ic_sqlite_migrations WHERE version = {version})"
+            ),
+            crate::params![],
+        )?;
         if exists != 0 {
             continue;
         }
@@ -33,6 +38,16 @@ pub fn apply(connection: &Connection, migrations: &[Migration]) -> Result<(), Db
         ))?;
     }
 
+    Ok(())
+}
+
+fn validate_unique_versions(migrations: &[Migration]) -> Result<(), DbError> {
+    let mut seen = BTreeSet::new();
+    for migration in migrations {
+        if !seen.insert(migration.version) {
+            return Err(DbError::DuplicateMigrationVersion(migration.version));
+        }
+    }
     Ok(())
 }
 

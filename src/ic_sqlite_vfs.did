@@ -1,5 +1,7 @@
 type DbMeta = record {
   db_size : nat64;
+  stable_pages : nat64;
+  stable_bytes : nat64;
   schema_version : nat64;
   last_tx_id : nat64;
   flags : nat64;
@@ -9,6 +11,14 @@ type DbMeta = record {
   checksum_refresh_offset : nat64;
   importing : bool;
   import_written_until : nat64;
+  layout_version : nat64;
+  page_count : nat64;
+  page_table_bytes : nat64;
+  active_bytes : nat64;
+  allocated_bytes : nat64;
+  orphan_bytes_estimate : nat64;
+  orphan_ratio_basis_points : nat64;
+  compact_recommended : bool;
 };
 
 type ChecksumRefresh = record {
@@ -33,4 +43,6 @@ service : {
   db_begin_import : (nat64, nat64) -> (variant { Ok : null; Err : text });
   db_import_chunk : (nat64, vec nat8) -> (variant { Ok : null; Err : text });
   db_finish_import : () -> (variant { Ok : null; Err : text });
+  db_cancel_import : () -> (variant { Ok : null; Err : text });
+  db_compact : () -> (variant { Ok : null; Err : text });
 }
