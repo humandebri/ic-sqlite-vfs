@@ -357,15 +357,6 @@ Wasm size:
 | ic-sqlite-vfs reference canister | 1.84 MB |
 | wasi2ic KV benchmark canister | 3.00 MB |
 
-Wall-clock measurements are included only as a local sanity check because they
-include `icp canister call` process startup:
-
-| Workload | ic-sqlite-vfs | wasi2ic + ic-rusqlite |
-|---|---:|---:|
-| reset + insert 1000 | 0.27s | 0.20s |
-| point read 1000 | 0.45s | 0.06s |
-| insert/update 1000 | 0.31s | 0.22s |
-
 The instruction gap comes from removing WASI fd emulation and mapping SQLite
 pager I/O directly to stable memory offsets.
 
