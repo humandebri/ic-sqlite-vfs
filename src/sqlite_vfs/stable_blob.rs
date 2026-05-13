@@ -23,11 +23,11 @@ pub struct ChecksumRefresh {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StableBlobFailpoint {
-    BeforeOverlayWrite,
-    BeforeOverlayTruncate,
-    BeforeCommitCapacity,
-    BeforeCommitChunkWrite,
-    BeforeCommitSuperblockStore,
+    OverlayWrite,
+    OverlayTruncate,
+    CommitCapacity,
+    CommitChunkWrite,
+    CommitSuperblockStore,
 }
 
 thread_local! {
@@ -60,7 +60,7 @@ pub(crate) fn commit_update() -> Result<(), StableMemoryError> {
         return Superblock::record_committed_tx();
     }
 
-    hit_failpoint(StableBlobFailpoint::BeforeCommitCapacity)?;
+    hit_failpoint(StableBlobFailpoint::CommitCapacity)?;
     let final_size = overlay.size();
     let shadow_base = append_base()?;
     memory::ensure_capacity(checked_add(shadow_base, overlay.max_end()?)?)?;
@@ -72,12 +72,12 @@ pub(crate) fn commit_update() -> Result<(), StableMemoryError> {
         let copied_len = usize::try_from(len).map_err(|_| StableMemoryError::OffsetOverflow)?;
         let mut bytes = vec![0_u8; copied_len];
         overlay.read_merged_chunk(offset, &mut bytes)?;
-        hit_failpoint(StableBlobFailpoint::BeforeCommitChunkWrite)?;
+        hit_failpoint(StableBlobFailpoint::CommitChunkWrite)?;
         memory::write(checked_add(shadow_base, offset)?, &bytes)?;
         offset += len;
     }
 
-    hit_failpoint(StableBlobFailpoint::BeforeCommitSuperblockStore)?;
+    hit_failpoint(StableBlobFailpoint::CommitSuperblockStore)?;
     Superblock::commit_db_image(shadow_base, final_size)
 }
 
@@ -107,7 +107,7 @@ pub(crate) fn read_base_at(offset: u64, dst: &mut [u8]) -> Result<bool, StableMe
 
 pub(crate) fn write_at(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
     if let Some(result) = overlay::write_at(offset, bytes) {
-        hit_failpoint(StableBlobFailpoint::BeforeOverlayWrite)?;
+        hit_failpoint(StableBlobFailpoint::OverlayWrite)?;
         return result;
     }
     if bytes.is_empty() {
@@ -131,7 +131,7 @@ pub(crate) fn write_at(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryErro
 
 pub(crate) fn truncate(size: u64) -> Result<(), StableMemoryError> {
     if let Some(result) = overlay::truncate(size) {
-        hit_failpoint(StableBlobFailpoint::BeforeOverlayTruncate)?;
+        hit_failpoint(StableBlobFailpoint::OverlayTruncate)?;
         return result;
     }
     let block = Superblock::load()?;
@@ -387,11 +387,11 @@ fn hit_failpoint(failpoint: StableBlobFailpoint) -> Result<(), StableMemoryError
 impl StableBlobFailpoint {
     fn name(self) -> &'static str {
         match self {
-            Self::BeforeOverlayWrite => "before overlay write",
-            Self::BeforeOverlayTruncate => "before overlay truncate",
-            Self::BeforeCommitCapacity => "before commit capacity",
-            Self::BeforeCommitChunkWrite => "before commit chunk write",
-            Self::BeforeCommitSuperblockStore => "before commit superblock store",
+            Self::OverlayWrite => "before overlay write",
+            Self::OverlayTruncate => "before overlay truncate",
+            Self::CommitCapacity => "before commit capacity",
+            Self::CommitChunkWrite => "before commit chunk write",
+            Self::CommitSuperblockStore => "before commit superblock store",
         }
     }
 }

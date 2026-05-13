@@ -26,6 +26,7 @@ pub fn has_reserved() -> bool {
     LOCK_LEVEL.with(|state| state.get() >= libsqlite3_sys::SQLITE_LOCK_RESERVED)
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn reset_for_tests() {
     LOCK_LEVEL.with(|state| state.set(0));
 }

@@ -206,7 +206,7 @@ fn statement_row_iterator_steps_until_done() {
         let mut statement = connection.prepare("SELECT name FROM iter_items ORDER BY id")?;
         let mut rows = statement.query(&[])?;
         let mut values = Vec::new();
-        while let Some(row) = rows.next()? {
+        while let Some(row) = rows.next_row()? {
             values.push(row.get::<String>(0)?);
         }
         Ok(values)

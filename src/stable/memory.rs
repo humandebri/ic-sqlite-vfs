@@ -203,6 +203,7 @@ pub fn write(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
     Ok(())
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn reset_for_tests() {
     #[cfg(not(target_arch = "wasm32"))]
     TEST_MEMORY.with(|memory| memory.borrow_mut().clear());

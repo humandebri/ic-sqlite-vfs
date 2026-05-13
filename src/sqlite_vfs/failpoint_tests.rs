@@ -76,7 +76,7 @@ fn failed_overlay_write_keeps_active_image_unchanged() {
     seed();
     let before = snapshot();
 
-    stable_blob::set_failpoint(StableBlobFailpoint::BeforeOverlayWrite);
+    stable_blob::set_failpoint(StableBlobFailpoint::OverlayWrite);
     let result = Db::update(|connection| {
         connection.execute_batch("INSERT INTO durable(k, v) VALUES ('after', 'lost')")
     });
@@ -93,7 +93,7 @@ fn failed_overlay_truncate_keeps_active_image_unchanged() {
     let before = blob::export_chunk(0, 6).unwrap();
 
     stable_blob::begin_update().unwrap();
-    stable_blob::set_failpoint(StableBlobFailpoint::BeforeOverlayTruncate);
+    stable_blob::set_failpoint(StableBlobFailpoint::OverlayTruncate);
     assert!(blob::truncate(2).is_err());
     stable_blob::rollback_update();
 
@@ -115,19 +115,19 @@ fn sparse_extend_zero_fills_gap_after_truncate() {
 #[test]
 #[serial]
 fn failed_commit_capacity_keeps_active_image_unchanged() {
-    assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::BeforeCommitCapacity);
+    assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::CommitCapacity);
 }
 
 #[test]
 #[serial]
 fn failed_commit_chunk_write_keeps_active_image_unchanged() {
-    assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::BeforeCommitChunkWrite);
+    assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::CommitChunkWrite);
 }
 
 #[test]
 #[serial]
 fn failed_commit_superblock_store_keeps_active_image_unchanged() {
-    assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::BeforeCommitSuperblockStore);
+    assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::CommitSuperblockStore);
 }
 
 fn assert_commit_failpoint_preserves_snapshot(failpoint: StableBlobFailpoint) {

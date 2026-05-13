@@ -101,7 +101,7 @@ impl<'connection> Statement<'connection> {
         F: FnOnce(&Row<'_>) -> Result<T, DbError>,
     {
         let mut rows = self.query(values)?;
-        match rows.next()? {
+        match rows.next_row()? {
             Some(row) => f(&row),
             None => Err(DbError::NotFound),
         }
@@ -116,7 +116,7 @@ impl<'connection> Statement<'connection> {
         F: FnOnce(&Row<'_>) -> Result<T, DbError>,
     {
         let mut rows = self.query_named(values)?;
-        match rows.next()? {
+        match rows.next_row()? {
             Some(row) => f(&row),
             None => Err(DbError::NotFound),
         }
@@ -131,7 +131,7 @@ impl<'connection> Statement<'connection> {
         F: FnOnce(&Row<'_>) -> Result<T, DbError>,
     {
         let mut rows = self.query(values)?;
-        match rows.next()? {
+        match rows.next_row()? {
             Some(row) => f(&row).map(Some),
             None => Ok(None),
         }
@@ -146,7 +146,7 @@ impl<'connection> Statement<'connection> {
         F: FnOnce(&Row<'_>) -> Result<T, DbError>,
     {
         let mut rows = self.query_named(values)?;
-        match rows.next()? {
+        match rows.next_row()? {
             Some(row) => f(&row).map(Some),
             None => Ok(None),
         }
@@ -158,7 +158,7 @@ impl<'connection> Statement<'connection> {
     {
         let mut rows = self.query(values)?;
         let mut output = Vec::new();
-        while let Some(row) = rows.next()? {
+        while let Some(row) = rows.next_row()? {
             output.push(f(&row)?);
         }
         Ok(output)
@@ -174,7 +174,7 @@ impl<'connection> Statement<'connection> {
     {
         let mut rows = self.query_named(values)?;
         let mut output = Vec::new();
-        while let Some(row) = rows.next()? {
+        while let Some(row) = rows.next_row()? {
             output.push(f(&row)?);
         }
         Ok(output)
@@ -213,7 +213,7 @@ impl<'connection> Statement<'connection> {
 }
 
 impl Rows<'_, '_> {
-    pub fn next(&mut self) -> Result<Option<Row<'_>>, DbError> {
+    pub fn next_row(&mut self) -> Result<Option<Row<'_>>, DbError> {
         if self.done {
             return Ok(None);
         }

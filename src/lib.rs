@@ -7,7 +7,9 @@
 pub mod api;
 pub mod config;
 pub mod db;
+#[doc(hidden)]
 pub mod sqlite_vfs;
+#[doc(hidden)]
 pub mod stable;
 
 pub use db::{Db, DbError};
