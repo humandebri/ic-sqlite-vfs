@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomInt } from "node:crypto";
 import { once } from "node:events";
 import { chmodSync } from "node:fs";
 import { appendFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
@@ -33,11 +34,16 @@ export async function startPocketIcServer({ timeoutMs }) {
 async function startOnce(bin, deadline) {
   const dir = await mkdtemp(join(tmpdir(), "ic-sqlite-vfs-pocketic-"));
   const portFile = join(dir, "pocketic.port");
+  const port = choosePort();
   const output = [];
-  const child = spawn(bin, ["--port-file", portFile], {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: pocketIcEnv(),
-  });
+  const child = spawn(
+    bin,
+    ["--ip-addr", "127.0.0.1", "--port", String(port), "--port-file", portFile],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: pocketIcEnv(),
+    },
+  );
   child.stdout.on("data", (chunk) => appendOutput(output, chunk));
   child.stderr.on("data", (chunk) => appendOutput(output, chunk));
   let startError;
@@ -74,6 +80,10 @@ async function startOnce(bin, deadline) {
 
   await stopChild(child, dir);
   throw new Error(`PocketIC did not start before deadline\n${output.join("")}`);
+}
+
+function choosePort() {
+  return randomInt(49_152, 65_536);
 }
 
 async function readPort(portFile) {
@@ -152,7 +162,7 @@ function appendOutput(output, chunk) {
 }
 
 function isRetryableStartError(error) {
-  return error?.message?.includes("Failed to bind PocketIC server to address 127.0.0.1:0");
+  return error?.message?.includes("Failed to bind PocketIC server to address 127.0.0.1:");
 }
 
 async function recordPocketIcPid(pid) {

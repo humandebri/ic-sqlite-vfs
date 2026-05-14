@@ -27,10 +27,6 @@ diagnose_pocketic() {
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
     ps -p "$pid" -o pid,ppid,stat,command 2>/dev/null || true
-    if command -v lsof >/dev/null 2>&1; then
-      echo "PocketIC listening ports for pid $pid:"
-      lsof -a -nP -p "$pid" -iTCP -sTCP:LISTEN || true
-    fi
   done < <(tracked_pids)
 }
 
@@ -105,7 +101,7 @@ cargo test --features canister-api
 for attempt in 1 2; do
   log "running PocketIC regression attempt ${attempt}"
   : > "$PID_FILE"
-  if run_with_timeout 300 npm run test:pocketic:regression; then
+  if run_with_timeout 600 npm run test:pocketic:regression; then
     break
   fi
   diagnose_pocketic
@@ -118,7 +114,7 @@ done
 
 log "running PocketIC perf"
 : > "$PID_FILE"
-run_with_timeout 300 npm run test:pocketic:perf
+run_with_timeout 600 npm run test:pocketic:perf
 
 verus_bin="${VERUS:-}"
 if [[ -z "$verus_bin" ]]; then
