@@ -15,11 +15,17 @@ use crate::sqlite_vfs::stable_blob;
 use crate::stable::memory::{self, ContextId, DbMemory};
 use crate::stable::meta::Superblock;
 use connection::Connection;
-pub use row::{FromColumn, Row};
+pub use row::{FromColumn, Row, TextLen};
 pub use stable_blob::ChecksumRefresh;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ffi::c_int;
 pub use transaction::UpdateConnection;
 pub use value::{Null, ToSql, Value, NULL};
+
+thread_local! {
+    static READ_CONNECTIONS: RefCell<BTreeMap<ContextId, Connection>> = const { RefCell::new(BTreeMap::new()) };
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -85,9 +91,11 @@ impl Db {
             }
             error => DbError::Stable(error),
         })?;
+        clear_read_connection(context);
         let handle = DbHandle::from_context(context);
         let result = handle.initialize();
         if result.is_err() {
+            clear_read_connection(context);
             memory::clear_failed_initialization(context);
         }
         result
@@ -161,7 +169,9 @@ impl Db {
 impl DbHandle {
     pub fn init(memory: DbMemory) -> Result<Self, DbError> {
         let handle = Self::from_context(memory::init_context(memory));
+        clear_read_connection(handle.context);
         if let Err(error) = handle.initialize() {
+            clear_read_connection(handle.context);
             memory::clear_failed_initialization(handle.context);
             return Err(error);
         }
@@ -190,10 +200,13 @@ impl DbHandle {
         F: FnOnce(&mut UpdateConnection<'_>) -> Result<T, DbError>,
     {
         self.with_context(|| {
+            clear_read_connection(self.context);
             stable_blob::begin_update()?;
             let _overlay_guard = OverlayGuard;
             let connection = connection::open_read_write()?;
-            transaction::run_immediate(&connection, f)
+            let result = transaction::run_immediate(&connection, f);
+            clear_read_connection(self.context);
+            result
         })
     }
 
@@ -201,10 +214,7 @@ impl DbHandle {
     where
         F: FnOnce(&Connection) -> Result<T, DbError>,
     {
-        self.with_context(|| {
-            let connection = connection::open_read_only()?;
-            f(&connection)
-        })
+        self.with_context(|| with_read_connection(self.context, f))
     }
 
     pub fn migrate(self, migrations: &[migrate::Migration]) -> Result<(), DbError> {
@@ -217,6 +227,7 @@ impl DbHandle {
                 .unwrap_or(0);
             let mut block = Superblock::load()?;
             if block.schema_version < target_version {
+                clear_read_connection(self.context);
                 block.schema_version = target_version;
                 block.store()?;
             }
@@ -239,34 +250,76 @@ impl DbHandle {
     }
 
     pub fn refresh_checksum(self) -> Result<u64, DbError> {
-        self.with_context(|| stable_blob::refresh_checksum().map_err(DbError::from))
+        self.with_context(|| {
+            clear_read_connection(self.context);
+            stable_blob::refresh_checksum().map_err(DbError::from)
+        })
     }
 
     pub fn refresh_checksum_chunk(self, max_bytes: u64) -> Result<ChecksumRefresh, DbError> {
-        self.with_context(|| stable_blob::refresh_checksum_chunk(max_bytes).map_err(DbError::from))
+        self.with_context(|| {
+            clear_read_connection(self.context);
+            stable_blob::refresh_checksum_chunk(max_bytes).map_err(DbError::from)
+        })
     }
 
     pub fn begin_import(self, total_size: u64, expected_checksum: u64) -> Result<(), DbError> {
         self.with_context(|| {
+            clear_read_connection(self.context);
             stable_blob::begin_import(total_size, expected_checksum).map_err(DbError::from)
         })
     }
 
     pub fn import_chunk(self, offset: u64, bytes: &[u8]) -> Result<(), DbError> {
-        self.with_context(|| stable_blob::import_chunk(offset, bytes).map_err(DbError::from))
+        self.with_context(|| {
+            clear_read_connection(self.context);
+            stable_blob::import_chunk(offset, bytes).map_err(DbError::from)
+        })
     }
 
     pub fn finish_import(self) -> Result<(), DbError> {
-        self.with_context(|| stable_blob::finish_import().map_err(DbError::from))
+        self.with_context(|| {
+            clear_read_connection(self.context);
+            stable_blob::finish_import().map_err(DbError::from)
+        })
     }
 
     pub fn cancel_import(self) -> Result<(), DbError> {
-        self.with_context(|| stable_blob::cancel_import().map_err(DbError::from))
+        self.with_context(|| {
+            clear_read_connection(self.context);
+            stable_blob::cancel_import().map_err(DbError::from)
+        })
     }
 
     pub fn compact(self) -> Result<(), DbError> {
-        self.with_context(|| stable_blob::compact().map_err(DbError::from))
+        self.with_context(|| {
+            clear_read_connection(self.context);
+            stable_blob::compact().map_err(DbError::from)
+        })
     }
+}
+
+fn with_read_connection<T>(
+    context: ContextId,
+    f: impl FnOnce(&Connection) -> Result<T, DbError>,
+) -> Result<T, DbError> {
+    READ_CONNECTIONS.with(|slot| {
+        if !slot.borrow().contains_key(&context) {
+            let connection = connection::open_read_only()?;
+            slot.borrow_mut().insert(context, connection);
+        }
+        let connections = slot.borrow();
+        let connection = connections
+            .get(&context)
+            .ok_or(DbError::StableMemoryNotInitialized)?;
+        f(connection)
+    })
+}
+
+fn clear_read_connection(context: ContextId) {
+    READ_CONNECTIONS.with(|slot| {
+        slot.borrow_mut().remove(&context);
+    });
 }
 
 struct OverlayGuard;

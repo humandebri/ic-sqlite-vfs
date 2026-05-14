@@ -20,6 +20,9 @@ pub trait FromColumn: Sized {
     fn read(row: &Row<'_>, index: usize) -> Result<Self, DbError>;
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TextLen(pub usize);
+
 impl Row<'_> {
     pub(crate) fn new(raw: *mut ffi::sqlite3_stmt) -> Self {
         Self {
@@ -95,6 +98,20 @@ impl FromColumn for String {
         }
         let bytes = unsafe { slice::from_raw_parts(text.cast::<u8>(), len) };
         Ok(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
+impl FromColumn for TextLen {
+    const EXPECTED: &'static str = "TEXT";
+
+    fn read(row: &Row<'_>, index: usize) -> Result<Self, DbError> {
+        let actual = row.column_type(index)?;
+        row.require_type(index, Self::EXPECTED, actual)?;
+        let index = c_int::try_from(index).map_err(|_| DbError::TooManyParameters)?;
+        let len = unsafe { ffi::sqlite3_column_bytes(row.raw, index) };
+        usize::try_from(len)
+            .map(TextLen)
+            .map_err(|_| DbError::TextTooLarge)
     }
 }
 

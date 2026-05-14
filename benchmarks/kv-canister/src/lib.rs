@@ -7,7 +7,7 @@ use candid::CandidType;
 use ic_cdk::{api::performance_counter, init, post_upgrade, query, update};
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::db::statement::QueryOptionalStringTextProfile;
-use ic_sqlite_vfs::db::ToSql;
+use ic_sqlite_vfs::db::{TextLen, ToSql};
 use ic_sqlite_vfs::read_metrics;
 use ic_sqlite_vfs::stable::{memory, meta::Superblock};
 use ic_sqlite_vfs::Db;
@@ -25,6 +25,7 @@ const MIGRATIONS: &[Migration] = &[Migration {
         value TEXT NOT NULL
     ) WITHOUT ROWID;",
 }];
+const POINT_READ_SQL: &str = "SELECT value FROM bench WHERE key = ?1";
 const SQLITE_MEMORY_ID: MemoryId = MemoryId::new(120);
 
 thread_local! {
@@ -40,6 +41,16 @@ pub struct BenchReport {
     pub db_size: u64,
     pub stable_pages: u64,
     pub stable_bytes: u64,
+}
+
+#[derive(CandidType, Deserialize)]
+pub struct DbStatsReport {
+    pub db_size: u64,
+    pub stable_pages: u64,
+    pub stable_bytes: u64,
+    pub sqlite_page_size: u64,
+    pub sqlite_page_count: u64,
+    pub sqlite_freelist_count: u64,
 }
 
 #[derive(CandidType, Deserialize)]
@@ -160,10 +171,11 @@ fn bench_update_only(rows: u32) -> Result<BenchReport, String> {
 
 #[query]
 fn bench_read(rows: u32) -> Result<BenchReport, String> {
+    warm_point_read_statement()?;
     let start = performance_counter(0);
     let checksum = Db::query(|connection| {
         let mut total = 0_u64;
-        let mut statement = connection.prepare("SELECT value FROM bench WHERE key = ?1")?;
+        let mut statement = connection.prepare_cached(POINT_READ_SQL)?;
         for index in 0..rows {
             let mut key = [0_u8; 9];
             let key = bench_key(index, &mut key);
@@ -182,6 +194,7 @@ fn bench_get_many_in(rows: u32) -> Result<BenchReport, String> {
     if rows == 0 {
         return Err("rows must be positive".to_string());
     }
+    warm_read_connection()?;
     let start = performance_counter(0);
     let checksum = Db::query(|connection| {
         let sql = format!(
@@ -193,15 +206,49 @@ fn bench_get_many_in(rows: u32) -> Result<BenchReport, String> {
             .iter()
             .map(|key| key as &dyn ToSql)
             .collect::<Vec<_>>();
-        let rows = connection.query_column::<String>(&sql, &values)?;
-        Ok(rows.iter().map(|value| value.len() as u64).sum::<u64>())
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(&values)?;
+        let mut total = 0_u64;
+        while let Some(row) = rows.next_row()? {
+            let len = row.get::<TextLen>(0)?.0;
+            total = total.wrapping_add(len as u64);
+        }
+        Ok(total)
     })
     .map_err(error_text)?;
     report(rows, start, checksum)
 }
 
 #[query]
+fn db_stats() -> Result<DbStatsReport, String> {
+    let block = Superblock::load().map_err(|error| error.to_string())?;
+    let stable_pages = memory::size_pages();
+    let (sqlite_page_size, sqlite_page_count, sqlite_freelist_count) = Db::query(|connection| {
+        Ok((
+            connection.query_scalar::<i64>("PRAGMA page_size", ic_sqlite_vfs::params![])?,
+            connection.query_scalar::<i64>("PRAGMA page_count", ic_sqlite_vfs::params![])?,
+            connection.query_scalar::<i64>("PRAGMA freelist_count", ic_sqlite_vfs::params![])?,
+        ))
+    })
+    .map_err(error_text)?;
+    Ok(DbStatsReport {
+        db_size: block.db_size,
+        stable_pages,
+        stable_bytes: stable_pages
+            .checked_mul(ic_sqlite_vfs::config::STABLE_PAGE_SIZE)
+            .ok_or_else(|| "stable byte size overflow".to_string())?,
+        sqlite_page_size: u64::try_from(sqlite_page_size)
+            .map_err(|_| "negative page_size".to_string())?,
+        sqlite_page_count: u64::try_from(sqlite_page_count)
+            .map_err(|_| "negative page_count".to_string())?,
+        sqlite_freelist_count: u64::try_from(sqlite_freelist_count)
+            .map_err(|_| "negative freelist_count".to_string())?,
+    })
+}
+
+#[query]
 fn bench_read_profile(rows: u32) -> Result<BenchReadProfileReport, String> {
+    warm_point_read_statement()?;
     read_metrics::reset_read_metrics();
     let start = performance_counter(0);
     let mut profile = BenchReadProfile::default();
@@ -209,7 +256,7 @@ fn bench_read_profile(rows: u32) -> Result<BenchReadProfileReport, String> {
         profile.open_query = performance_counter(0).saturating_sub(start);
 
         let prepare_start = performance_counter(0);
-        let mut statement = connection.prepare("SELECT value FROM bench WHERE key = ?1")?;
+        let mut statement = connection.prepare_cached(POINT_READ_SQL)?;
         profile.prepare = performance_counter(0).saturating_sub(prepare_start);
 
         let mut total = 0_u64;
@@ -323,13 +370,17 @@ fn bench_large_blob(bytes: u32) -> Result<BenchReport, String> {
 
 #[query]
 fn bench_many_rows(rows: u32) -> Result<BenchReport, String> {
+    warm_read_connection()?;
     let start = performance_counter(0);
     let checksum = Db::query(|connection| {
-        let values = connection.query_column::<String>(
-            "SELECT value FROM bench ORDER BY key LIMIT ?1",
-            ic_sqlite_vfs::params![i64::from(rows)],
-        )?;
-        Ok(values.iter().map(|value| value.len() as u64).sum::<u64>())
+        let mut statement = connection.prepare("SELECT value FROM bench ORDER BY key LIMIT ?1")?;
+        let mut rows = statement.query(ic_sqlite_vfs::params![i64::from(rows)])?;
+        let mut total = 0_u64;
+        while let Some(row) = rows.next_row()? {
+            let len = row.get::<TextLen>(0)?.0;
+            total = total.wrapping_add(len as u64);
+        }
+        Ok(total)
     })
     .map_err(error_text)?;
     report(rows, start, checksum)
@@ -545,6 +596,18 @@ fn must(result: Result<(), ic_sqlite_vfs::DbError>) {
     if let Err(error) = result {
         ic_cdk::trap(error.to_string());
     }
+}
+
+fn warm_read_connection() -> Result<(), String> {
+    Db::query(|_| Ok(())).map_err(error_text)
+}
+
+fn warm_point_read_statement() -> Result<(), String> {
+    Db::query(|connection| {
+        let _statement = connection.prepare_cached(POINT_READ_SQL)?;
+        Ok(())
+    })
+    .map_err(error_text)
 }
 
 fn error_text(error: ic_sqlite_vfs::DbError) -> String {

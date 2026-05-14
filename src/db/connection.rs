@@ -1,7 +1,8 @@
 //! Thin SQLite C connection wrapper bound to the `icstable` VFS.
 //!
 //! `rusqlite` refuses `SQLITE_THREADSAFE=0`, so this crate keeps a small FFI
-//! facade. Connections are per-message and never shared.
+//! facade. Write connections are per-message; read-only connections may be
+//! reused inside one context cache.
 
 use crate::config::{SQLITE_URI, STATEMENT_CACHE_CAPACITY, VFS_NAME};
 use crate::db::row::{FromColumn, Row};

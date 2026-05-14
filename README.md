@@ -149,7 +149,7 @@ Rules:
 
 - one update call is one DB transaction
 - no `await` inside a transaction
-- query calls open read-only connections
+- query calls use read-only, query-only connections
 - WAL is disabled
 - journal and temp data stay in heap memory
 - only the DB image is stored in stable memory
@@ -420,31 +420,33 @@ npm run test:pocketic:ic-rusqlite-perf
 
 For manual local-network checks, run `scripts/bench-kv-local.sh 1000`.
 
-KV workload, current PocketIC harness:
+KV workload, current PocketIC harness. Each workload runs in a fresh canister.
+Read workloads use a warm read connection; point reads also warm the cached
+point-read statement before instruction measurement.
 
 | Workload | ic-sqlite-vfs | wasi2ic + ic-rusqlite | Result |
 |---|---:|---:|---:|
 | reset + insert, 1000 rows | 16.06M | 86.51M | 5.4x fewer instructions |
-| insert only into empty table, 1000 rows | 15.80M | 85.97M | 5.4x fewer instructions |
-| insert only into empty table, 5000 rows | 84.59M | 439.79M | 5.2x fewer instructions |
-| append insert, 5000 existing + 1000 new | 19.50M | 89.04M | 4.6x fewer instructions |
+| insert only into empty table, 1000 rows | 15.55M | 85.90M | 5.5x fewer instructions |
+| insert only into empty table, 5000 rows | 84.35M | 440.58M | 5.2x fewer instructions |
+| append insert, 5000 existing + 1000 new | 19.50M | 88.97M | 4.6x fewer instructions |
 | insert/update upsert, 1000 rows | 19.26M | 89.49M | 4.6x fewer instructions |
-| update only by primary key, 1000 rows | 22.39M | 83.54M | 3.7x fewer instructions |
-| update only by primary key, 5000 rows | 115.90M | 423.69M | 3.7x fewer instructions |
-| point read, 1 key | 0.43M | 0.05M | wasi2ic lower on this harness |
-| point read, 10 keys | 0.55M | 0.17M | wasi2ic lower on this harness |
-| point read, 100 keys | 1.86M | 1.31M | wasi2ic lower on this harness |
-| point read, 1000 keys | 15.18M | 12.82M | wasi2ic lower on this harness |
-| bulk read ordered scan, 100 rows | 0.79M | 0.29M | wasi2ic lower on this harness |
-| bulk read ordered scan, 1000 rows | 3.54M | 2.14M | wasi2ic lower on this harness |
-| bulk read ordered scan, 5000 rows | 15.61M | 10.34M | wasi2ic lower on this harness |
-| `WHERE key IN (...)`, 100 keys | 2.32M | 1.74M | wasi2ic lower on this harness |
-| `WHERE key IN (...)`, 1000 keys | 21.82M | 19.05M | wasi2ic lower on this harness |
+| update only by primary key, 1000 rows | 22.38M | 83.58M | 3.7x fewer instructions |
+| update only by primary key, 5000 rows | 115.88M | 425.26M | 3.7x fewer instructions |
+| point read, 1 key | 0.057M | 0.029M | wasi2ic lower on this harness |
+| point read, 10 keys | 0.187M | 0.145M | wasi2ic lower on this harness |
+| point read, 100 keys | 1.49M | 1.29M | wasi2ic lower on this harness |
+| point read, 1000 keys | 14.82M | 12.92M | wasi2ic lower on this harness |
+| bulk read ordered scan, 100 rows | 0.264M | 0.245M | roughly equal |
+| bulk read ordered scan, 1000 rows | 1.60M | 1.67M | ic-sqlite-vfs slightly lower |
+| bulk read ordered scan, 5000 rows | 7.59M | 8.00M | ic-sqlite-vfs slightly lower |
+| `WHERE key IN (...)`, 100 keys | 1.78M | 1.68M | wasi2ic lower on this harness |
+| `WHERE key IN (...)`, 1000 keys | 19.85M | 18.53M | wasi2ic lower on this harness |
 
 Repeated point reads execute one SQLite statement per key inside the canister.
 They mostly measure bind/reset/step wrapper overhead, not stable-memory I/O.
-Bulk reads and `IN` multi-gets reduce per-key SQL call overhead, but in this
-harness wasi2ic + ic-rusqlite reads fewer and smaller SQLite pages.
+Bulk reads and `IN` multi-gets reduce per-key SQL call overhead. These read
+benchmarks sum TEXT lengths without allocating result strings.
 The KV benchmark schema uses `WITHOUT ROWID`, so the primary key lookup and row
 payload live in one SQLite B-tree instead of a rowid table plus a separate
 unique index. The MemoryManager-backed path can coexist with other stable
@@ -456,12 +458,19 @@ read, and VFS read metrics.
 The wasi2ic numbers are measured with `ic-rusqlite 0.5.0`, `precompiled`,
 `wasm32-wasip1`, and `wasi2ic 0.2.16`.
 
-Memory after the 1000-row run:
+Stable memory after the 1000-row clean reset:
 
-| Implementation | Canister memory |
+| Implementation | Stable memory |
 |---|---:|
-| ic-sqlite-vfs | 4.30 MB |
-| wasi2ic + ic-rusqlite | 89.64 MB |
+| ic-sqlite-vfs | 0.50 MB |
+| wasi2ic + ic-rusqlite | 80.06 MB |
+
+Clean 5000-row DB stats:
+
+| Implementation | DB size | SQLite page size | SQLite pages | Stable pages |
+|---|---:|---:|---:|---:|
+| ic-sqlite-vfs | 278,528 bytes | 16,384 bytes | 17 | 10 |
+| wasi2ic + ic-rusqlite | 233,472 bytes | 4,096 bytes | 57 | 1281 |
 
 Wasm size:
 

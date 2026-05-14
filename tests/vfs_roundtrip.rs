@@ -538,6 +538,137 @@ fn read_table_cache_is_invalidated_after_publish_paths() {
 
 #[test]
 #[serial]
+fn cached_read_connection_sees_committed_update() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE read_connection_guard(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO read_connection_guard(k, v) VALUES ('key', 'before')")
+    })
+    .unwrap();
+
+    let before = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM read_connection_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(before, "before");
+
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE read_connection_guard SET v = ?1 WHERE k = 'key'",
+            params!["after"],
+        )
+    })
+    .unwrap();
+    let after = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM read_connection_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+
+    assert_eq!(after, "after");
+}
+
+#[test]
+#[serial]
+fn cached_read_connection_survives_failed_update() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE failed_update_guard(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO failed_update_guard(k, v) VALUES ('key', 'before')")
+    })
+    .unwrap();
+
+    let before = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM failed_update_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(before, "before");
+
+    let result = Db::update(|connection| {
+        connection.execute(
+            "UPDATE failed_update_guard SET v = ?1 WHERE k = 'key'",
+            params!["after"],
+        )?;
+        connection.execute_batch("INSERT INTO missing_table(value) VALUES (1)")?;
+        Ok(())
+    });
+    assert!(result.is_err());
+
+    let after = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM failed_update_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(after, "before");
+}
+
+#[test]
+#[serial]
+fn import_replaces_cached_read_connection() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE import_cache_guard(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO import_cache_guard(k, v) VALUES ('key', 'old')")
+    })
+    .unwrap();
+    let db_size = Superblock::load().unwrap().db_size;
+    let checksum = Db::refresh_checksum().unwrap();
+    let old_image = Db::export_chunk(0, db_size).unwrap();
+
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE import_cache_guard SET v = ?1 WHERE k = 'key'",
+            params!["new"],
+        )
+    })
+    .unwrap();
+    let new_value = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM import_cache_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(new_value, "new");
+
+    Db::begin_import(db_size, checksum).unwrap();
+    Db::import_chunk(0, &old_image).unwrap();
+    Db::finish_import().unwrap();
+    let imported = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM import_cache_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+
+    assert_eq!(imported, "old");
+}
+
+#[test]
+#[serial]
 fn failed_update_rolls_back_transaction() {
     reset();
     Db::migrate(&[Migration {

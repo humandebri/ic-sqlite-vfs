@@ -31,6 +31,14 @@ type BenchReadProfileReport = record {
   page_table_segment_misses : nat64;
   superblock_loads : nat64;
 };
+type DbStatsReport = record {
+  db_size : nat64;
+  stable_pages : nat64;
+  stable_bytes : nat64;
+  sqlite_page_size : nat64;
+  sqlite_page_count : nat64;
+  sqlite_freelist_count : nat64;
+};
 
 service : {
   bench_reset : (nat32) -> (variant { Ok : BenchReport; Err : text });
@@ -46,4 +54,5 @@ service : {
   bench_unbounded_order_by : (nat32) -> (variant { Ok : BenchReport; Err : text });
   bench_join : (nat32) -> (variant { Ok : BenchReport; Err : text });
   bench_growth : (nat32, nat32) -> (variant { Ok : BenchReport; Err : text });
+  db_stats : () -> (variant { Ok : DbStatsReport; Err : text }) query;
 }

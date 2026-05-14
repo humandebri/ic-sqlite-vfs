@@ -13,6 +13,7 @@ const MIGRATION_SQL: &str = "CREATE TABLE IF NOT EXISTS bench (
     key TEXT PRIMARY KEY NOT NULL,
     value TEXT NOT NULL
 ) WITHOUT ROWID";
+const POINT_READ_SQL: &str = "SELECT value FROM bench WHERE key = ?1";
 
 #[derive(CandidType, Deserialize)]
 pub struct BenchReport {
@@ -22,6 +23,16 @@ pub struct BenchReport {
     pub db_size: u64,
     pub stable_pages: u64,
     pub stable_bytes: u64,
+}
+
+#[derive(CandidType, Deserialize)]
+pub struct DbStatsReport {
+    pub db_size: u64,
+    pub stable_pages: u64,
+    pub stable_bytes: u64,
+    pub sqlite_page_size: u64,
+    pub sqlite_page_count: u64,
+    pub sqlite_freelist_count: u64,
 }
 
 #[init]
@@ -110,10 +121,11 @@ fn bench_update_only(rows: u32) -> Result<BenchReport, String> {
 
 #[query]
 fn bench_read(rows: u32) -> Result<BenchReport, String> {
+    warm_point_read_statement()?;
     let start = performance_counter(0);
     let checksum = with_connection(|connection| -> Result<u64, ic_rusqlite::Error> {
         let mut total = 0_u64;
-        let mut statement = connection.prepare("SELECT value FROM bench WHERE key = ?1")?;
+        let mut statement = connection.prepare_cached(POINT_READ_SQL)?;
         for index in 0..rows {
             let key = format!("k{index:08}");
             let value = statement
@@ -139,11 +151,12 @@ fn bench_many_rows(rows: u32) -> Result<BenchReport, String> {
         let mut statement =
             connection.prepare("SELECT value FROM bench ORDER BY key LIMIT ?1")?;
         let values = statement.query_map(params![i64::from(rows)], |row| {
-            row.get::<_, String>(0)
+            let value = row.get_ref(0)?;
+            Ok(value.as_str()?.len())
         })?;
         let mut total = 0_u64;
-        for value in values {
-            total = total.wrapping_add(value?.len() as u64);
+        for len in values {
+            total = total.wrapping_add(len? as u64);
         }
         Ok(total)
     })
@@ -184,16 +197,46 @@ fn bench_get_many_in(rows: u32) -> Result<BenchReport, String> {
         let keys = bench_keys(rows);
         let mut statement = connection.prepare(&sql)?;
         let values = statement.query_map(params_from_iter(keys.iter()), |row| {
-            row.get::<_, String>(0)
+            let value = row.get_ref(0)?;
+            Ok(value.as_str()?.len())
         })?;
         let mut total = 0_u64;
-        for value in values {
-            total = total.wrapping_add(value?.len() as u64);
+        for len in values {
+            total = total.wrapping_add(len? as u64);
         }
         Ok(total)
     })
     .map_err(error_text)?;
     report(rows, start, checksum)
+}
+
+#[query]
+fn db_stats() -> Result<DbStatsReport, String> {
+    let db_size = db_file_size()?;
+    let stable_pages = ic_cdk::api::stable_size();
+    let stable_bytes = stable_pages
+        .checked_mul(STABLE_PAGE_SIZE)
+        .ok_or_else(|| "stable byte size overflow".to_string())?;
+    let (sqlite_page_size, sqlite_page_count, sqlite_freelist_count) =
+        with_connection(|connection| -> Result<(i64, i64, i64), ic_rusqlite::Error> {
+            Ok((
+                connection.query_row("PRAGMA page_size", [], |row| row.get(0))?,
+                connection.query_row("PRAGMA page_count", [], |row| row.get(0))?,
+                connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?,
+            ))
+        })
+        .map_err(error_text)?;
+    Ok(DbStatsReport {
+        db_size,
+        stable_pages,
+        stable_bytes,
+        sqlite_page_size: u64::try_from(sqlite_page_size)
+            .map_err(|_| "negative page_size".to_string())?,
+        sqlite_page_count: u64::try_from(sqlite_page_count)
+            .map_err(|_| "negative page_count".to_string())?,
+        sqlite_freelist_count: u64::try_from(sqlite_freelist_count)
+            .map_err(|_| "negative freelist_count".to_string())?,
+    })
 }
 
 fn migrate() -> Result<(), ic_rusqlite::Error> {
@@ -265,6 +308,14 @@ fn db_file_size() -> Result<u64, String> {
 
 fn error_text(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+fn warm_point_read_statement() -> Result<(), String> {
+    with_connection(|connection| -> Result<(), ic_rusqlite::Error> {
+        let _statement = connection.prepare_cached(POINT_READ_SQL)?;
+        Ok(())
+    })
+    .map_err(error_text)
 }
 
 fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
