@@ -224,7 +224,7 @@ pub(crate) fn read_base_at_with_block(
     let requested = u64::try_from(dst.len()).map_err(|_| StableMemoryError::OffsetOverflow)?;
     let copied = requested.min(block.db_size - offset);
     let copied_len = usize::try_from(copied).map_err(|_| StableMemoryError::OffsetOverflow)?;
-    read_logical_range(&block, offset, &mut dst[..copied_len])?;
+    read_logical_range(block, offset, &mut dst[..copied_len])?;
     dst[copied_len..].fill(0);
     Ok(copied == requested)
 }
@@ -611,9 +611,9 @@ fn load_segment_for_update<'a>(
     updates: &'a mut BTreeMap<u64, Vec<u64>>,
     segment_no: u64,
 ) -> Result<&'a mut Vec<u64>, StableMemoryError> {
-    if !updates.contains_key(&segment_no) {
+    if let std::collections::btree_map::Entry::Vacant(entry) = updates.entry(segment_no) {
         let table = read_segment_table(block, root, segment_no)?;
-        updates.insert(segment_no, table);
+        entry.insert(table);
     }
     updates
         .get_mut(&segment_no)
@@ -937,7 +937,7 @@ fn write_u64_table(entries: &[u64]) -> Result<u64, StableMemoryError> {
 }
 
 fn decode_u64_table(bytes: &[u8]) -> Result<Vec<u64>, StableMemoryError> {
-    if bytes.len() % 8 != 0 {
+    if !bytes.len().is_multiple_of(8) {
         return Err(StableMemoryError::OffsetOverflow);
     }
     let mut entries = Vec::with_capacity(bytes.len() / 8);

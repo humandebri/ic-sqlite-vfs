@@ -101,6 +101,8 @@ keeps statement lifetimes inside one synchronous canister message.
 - Do not hold a connection outside the closure.
 - Do not `await` inside `Db::update` or `Db::query`.
 - Put writes in `Db::update`; query connections are read-only/query-only.
+- Do not call mutation helpers from inside `Db::query`; they return
+  `DbError::ReadConnectionInUse`.
 - Use migrations for schema changes:
 
 ```rust

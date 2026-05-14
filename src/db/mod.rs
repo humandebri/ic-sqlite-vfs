@@ -26,6 +26,7 @@ pub use value::{Null, ToSql, Value, NULL};
 
 thread_local! {
     static READ_CONNECTIONS: RefCell<BTreeMap<ContextId, Rc<Connection>>> = const { RefCell::new(BTreeMap::new()) };
+    static ACTIVE_READ_CONNECTIONS: RefCell<BTreeMap<ContextId, usize>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +51,8 @@ pub enum DbError {
     StableMemoryNotInitialized,
     #[error("stable memory backend is already initialized")]
     StableMemoryAlreadyInitialized,
+    #[error("cannot mutate database while a query connection is active")]
+    ReadConnectionInUse,
     #[error("migration version exceeds SQLite INTEGER range: {0}")]
     MigrationVersionOutOfRange(u64),
     #[error("duplicate migration version: {0}")]
@@ -201,6 +204,7 @@ impl DbHandle {
         F: FnOnce(&mut UpdateConnection<'_>) -> Result<T, DbError>,
     {
         self.with_context(|| {
+            reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
             stable_blob::begin_update()?;
             let _overlay_guard = OverlayGuard;
@@ -252,6 +256,7 @@ impl DbHandle {
 
     pub fn refresh_checksum(self) -> Result<u64, DbError> {
         self.with_context(|| {
+            reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
             stable_blob::refresh_checksum().map_err(DbError::from)
         })
@@ -259,6 +264,7 @@ impl DbHandle {
 
     pub fn refresh_checksum_chunk(self, max_bytes: u64) -> Result<ChecksumRefresh, DbError> {
         self.with_context(|| {
+            reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
             stable_blob::refresh_checksum_chunk(max_bytes).map_err(DbError::from)
         })
@@ -266,6 +272,7 @@ impl DbHandle {
 
     pub fn begin_import(self, total_size: u64, expected_checksum: u64) -> Result<(), DbError> {
         self.with_context(|| {
+            reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
             stable_blob::begin_import(total_size, expected_checksum).map_err(DbError::from)
         })
@@ -273,6 +280,7 @@ impl DbHandle {
 
     pub fn import_chunk(self, offset: u64, bytes: &[u8]) -> Result<(), DbError> {
         self.with_context(|| {
+            reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
             stable_blob::import_chunk(offset, bytes).map_err(DbError::from)
         })
@@ -280,6 +288,7 @@ impl DbHandle {
 
     pub fn finish_import(self) -> Result<(), DbError> {
         self.with_context(|| {
+            reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
             stable_blob::finish_import().map_err(DbError::from)
         })
@@ -287,6 +296,7 @@ impl DbHandle {
 
     pub fn cancel_import(self) -> Result<(), DbError> {
         self.with_context(|| {
+            reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
             stable_blob::cancel_import().map_err(DbError::from)
         })
@@ -294,6 +304,7 @@ impl DbHandle {
 
     pub fn compact(self) -> Result<(), DbError> {
         self.with_context(|| {
+            reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
             stable_blob::compact().map_err(DbError::from)
         })
@@ -313,7 +324,18 @@ fn with_read_connection<T>(
             slot.borrow_mut().insert(context, Rc::clone(&connection));
             connection
         };
+        let _guard = ReadGuard::enter(context);
         f(&connection)
+    })
+}
+
+fn reject_active_read_connection(context: ContextId) -> Result<(), DbError> {
+    ACTIVE_READ_CONNECTIONS.with(|slot| {
+        if slot.borrow().get(&context).copied().unwrap_or(0) == 0 {
+            Ok(())
+        } else {
+            Err(DbError::ReadConnectionInUse)
+        }
     })
 }
 
@@ -321,6 +343,35 @@ fn clear_read_connection(context: ContextId) {
     READ_CONNECTIONS.with(|slot| {
         slot.borrow_mut().remove(&context);
     });
+}
+
+struct ReadGuard {
+    context: ContextId,
+}
+
+impl ReadGuard {
+    fn enter(context: ContextId) -> Self {
+        ACTIVE_READ_CONNECTIONS.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            *slot.entry(context).or_insert(0) += 1;
+        });
+        Self { context }
+    }
+}
+
+impl Drop for ReadGuard {
+    fn drop(&mut self) {
+        ACTIVE_READ_CONNECTIONS.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(depth) = slot.get_mut(&self.context) else {
+                return;
+            };
+            *depth = depth.saturating_sub(1);
+            if *depth == 0 {
+                slot.remove(&self.context);
+            }
+        });
+    }
 }
 
 struct OverlayGuard;

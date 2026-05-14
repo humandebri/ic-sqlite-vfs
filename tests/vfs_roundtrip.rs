@@ -3,7 +3,7 @@ use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::sqlite_vfs::{self, ffi, lock, stable_blob};
 use ic_sqlite_vfs::stable::memory;
 use ic_sqlite_vfs::stable::meta::Superblock;
-use ic_sqlite_vfs::{params, Db, DbHandle};
+use ic_sqlite_vfs::{params, Db, DbError, DbHandle};
 use ic_stable_structures::{
     memory_manager::{MemoryId, MemoryManager},
     DefaultMemoryImpl,
@@ -538,7 +538,7 @@ fn read_table_cache_is_invalidated_after_publish_paths() {
 
 #[test]
 #[serial]
-fn query_closure_can_clear_read_connection_cache_without_panic() {
+fn query_closure_rejects_mutation_without_panic_or_stale_clear() {
     reset();
     Db::migrate(&[Migration {
         version: 1,
@@ -550,16 +550,29 @@ fn query_closure_can_clear_read_connection_cache_without_panic() {
     })
     .unwrap();
 
-    let before = Db::query(|connection| {
-        let value = connection
+    let (before, update_blocked, compact_blocked, still_before) = Db::query(|connection| {
+        let before = connection
             .query_scalar::<String>("SELECT v FROM reentrant_clear WHERE k = 'key'", params![])?;
-        Db::update(|connection| {
-            connection.execute(
-                "UPDATE reentrant_clear SET v = ?1 WHERE k = 'key'",
-                params!["after"],
-            )
-        })?;
-        Ok(value)
+        let update_blocked = matches!(
+            Db::update(|connection| {
+                connection.execute(
+                    "UPDATE reentrant_clear SET v = ?1 WHERE k = 'key'",
+                    params!["after"],
+                )
+            }),
+            Err(DbError::ReadConnectionInUse)
+        );
+        let compact_blocked = matches!(Db::compact(), Err(DbError::ReadConnectionInUse));
+        let still_before = connection
+            .query_scalar::<String>("SELECT v FROM reentrant_clear WHERE k = 'key'", params![])?;
+        Ok((before, update_blocked, compact_blocked, still_before))
+    })
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE reentrant_clear SET v = ?1 WHERE k = 'key'",
+            params!["after"],
+        )
     })
     .unwrap();
     let after = Db::query(|connection| {
@@ -569,7 +582,66 @@ fn query_closure_can_clear_read_connection_cache_without_panic() {
     .unwrap();
 
     assert_eq!(before, "before");
+    assert!(update_blocked);
+    assert!(compact_blocked);
+    assert_eq!(still_before, "before");
     assert_eq!(after, "after");
+}
+
+#[test]
+#[serial]
+fn query_closure_rejects_checksum_refresh_without_panic() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE reentrant_checksum(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO reentrant_checksum(k, v) VALUES ('key', 'value')")
+    })
+    .unwrap();
+
+    let blocked = Db::query(|connection| {
+        let value = connection.query_scalar::<String>(
+            "SELECT v FROM reentrant_checksum WHERE k = 'key'",
+            params![],
+        )?;
+        Ok((
+            value,
+            matches!(Db::refresh_checksum(), Err(DbError::ReadConnectionInUse)),
+        ))
+    })
+    .unwrap();
+
+    assert_eq!(blocked, ("value".to_string(), true));
+}
+
+#[test]
+#[serial]
+fn query_closure_rejects_import_without_panic() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE reentrant_import(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO reentrant_import(k, v) VALUES ('key', 'value')")
+    })
+    .unwrap();
+
+    let blocked = Db::query(|connection| {
+        let value = connection
+            .query_scalar::<String>("SELECT v FROM reentrant_import WHERE k = 'key'", params![])?;
+        Ok((
+            value,
+            matches!(Db::begin_import(0, 0), Err(DbError::ReadConnectionInUse)),
+        ))
+    })
+    .unwrap();
+
+    assert_eq!(blocked, ("value".to_string(), true));
 }
 
 #[test]

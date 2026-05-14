@@ -334,6 +334,43 @@ pub(crate) fn classify_open_flags(flags: c_int) -> OpenOptions {
     }
 }
 
+fn is_main_db(path: Option<&str>) -> bool {
+    match path {
+        Some(value) => normalized_main_path(value) == MAIN_DB_PATH,
+        None => false,
+    }
+}
+
+fn normalized_main_path(path: &str) -> &str {
+    let without_scheme = path.strip_prefix("file:").unwrap_or(path);
+    without_scheme
+        .split_once('?')
+        .map_or(without_scheme, |(path, _)| path)
+}
+
+unsafe fn path_from_sqlite(name: *const c_char) -> Option<String> {
+    if name.is_null() {
+        return None;
+    }
+    Some(CStr::from_ptr(name).to_string_lossy().into_owned())
+}
+
+fn current_time_nanos() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ic_cdk::api::time()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{classify_open_flags, x_get_last_error, x_open, OpenAccess, OpenKind};
@@ -491,42 +528,5 @@ mod tests {
             unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap(),
             "WAL files are unsupported"
         );
-    }
-}
-
-fn is_main_db(path: Option<&str>) -> bool {
-    match path {
-        Some(value) => normalized_main_path(value) == MAIN_DB_PATH,
-        None => false,
-    }
-}
-
-fn normalized_main_path(path: &str) -> &str {
-    let without_scheme = path.strip_prefix("file:").unwrap_or(path);
-    without_scheme
-        .split_once('?')
-        .map_or(without_scheme, |(path, _)| path)
-}
-
-unsafe fn path_from_sqlite(name: *const c_char) -> Option<String> {
-    if name.is_null() {
-        return None;
-    }
-    Some(CStr::from_ptr(name).to_string_lossy().into_owned())
-}
-
-fn current_time_nanos() -> u64 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        ic_cdk::api::time()
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let duration = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
     }
 }

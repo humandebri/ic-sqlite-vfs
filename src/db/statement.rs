@@ -478,9 +478,7 @@ fn hit_step_failpoint() -> Option<std::ffi::c_int> {
     };
     STEP_FAILPOINTS.with(|slot| {
         let mut slot = slot.borrow_mut();
-        let Some(state) = slot.get_mut(&context) else {
-            return None;
-        };
+        let state = slot.get_mut(&context)?;
         state.count += 1;
         if state.failpoint.ordinal == state.count {
             let code = state.failpoint.code;
