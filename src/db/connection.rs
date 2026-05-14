@@ -438,13 +438,13 @@ mod tests {
         stable_blob::invalidate_read_cache();
         memory::reset_for_tests();
         lock::reset_for_tests();
+        Db::init(memory::memory_for_tests()).unwrap();
     }
 
     #[test]
     #[serial]
     fn cached_statements_are_lru_bounded() {
         reset();
-        Db::init().unwrap();
         let connection = open_read_write().unwrap();
 
         for index in 0..(STATEMENT_CACHE_CAPACITY + 8) {
@@ -466,7 +466,6 @@ mod tests {
     #[serial]
     fn discarded_cached_statement_is_finalized_not_cached() {
         reset();
-        Db::init().unwrap();
         let connection = open_read_write().unwrap();
 
         let statement = connection.prepare_cached("SELECT 1").unwrap();

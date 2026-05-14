@@ -24,6 +24,7 @@ fn reset() {
     stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
+    Db::init(memory::memory_for_tests()).unwrap();
     Db::migrate(MIGRATIONS).unwrap();
 }
 

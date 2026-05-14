@@ -12,11 +12,12 @@ use std::ptr::NonNull;
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
 use std::cell::RefCell;
+#[cfg(any(test, feature = "canister-api-test-failpoints"))]
+use std::collections::BTreeMap;
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
 thread_local! {
-    static STEP_FAILPOINT: RefCell<Option<StepFailpoint>> = const { RefCell::new(None) };
-    static STEP_COUNT: RefCell<u64> = const { RefCell::new(0) };
+    static STEP_FAILPOINTS: RefCell<BTreeMap<crate::stable::memory::ContextId, StepFailpointState>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
@@ -24,6 +25,13 @@ thread_local! {
 pub struct StepFailpoint {
     pub ordinal: u64,
     pub code: std::ffi::c_int,
+}
+
+#[cfg(any(test, feature = "canister-api-test-failpoints"))]
+#[derive(Clone, Copy, Debug)]
+struct StepFailpointState {
+    failpoint: StepFailpoint,
+    count: u64,
 }
 
 pub struct Statement<'connection> {
@@ -36,6 +44,14 @@ pub struct Statement<'connection> {
 pub struct Rows<'statement, 'connection> {
     statement: &'statement mut Statement<'connection>,
     done: bool,
+}
+
+#[cfg(feature = "bench-profile")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QueryOptionalStringTextProfile {
+    pub reset_bind: u64,
+    pub step: u64,
+    pub column_read: u64,
 }
 
 impl<'connection> Statement<'connection> {
@@ -209,6 +225,74 @@ impl<'connection> Statement<'connection> {
         }
     }
 
+    pub fn query_optional_string_text_len(
+        &mut self,
+        value: &str,
+    ) -> Result<Option<usize>, DbError> {
+        self.reset_and_bind_single_text(value)?;
+        match step(self.raw.as_ptr())? {
+            ffi::SQLITE_ROW => read_string_column_zero_len(self.raw.as_ptr()).map(Some),
+            ffi::SQLITE_DONE => Ok(None),
+            rc => Err(sqlite_error(self.db, rc)),
+        }
+    }
+
+    #[cfg(feature = "bench-profile")]
+    #[doc(hidden)]
+    pub fn query_optional_string_text_profiled(
+        &mut self,
+        value: &str,
+    ) -> Result<(Option<String>, QueryOptionalStringTextProfile), DbError> {
+        let mut profile = QueryOptionalStringTextProfile::default();
+
+        let start = instruction_counter();
+        self.reset_and_bind_single_text(value)?;
+        profile.reset_bind = instruction_counter().saturating_sub(start);
+
+        let start = instruction_counter();
+        let rc = step(self.raw.as_ptr())?;
+        profile.step = instruction_counter().saturating_sub(start);
+
+        match rc {
+            ffi::SQLITE_ROW => {
+                let start = instruction_counter();
+                let value = read_string_column_zero(self.raw.as_ptr()).map(Some);
+                profile.column_read = instruction_counter().saturating_sub(start);
+                value.map(|value| (value, profile))
+            }
+            ffi::SQLITE_DONE => Ok((None, profile)),
+            rc => Err(sqlite_error(self.db, rc)),
+        }
+    }
+
+    #[cfg(feature = "bench-profile")]
+    #[doc(hidden)]
+    pub fn query_optional_string_text_len_profiled(
+        &mut self,
+        value: &str,
+    ) -> Result<(Option<usize>, QueryOptionalStringTextProfile), DbError> {
+        let mut profile = QueryOptionalStringTextProfile::default();
+
+        let start = instruction_counter();
+        self.reset_and_bind_single_text(value)?;
+        profile.reset_bind = instruction_counter().saturating_sub(start);
+
+        let start = instruction_counter();
+        let rc = step(self.raw.as_ptr())?;
+        profile.step = instruction_counter().saturating_sub(start);
+
+        match rc {
+            ffi::SQLITE_ROW => {
+                let start = instruction_counter();
+                let value = read_string_column_zero_len(self.raw.as_ptr()).map(Some);
+                profile.column_read = instruction_counter().saturating_sub(start);
+                value.map(|value| (value, profile))
+            }
+            ffi::SQLITE_DONE => Ok((None, profile)),
+            rc => Err(sqlite_error(self.db, rc)),
+        }
+    }
+
     pub fn query_optional_scalar_named<T: FromColumn>(
         &mut self,
         values: &[(&str, &dyn ToSql)],
@@ -302,6 +386,19 @@ fn read_string_column_zero(statement: *mut ffi::sqlite3_stmt) -> Result<String, 
     Ok(String::from_utf8_lossy(bytes).into_owned())
 }
 
+fn read_string_column_zero_len(statement: *mut ffi::sqlite3_stmt) -> Result<usize, DbError> {
+    let actual = unsafe { ffi::sqlite3_column_type(statement, 0) };
+    if actual != ffi::SQLITE_TEXT {
+        return Err(DbError::TypeMismatch {
+            index: 0,
+            expected: "TEXT",
+            actual: sqlite_type_name(actual),
+        });
+    }
+    let len = unsafe { ffi::sqlite3_column_bytes(statement, 0) };
+    usize::try_from(len).map_err(|_| DbError::TextTooLarge)
+}
+
 fn sqlite_type_name(code: std::ffi::c_int) -> &'static str {
     match code {
         ffi::SQLITE_INTEGER => "INTEGER",
@@ -338,34 +435,56 @@ fn step(statement: *mut ffi::sqlite3_stmt) -> Result<std::ffi::c_int, DbError> {
     Ok(unsafe { ffi::sqlite3_step(statement) })
 }
 
+#[cfg(feature = "bench-profile")]
+fn instruction_counter() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ic_cdk::api::performance_counter(0)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
+}
+
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
 pub fn set_step_failpoint(failpoint: StepFailpoint) {
-    STEP_FAILPOINT.with(|slot| *slot.borrow_mut() = Some(failpoint));
-    STEP_COUNT.with(|count| *count.borrow_mut() = 0);
+    if let Ok(context) = crate::stable::memory::active_context_id() {
+        STEP_FAILPOINTS.with(|slot| {
+            slot.borrow_mut().insert(
+                context,
+                StepFailpointState {
+                    failpoint,
+                    count: 0,
+                },
+            );
+        });
+    }
 }
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
 pub fn clear_step_failpoint() {
-    STEP_FAILPOINT.with(|slot| *slot.borrow_mut() = None);
-    STEP_COUNT.with(|count| *count.borrow_mut() = 0);
+    STEP_FAILPOINTS.with(|slot| slot.borrow_mut().clear());
 }
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
 fn hit_step_failpoint() -> Option<std::ffi::c_int> {
-    STEP_COUNT.with(|count| {
-        let mut count = count.borrow_mut();
-        *count += 1;
-        let current = *count;
-        STEP_FAILPOINT.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            let failpoint = *slot;
-            if failpoint.is_some_and(|value| value.ordinal == current) {
-                *slot = None;
-                failpoint.map(|value| value.code)
-            } else {
-                None
-            }
-        })
+    let Ok(context) = crate::stable::memory::active_context_id() else {
+        return None;
+    };
+    STEP_FAILPOINTS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(state) = slot.get_mut(&context) else {
+            return None;
+        };
+        state.count += 1;
+        if state.failpoint.ordinal == state.count {
+            let code = state.failpoint.code;
+            slot.remove(&context);
+            Some(code)
+        } else {
+            None
+        }
     })
 }
 

@@ -1,6 +1,21 @@
-//! Raw SQLite FFI re-exports used by the VFS layer.
+//! Raw SQLite FFI used by the VFS layer.
 //!
-//! Keeping the alias in one place makes callback signatures easier to audit
-//! against SQLite's `sqlite3_vfs` and `sqlite3_io_methods` documentation.
+//! Bindings are vendored so `sqlite-precompiled` can link without compiling C.
 
-pub use libsqlite3_sys::*;
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+#![allow(improper_ctypes)]
+#![allow(clippy::all)]
+
+use std::ffi::c_void;
+
+include!(concat!(env!("OUT_DIR"), "/sqlite_bindings.rs"));
+
+pub fn SQLITE_STATIC() -> sqlite3_destructor_type {
+    None
+}
+
+pub fn SQLITE_TRANSIENT() -> sqlite3_destructor_type {
+    Some(unsafe { std::mem::transmute::<isize, unsafe extern "C" fn(*mut c_void)>(-1) })
+}

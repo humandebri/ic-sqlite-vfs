@@ -7,7 +7,10 @@ use crate::config::MAIN_DB_PATH;
 use crate::sqlite_vfs::ffi;
 use crate::sqlite_vfs::file::{self, FileKind};
 use crate::sqlite_vfs::temp::TempFile;
+use crate::stable::memory::{self, ContextId};
 use crate::stable::meta::Superblock;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, CStr};
 use std::ptr;
 use std::sync::Once;
@@ -40,6 +43,41 @@ pub static mut VFS: ffi::sqlite3_vfs = ffi::sqlite3_vfs {
 static VFS_NAME_NUL: &[u8] = b"icstable\0";
 static PREPARE_ONCE: Once = Once::new();
 
+thread_local! {
+    static LAST_ERROR: RefCell<BTreeMap<ContextId, VfsError>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+#[derive(Clone, Debug)]
+struct VfsError {
+    errno: c_int,
+    message: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OpenKind {
+    MainDb,
+    MainJournal,
+    TempDb,
+    TempJournal,
+    TransientDb,
+    Wal,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OpenAccess {
+    ReadOnly,
+    ReadWrite { create: bool },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OpenOptions {
+    pub kind: OpenKind,
+    pub access: OpenAccess,
+    pub uri: bool,
+    pub delete_on_close: bool,
+}
+
 /// # Safety
 ///
 /// SQLite calls this during global VFS initialization. The returned pointer is a
@@ -62,7 +100,14 @@ unsafe extern "C" fn x_open(
     out_flags: *mut c_int,
 ) -> c_int {
     let path = path_from_sqlite(name);
-    let read_only = (flags & ffi::SQLITE_OPEN_READONLY) != 0;
+    let options = classify_open_flags(flags);
+    let context = match memory::active_context_id() {
+        Ok(context) => context,
+        Err(error) => {
+            record_last_error(ffi::SQLITE_CANTOPEN, error.to_string());
+            return ffi::SQLITE_CANTOPEN;
+        }
+    };
     if !file.is_null() {
         (*file).pMethods = ptr::null();
     }
@@ -72,20 +117,29 @@ unsafe extern "C" fn x_open(
 
     if is_main_db(path.as_deref()) {
         let Ok(block) = Superblock::load() else {
+            record_last_error(ffi::SQLITE_CANTOPEN, "failed to load SQLite superblock");
             return ffi::SQLITE_CANTOPEN;
         };
         if block.is_importing() {
+            record_last_error(ffi::SQLITE_CANTOPEN, "database import is in progress");
             return ffi::SQLITE_CANTOPEN;
         }
-        file::install(file, FileKind::Main, read_only);
+        let read_only = options.access == OpenAccess::ReadOnly;
+        file::install(file, FileKind::Main, read_only, context);
         return ffi::SQLITE_OK;
     }
 
-    if (flags & ffi::SQLITE_OPEN_WAL) != 0 {
+    if options.kind == OpenKind::Wal {
+        record_last_error(ffi::SQLITE_CANTOPEN, "WAL files are unsupported");
         return ffi::SQLITE_CANTOPEN;
     }
 
-    file::install(file, FileKind::Temp(TempFile::default()), read_only);
+    file::install(
+        file,
+        FileKind::Temp(TempFile::default()),
+        options.access == OpenAccess::ReadOnly,
+        context,
+    );
     ffi::SQLITE_OK
 }
 
@@ -194,10 +248,250 @@ unsafe extern "C" fn x_current_time_int64(
 
 unsafe extern "C" fn x_get_last_error(
     _vfs: *mut ffi::sqlite3_vfs,
-    _len: c_int,
-    _out: *mut c_char,
+    len: c_int,
+    out: *mut c_char,
 ) -> c_int {
-    0
+    if out.is_null() || len <= 0 {
+        return 0;
+    }
+    let Some(max_len) = usize::try_from(len).ok() else {
+        return 0;
+    };
+    LAST_ERROR.with(|slot| {
+        let Ok(context) = memory::active_context_id() else {
+            *out = 0;
+            return 0;
+        };
+        let Some(error) = slot.borrow().get(&context).cloned() else {
+            *out = 0;
+            return 0;
+        };
+        let bytes = error.message.as_bytes();
+        let copy_len = bytes.len().min(max_len.saturating_sub(1));
+        ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), out, copy_len);
+        *out.add(copy_len) = 0;
+        c_int::try_from(copy_len).unwrap_or(c_int::MAX)
+    })
+}
+
+pub(crate) fn record_last_error(errno: c_int, message: impl Into<String>) {
+    if let Ok(context) = memory::active_context_id() {
+        record_last_error_for(context, errno, message);
+    }
+}
+
+pub(crate) fn record_last_error_for(
+    context: memory::ContextId,
+    errno: c_int,
+    message: impl Into<String>,
+) {
+    LAST_ERROR.with(|slot| {
+        slot.borrow_mut().insert(
+            context,
+            VfsError {
+                errno,
+                message: message.into(),
+            },
+        );
+    });
+}
+
+pub(crate) fn last_errno() -> c_int {
+    let Ok(context) = memory::active_context_id() else {
+        return 0;
+    };
+    LAST_ERROR.with(|slot| slot.borrow().get(&context).map_or(0, |error| error.errno))
+}
+
+pub(crate) fn classify_open_flags(flags: c_int) -> OpenOptions {
+    let kind = if (flags & ffi::SQLITE_OPEN_WAL) != 0 {
+        OpenKind::Wal
+    } else if (flags & ffi::SQLITE_OPEN_MAIN_JOURNAL) != 0 {
+        OpenKind::MainJournal
+    } else if (flags & ffi::SQLITE_OPEN_TEMP_DB) != 0 {
+        OpenKind::TempDb
+    } else if (flags & ffi::SQLITE_OPEN_TEMP_JOURNAL) != 0 {
+        OpenKind::TempJournal
+    } else if (flags & ffi::SQLITE_OPEN_TRANSIENT_DB) != 0 {
+        OpenKind::TransientDb
+    } else if (flags & ffi::SQLITE_OPEN_MAIN_DB) != 0 {
+        OpenKind::MainDb
+    } else {
+        OpenKind::Other
+    };
+    let access = if (flags & ffi::SQLITE_OPEN_READONLY) != 0 {
+        OpenAccess::ReadOnly
+    } else {
+        OpenAccess::ReadWrite {
+            create: (flags & ffi::SQLITE_OPEN_CREATE) != 0,
+        }
+    };
+    OpenOptions {
+        kind,
+        access,
+        uri: (flags & ffi::SQLITE_OPEN_URI) != 0,
+        delete_on_close: (flags & ffi::SQLITE_OPEN_DELETEONCLOSE) != 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_open_flags, x_get_last_error, x_open, OpenAccess, OpenKind};
+    use crate::sqlite_vfs::{ffi, lock};
+    use crate::stable::memory;
+    use std::ffi::{CStr, CString};
+    use std::mem::MaybeUninit;
+    use std::ptr;
+
+    #[test]
+    fn classify_open_flags_covers_sqlite_file_kinds() {
+        assert_eq!(
+            classify_open_flags(ffi::SQLITE_OPEN_READONLY | ffi::SQLITE_OPEN_MAIN_DB).kind,
+            OpenKind::MainDb
+        );
+        assert_eq!(
+            classify_open_flags(ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_MAIN_JOURNAL).kind,
+            OpenKind::MainJournal
+        );
+        assert_eq!(
+            classify_open_flags(ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_TEMP_DB).kind,
+            OpenKind::TempDb
+        );
+        assert_eq!(
+            classify_open_flags(ffi::SQLITE_OPEN_TEMP_JOURNAL).kind,
+            OpenKind::TempJournal
+        );
+        assert_eq!(
+            classify_open_flags(ffi::SQLITE_OPEN_TRANSIENT_DB).kind,
+            OpenKind::TransientDb
+        );
+        assert_eq!(
+            classify_open_flags(ffi::SQLITE_OPEN_WAL).kind,
+            OpenKind::Wal
+        );
+    }
+
+    #[test]
+    fn classify_open_flags_tracks_access_and_uri_bits() {
+        let read_only = classify_open_flags(ffi::SQLITE_OPEN_READONLY | ffi::SQLITE_OPEN_URI);
+        assert_eq!(read_only.access, OpenAccess::ReadOnly);
+        assert!(read_only.uri);
+
+        let read_write = classify_open_flags(
+            ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_DELETEONCLOSE,
+        );
+        assert_eq!(read_write.access, OpenAccess::ReadWrite { create: true });
+        assert!(!read_write.uri);
+        assert!(read_write.delete_on_close);
+    }
+
+    #[test]
+    fn x_open_accepts_supported_open_classes_and_rejects_wal() {
+        memory::reset_for_tests();
+        lock::reset_for_tests();
+        memory::init(memory::memory_for_tests()).unwrap();
+
+        let cases = [
+            (
+                "/main.db",
+                ffi::SQLITE_OPEN_READONLY | ffi::SQLITE_OPEN_MAIN_DB,
+            ),
+            (
+                "/main.db",
+                ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_MAIN_DB,
+            ),
+            (
+                "/main.db",
+                ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_MAIN_DB,
+            ),
+            (
+                "/main.db-journal",
+                ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_MAIN_JOURNAL,
+            ),
+            (
+                "",
+                ffi::SQLITE_OPEN_READWRITE
+                    | ffi::SQLITE_OPEN_CREATE
+                    | ffi::SQLITE_OPEN_TEMP_DB
+                    | ffi::SQLITE_OPEN_DELETEONCLOSE,
+            ),
+            (
+                "",
+                ffi::SQLITE_OPEN_READWRITE
+                    | ffi::SQLITE_OPEN_CREATE
+                    | ffi::SQLITE_OPEN_TEMP_JOURNAL
+                    | ffi::SQLITE_OPEN_DELETEONCLOSE,
+            ),
+            (
+                "",
+                ffi::SQLITE_OPEN_READWRITE
+                    | ffi::SQLITE_OPEN_CREATE
+                    | ffi::SQLITE_OPEN_TRANSIENT_DB
+                    | ffi::SQLITE_OPEN_DELETEONCLOSE,
+            ),
+            (
+                "file:/main.db?mode=ro",
+                ffi::SQLITE_OPEN_READONLY | ffi::SQLITE_OPEN_MAIN_DB | ffi::SQLITE_OPEN_URI,
+            ),
+        ];
+
+        for (name, flags) in cases {
+            let mut storage = MaybeUninit::<crate::sqlite_vfs::file::IcStableFile>::uninit();
+            let mut out_flags = 0;
+            let name = CString::new(name).unwrap();
+            let file = storage.as_mut_ptr().cast::<ffi::sqlite3_file>();
+            let rc = unsafe {
+                x_open(
+                    ptr::null_mut(),
+                    name.as_ptr(),
+                    file,
+                    flags,
+                    ptr::addr_of_mut!(out_flags),
+                )
+            };
+            assert_eq!(rc, ffi::SQLITE_OK, "flags={flags}");
+            assert_eq!(out_flags, flags);
+            unsafe {
+                assert!(!(*file).pMethods.is_null());
+                ((*(*file).pMethods).xClose.unwrap())(file);
+            }
+        }
+
+        let mut storage = MaybeUninit::<crate::sqlite_vfs::file::IcStableFile>::uninit();
+        let wal = CString::new("/main.db-wal").unwrap();
+        let rc = unsafe {
+            x_open(
+                ptr::null_mut(),
+                wal.as_ptr(),
+                storage.as_mut_ptr().cast::<ffi::sqlite3_file>(),
+                ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_WAL,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_CANTOPEN);
+    }
+
+    #[test]
+    fn x_get_last_error_copies_recorded_message() {
+        memory::reset_for_tests();
+        memory::init(memory::memory_for_tests()).unwrap();
+        super::record_last_error(ffi::SQLITE_CANTOPEN, "WAL files are unsupported");
+
+        let mut buf = [0_i8; 64];
+        let copied = unsafe {
+            x_get_last_error(
+                ptr::null_mut(),
+                i32::try_from(buf.len()).unwrap(),
+                buf.as_mut_ptr(),
+            )
+        };
+
+        assert!(copied > 0);
+        assert_eq!(
+            unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap(),
+            "WAL files are unsupported"
+        );
+    }
 }
 
 fn is_main_db(path: Option<&str>) -> bool {

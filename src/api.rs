@@ -9,7 +9,12 @@ use crate::stable::memory;
 use crate::stable::meta::Superblock;
 use crate::Db;
 use candid::CandidType;
+use ic_stable_structures::{
+    memory_manager::{MemoryId, MemoryManager},
+    DefaultMemoryImpl,
+};
 use serde::Deserialize;
+use std::cell::RefCell;
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -25,6 +30,12 @@ const MIGRATIONS: &[Migration] = &[
     },
 ];
 const MAX_KV_GET_MANY_KEYS: usize = 1_000;
+const SQLITE_MEMORY_ID: MemoryId = MemoryId::new(120);
+
+thread_local! {
+    static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
+        RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
+}
 
 #[derive(CandidType, Deserialize)]
 pub struct DbMeta {
@@ -60,12 +71,20 @@ pub struct ChecksumRefresh {
 
 #[ic_cdk::init]
 fn init() {
+    init_db();
     must(Db::migrate(MIGRATIONS));
 }
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
+    init_db();
     must(Db::migrate(MIGRATIONS));
+}
+
+fn init_db() {
+    MEMORY_MANAGER.with(|manager| {
+        must(Db::init(manager.borrow().get(SQLITE_MEMORY_ID)));
+    });
 }
 
 #[ic_cdk::update]

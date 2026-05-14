@@ -28,6 +28,7 @@ fn reset() {
     statement::clear_step_failpoint();
     memory::reset_for_tests();
     lock::reset_for_tests();
+    Db::init(memory::memory_for_tests()).unwrap();
 }
 
 fn restart_after_failed_message(snapshot: Vec<u8>) {
@@ -36,9 +37,9 @@ fn restart_after_failed_message(snapshot: Vec<u8>) {
     stable_blob::invalidate_read_cache();
     statement::clear_step_failpoint();
     memory::clear_failpoint();
-    memory::restore_for_tests(snapshot);
+    let memory = memory::restore_for_tests(snapshot);
     lock::reset_for_tests();
-    Db::init().unwrap();
+    Db::init(memory).unwrap();
 }
 
 fn seed() {
