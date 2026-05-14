@@ -538,6 +538,42 @@ fn read_table_cache_is_invalidated_after_publish_paths() {
 
 #[test]
 #[serial]
+fn query_closure_can_clear_read_connection_cache_without_panic() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE reentrant_clear(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO reentrant_clear(k, v) VALUES ('key', 'before')")
+    })
+    .unwrap();
+
+    let before = Db::query(|connection| {
+        let value = connection
+            .query_scalar::<String>("SELECT v FROM reentrant_clear WHERE k = 'key'", params![])?;
+        Db::update(|connection| {
+            connection.execute(
+                "UPDATE reentrant_clear SET v = ?1 WHERE k = 'key'",
+                params!["after"],
+            )
+        })?;
+        Ok(value)
+    })
+    .unwrap();
+    let after = Db::query(|connection| {
+        connection
+            .query_scalar::<String>("SELECT v FROM reentrant_clear WHERE k = 'key'", params![])
+    })
+    .unwrap();
+
+    assert_eq!(before, "before");
+    assert_eq!(after, "after");
+}
+
+#[test]
+#[serial]
 fn cached_read_connection_sees_committed_update() {
     reset();
     Db::migrate(&[Migration {

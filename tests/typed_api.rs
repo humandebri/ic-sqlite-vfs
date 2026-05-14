@@ -132,6 +132,90 @@ fn query_helpers_report_missing_rows_and_collect_rows() {
 
 #[test]
 #[serial]
+fn rusqlite_style_query_aliases_delegate_to_existing_helpers() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE alias_items(id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+    }])
+    .unwrap();
+
+    Db::update(|connection| {
+        connection.execute_batch(
+            "INSERT INTO alias_items(id, name) VALUES (1, 'one'), (2, 'two'), (3, 'three')",
+        )
+    })
+    .unwrap();
+
+    let one = Db::query(|connection| {
+        connection.query_row(
+            "SELECT name FROM alias_items WHERE id = ?1",
+            params![1_i64],
+            |row| row.get::<String>(0),
+        )
+    })
+    .unwrap();
+    assert_eq!(one, "one");
+
+    let missing = Db::query(|connection| {
+        connection.query_row(
+            "SELECT name FROM alias_items WHERE id = ?1",
+            params![4_i64],
+            |row| row.get::<String>(0),
+        )
+    });
+    assert!(matches!(missing, Err(DbError::NotFound)));
+
+    let names = Db::query(|connection| {
+        connection.query_map(
+            "SELECT name FROM alias_items WHERE id >= ?1 ORDER BY id",
+            params![2_i64],
+            |row| row.get::<String>(0),
+        )
+    })
+    .unwrap();
+    assert_eq!(names, vec!["two".to_string(), "three".to_string()]);
+}
+
+#[test]
+#[serial]
+fn rusqlite_style_named_query_aliases_delegate_to_existing_helpers() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE alias_named_items(id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+    }])
+    .unwrap();
+
+    Db::update(|connection| {
+        connection
+            .execute_batch("INSERT INTO alias_named_items(id, name) VALUES (1, 'one'), (2, 'two')")
+    })
+    .unwrap();
+
+    let one = Db::query(|connection| {
+        connection.query_row_named(
+            "SELECT name FROM alias_named_items WHERE id = :id",
+            named_params![":id" => 1_i64],
+            |row| row.get::<String>(0),
+        )
+    })
+    .unwrap();
+    assert_eq!(one, "one");
+
+    let names = Db::query(|connection| {
+        connection.query_map_named(
+            "SELECT name FROM alias_named_items WHERE id >= :min_id ORDER BY id",
+            named_params![":min_id" => 1_i64],
+            |row| row.get::<String>(0),
+        )
+    })
+    .unwrap();
+    assert_eq!(names, vec!["one".to_string(), "two".to_string()]);
+}
+
+#[test]
+#[serial]
 fn named_parameters_bind_by_sql_name() {
     reset();
     Db::migrate(&[Migration {

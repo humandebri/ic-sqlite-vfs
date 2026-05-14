@@ -20,11 +20,12 @@ pub use stable_blob::ChecksumRefresh;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::c_int;
+use std::rc::Rc;
 pub use transaction::UpdateConnection;
 pub use value::{Null, ToSql, Value, NULL};
 
 thread_local! {
-    static READ_CONNECTIONS: RefCell<BTreeMap<ContextId, Connection>> = const { RefCell::new(BTreeMap::new()) };
+    static READ_CONNECTIONS: RefCell<BTreeMap<ContextId, Rc<Connection>>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -304,15 +305,15 @@ fn with_read_connection<T>(
     f: impl FnOnce(&Connection) -> Result<T, DbError>,
 ) -> Result<T, DbError> {
     READ_CONNECTIONS.with(|slot| {
-        if !slot.borrow().contains_key(&context) {
-            let connection = connection::open_read_only()?;
-            slot.borrow_mut().insert(context, connection);
-        }
-        let connections = slot.borrow();
-        let connection = connections
-            .get(&context)
-            .ok_or(DbError::StableMemoryNotInitialized)?;
-        f(connection)
+        let cached = { slot.borrow().get(&context).cloned() };
+        let connection = if let Some(connection) = cached {
+            connection
+        } else {
+            let connection = Rc::new(connection::open_read_only()?);
+            slot.borrow_mut().insert(context, Rc::clone(&connection));
+            connection
+        };
+        f(&connection)
     })
 }
 

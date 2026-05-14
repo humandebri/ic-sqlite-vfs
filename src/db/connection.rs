@@ -213,6 +213,31 @@ impl Connection {
         statement.query_one_named(values, f)
     }
 
+    /// Runs a single-row query.
+    ///
+    /// This is a `rusqlite`-style alias for [`Connection::query_one`].
+    pub fn query_row<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<T, DbError>
+    where
+        F: FnOnce(&Row<'_>) -> Result<T, DbError>,
+    {
+        self.query_one(sql, values, f)
+    }
+
+    /// Runs a single-row query with named parameters.
+    ///
+    /// This is a `rusqlite`-style alias for [`Connection::query_one_named`].
+    pub fn query_row_named<T, F>(
+        &self,
+        sql: &str,
+        values: &[(&str, &dyn ToSql)],
+        f: F,
+    ) -> Result<T, DbError>
+    where
+        F: FnOnce(&Row<'_>) -> Result<T, DbError>,
+    {
+        self.query_one_named(sql, values, f)
+    }
+
     pub fn query_optional<T, F>(
         &self,
         sql: &str,
@@ -258,6 +283,35 @@ impl Connection {
     {
         let mut statement = self.prepare(sql)?;
         statement.query_all_named(values, f)
+    }
+
+    /// Maps all rows into a `Vec<T>`.
+    ///
+    /// Unlike `rusqlite::Statement::query_map`, this returns a collected
+    /// `Vec<T>`, not an iterator. That keeps the prepared statement lifetime
+    /// inside one synchronous canister message.
+    pub fn query_map<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<Vec<T>, DbError>
+    where
+        F: FnMut(&Row<'_>) -> Result<T, DbError>,
+    {
+        self.query_all(sql, values, f)
+    }
+
+    /// Maps all rows into a `Vec<T>` using named parameters.
+    ///
+    /// Unlike `rusqlite::Statement::query_map`, this returns a collected
+    /// `Vec<T>`, not an iterator. That keeps the prepared statement lifetime
+    /// inside one synchronous canister message.
+    pub fn query_map_named<T, F>(
+        &self,
+        sql: &str,
+        values: &[(&str, &dyn ToSql)],
+        f: F,
+    ) -> Result<Vec<T>, DbError>
+    where
+        F: FnMut(&Row<'_>) -> Result<T, DbError>,
+    {
+        self.query_all_named(sql, values, f)
     }
 
     pub fn exists(&self, sql: &str, values: &[&dyn ToSql]) -> Result<bool, DbError> {

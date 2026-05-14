@@ -218,6 +218,8 @@ and does not require C compiler setup in the consuming canister workspace.
 `sqlite-bundled` remains available for maintainers who need to rebuild SQLite.
 
 See [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) for details and rationale.
+For migration from `ic-sqlite` or `ic-rusqlite`, see
+[docs/MIGRATING_FROM_IC_SQLITE.md](docs/MIGRATING_FROM_IC_SQLITE.md).
 
 Minimal canister pattern:
 

@@ -68,11 +68,3 @@ pub extern "C" fn sqlite3_mutex_held(_mutex: *mut ffi::sqlite3_mutex) -> c_int {
 pub extern "C" fn sqlite3_mutex_notheld(_mutex: *mut ffi::sqlite3_mutex) -> c_int {
     1
 }
-
-#[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
-pub extern "C" fn sqlite3_db_mutex(_db: *mut ffi::sqlite3) -> *mut ffi::sqlite3_mutex {
-    NonNull::<u8>::dangling()
-        .as_ptr()
-        .cast::<ffi::sqlite3_mutex>()
-}
