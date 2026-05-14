@@ -20,7 +20,7 @@ memory pages through a segmented page table.
 
 ## Status
 
-Initial public release: `0.1.0`.
+Current public release: `0.2.0`.
 
 The core VFS, transaction facade, import/export flow, and upgrade persistence
 tests are in place. This project has not promised compatibility for deployed
@@ -514,11 +514,11 @@ cargo fmt --check
 bash scripts/check-no-await.sh
 cargo test
 cargo test --features canister-api
-cargo build --target wasm32-unknown-unknown
-cargo build --target wasm32-unknown-unknown --features canister-api
+cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled
+cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api
 icp build
 npm run test:pocketic
-cargo package --no-verify --offline
+cargo package
 wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm
 ```
 
