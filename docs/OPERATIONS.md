@@ -2,6 +2,11 @@
 
 ## Transaction Rule
 
+Canister `init` and `post_upgrade` must initialize one
+`MemoryManager<DefaultMemoryImpl>`, choose the SQLite `MemoryId`, and call
+`Db::init(memory)` before any DB operation. The same `MemoryId` must be used for
+the lifetime of the deployed canister.
+
 公開 update API は同期関数だけで実装する。`Db::update` は `FnOnce(&mut UpdateConnection<'_>) -> Result<T, DbError>` だけを受け取り、Future を受け取らない。transaction 中の `await` は禁止。
 
 CI では `scripts/check-no-await.sh` で `src` 内の `.await` と `async fn` を拒否する。
@@ -41,7 +46,7 @@ Migration は `Db::migrate` から一括 transaction で実行する。失敗時
 1. `db_meta` で `schema_version`, `checksum`, `checksum_stale` を確認する。
 2. `db_integrity_check` が `ok` を返すことを確認する。
 3. 失敗 migration の SQL を修正する。
-4. 同じ canister を upgrade し、`post_upgrade` の `Db::init` 後に管理 update から migration を再実行する。
+4. 同じ canister を upgrade し、`post_upgrade` の `Db::init(memory)` 後に管理 update から migration を再実行する。
 5. `db_meta.schema_version` が target version へ進むことを確認する。
 
 ## Import
@@ -60,7 +65,7 @@ Import 中は SQLite VFS が `/main.db` open を拒否するため、通常 DB A
 
 ## Capacity
 
-Stable memory grow 失敗時は `current_pages` と `required_pages` を含む error を返す。呼び出し側は retry せず、容量上限・cycle 残量・chunk size を確認する。
+Selected `VirtualMemory` grow 失敗時は `current_pages` と `required_pages` を含む error を返す。呼び出し側は retry せず、容量上限・cycle 残量・chunk size を確認する。
 
 通常 commit は安全な publish のため、dirty page、dirty segment table、新root tableを追記してからsuperblockを更新する。小更新の容量増分は概ねdirty page数とdirty segment数に比例する。`db_meta.compact_recommended == true` の場合、controllerが `db_compact` を実行する。
 

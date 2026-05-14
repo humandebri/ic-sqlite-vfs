@@ -6,7 +6,7 @@
 
 use crate::config::SQLITE_PAGE_SIZE;
 use crate::sqlite_vfs::stable_blob;
-use crate::stable::memory::StableMemoryError;
+use crate::stable::memory::{self, ContextId, StableMemoryError};
 use std::cell::RefCell;
 use std::collections::{btree_map::Entry, BTreeMap};
 
@@ -18,7 +18,7 @@ pub struct Overlay {
 }
 
 thread_local! {
-    static OVERLAY: RefCell<Option<Overlay>> = const { RefCell::new(None) };
+    static OVERLAY: RefCell<BTreeMap<ContextId, Overlay>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 impl Overlay {
@@ -139,56 +139,81 @@ impl Overlay {
 }
 
 pub fn begin(base_size: u64) -> Result<(), StableMemoryError> {
+    let context = memory::active_context_id()?;
     OVERLAY.with(|slot| {
         let mut slot = slot.borrow_mut();
-        if slot.is_some() {
+        if slot.contains_key(&context) {
             return Err(StableMemoryError::Failpoint("overlay already active"));
         }
-        *slot = Some(Overlay::new(base_size));
+        slot.insert(context, Overlay::new(base_size));
         Ok(())
     })
 }
 
 pub fn rollback() {
+    let Ok(context) = memory::active_context_id() else {
+        return;
+    };
     OVERLAY.with(|slot| {
-        *slot.borrow_mut() = None;
+        slot.borrow_mut().remove(&context);
     });
 }
 
 pub fn is_active() -> bool {
-    OVERLAY.with(|slot| slot.borrow().is_some())
+    let Ok(context) = memory::active_context_id() else {
+        return false;
+    };
+    OVERLAY.with(|slot| slot.borrow().contains_key(&context))
 }
 
 pub fn take() -> Option<Overlay> {
-    OVERLAY.with(|slot| slot.borrow_mut().take())
+    let Ok(context) = memory::active_context_id() else {
+        return None;
+    };
+    OVERLAY.with(|slot| slot.borrow_mut().remove(&context))
 }
 
 pub fn read_at(offset: u64, dst: &mut [u8]) -> Option<Result<bool, StableMemoryError>> {
+    let context = match memory::active_context_id() {
+        Ok(context) => context,
+        Err(error) => return Some(Err(error)),
+    };
     OVERLAY.with(|slot| {
         slot.borrow()
-            .as_ref()
+            .get(&context)
             .map(|overlay| overlay.read_at(offset, dst))
     })
 }
 
 pub fn write_at(offset: u64, bytes: &[u8]) -> Option<Result<(), StableMemoryError>> {
+    let context = match memory::active_context_id() {
+        Ok(context) => context,
+        Err(error) => return Some(Err(error)),
+    };
     OVERLAY.with(|slot| {
         slot.borrow_mut()
-            .as_mut()
+            .get_mut(&context)
             .map(|overlay| overlay.write_at(offset, bytes))
     })
 }
 
 pub fn truncate(size: u64) -> Option<Result<(), StableMemoryError>> {
+    let context = match memory::active_context_id() {
+        Ok(context) => context,
+        Err(error) => return Some(Err(error)),
+    };
     OVERLAY.with(|slot| {
         slot.borrow_mut()
-            .as_mut()
+            .get_mut(&context)
             .map(|overlay| overlay.truncate(size))
     })
 }
 
 pub fn file_size() -> Option<u64> {
-    OVERLAY.with(|slot| slot.borrow().as_ref().map(Overlay::size))
+    let Ok(context) = memory::active_context_id() else {
+        return None;
+    };
+    OVERLAY.with(|slot| slot.borrow().get(&context).map(Overlay::size))
 }
 
 fn page_size() -> u64 {
@@ -220,6 +245,7 @@ mod tests {
     #[test]
     fn later_overlapping_write_wins_regardless_of_offset_order() {
         memory::reset_for_tests();
+        memory::init(memory::memory_for_tests()).unwrap();
         let mut overlay = Overlay::new(0);
 
         overlay.write_at(4, b"AAAA").unwrap();
@@ -233,6 +259,7 @@ mod tests {
     #[test]
     fn truncate_then_sparse_extend_zero_fills_gap() {
         memory::reset_for_tests();
+        memory::init(memory::memory_for_tests()).unwrap();
         let mut overlay = Overlay::new(0);
 
         overlay.write_at(0, b"abcd").unwrap();

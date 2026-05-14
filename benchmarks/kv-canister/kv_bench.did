@@ -6,14 +6,53 @@ type BenchReport = record {
   stable_pages : nat64;
   stable_bytes : nat64;
 };
+type BenchReadProfileReport = record {
+  rows : nat64;
+  instructions : nat64;
+  checksum : nat64;
+  db_size : nat64;
+  stable_pages : nat64;
+  stable_bytes : nat64;
+  open_query : nat64;
+  prepare : nat64;
+  key_format : nat64;
+  query_optional_string_text_total : nat64;
+  reset_bind : nat64;
+  step : nat64;
+  column_read : nat64;
+  report : nat64;
+  x_read_calls : nat64;
+  x_read_bytes : nat64;
+  stable_data_read_calls : nat64;
+  stable_data_read_bytes : nat64;
+  page_table_root_hits : nat64;
+  page_table_root_misses : nat64;
+  page_table_segment_hits : nat64;
+  page_table_segment_misses : nat64;
+  superblock_loads : nat64;
+};
+type DbStatsReport = record {
+  db_size : nat64;
+  stable_pages : nat64;
+  stable_bytes : nat64;
+  sqlite_page_size : nat64;
+  sqlite_page_count : nat64;
+  sqlite_freelist_count : nat64;
+};
 
 service : {
   bench_reset : (nat32) -> (variant { Ok : BenchReport; Err : text });
+  bench_insert_only : (nat32) -> (variant { Ok : BenchReport; Err : text });
+  bench_append_insert : (nat32, nat32) -> (variant { Ok : BenchReport; Err : text });
+  bench_update_only : (nat32) -> (variant { Ok : BenchReport; Err : text });
   bench_read : (nat32) -> (variant { Ok : BenchReport; Err : text }) query;
+  bench_read_profile : (nat32) -> (variant { Ok : BenchReadProfileReport; Err : text }) query;
+  bench_get_many_in : (nat32) -> (variant { Ok : BenchReport; Err : text }) query;
   bench_write : (nat32) -> (variant { Ok : BenchReport; Err : text });
   bench_large_blob : (nat32) -> (variant { Ok : BenchReport; Err : text });
   bench_many_rows : (nat32) -> (variant { Ok : BenchReport; Err : text }) query;
   bench_unbounded_order_by : (nat32) -> (variant { Ok : BenchReport; Err : text });
   bench_join : (nat32) -> (variant { Ok : BenchReport; Err : text });
   bench_growth : (nat32, nat32) -> (variant { Ok : BenchReport; Err : text });
+  db_stats : () -> (variant { Ok : DbStatsReport; Err : text }) query;
 }

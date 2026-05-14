@@ -1,5 +1,8 @@
 .icp/cache/
 target/
 node_modules/
+.DS_Store
 benchmarks/kv-canister/.icp/cache/
 benchmarks/kv-canister/target/
+examples/minimal-kv/target/
+vendor/sqlite/wasm32-unknown-unknown/obj/

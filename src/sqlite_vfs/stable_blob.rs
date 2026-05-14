@@ -5,7 +5,7 @@
 
 use crate::config::{SQLITE_PAGE_SIZE, STABLE_PAGE_SIZE, SUPERBLOCK_SIZE};
 use crate::sqlite_vfs::overlay::{self, Overlay};
-use crate::stable::memory::{self, StableMemoryError};
+use crate::stable::memory::{self, ContextId, StableMemoryError};
 use crate::stable::meta::{
     fnv1a64, Superblock, FLAG_CHECKSUM_REFRESHING, FLAG_CHECKSUM_STALE, FLAG_IMPORTING,
     PAGE_MAP_LAYOUT_VERSION,
@@ -17,6 +17,7 @@ const CHECKSUM_CHUNK_LEN: u64 = 16 * 1024;
 const PAGE_TABLE_ENTRY_LEN: u64 = 8;
 const SEGMENT_PAGE_COUNT: u64 = 256;
 const READ_SEGMENT_CACHE_CAPACITY: usize = 8;
+const FILE_PAGE_OFFSET_CACHE_CAPACITY: usize = 64;
 const COMPACT_MIN_ORPHAN_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,8 +51,8 @@ pub(crate) enum StableBlobFailpoint {
 }
 
 thread_local! {
-    static FAILPOINT: RefCell<Option<StableBlobFailpoint>> = const { RefCell::new(None) };
-    static READ_TABLE_CACHE: RefCell<ReadTableCache> = RefCell::new(ReadTableCache::new());
+    static FAILPOINTS: RefCell<BTreeMap<ContextId, StableBlobFailpoint>> = const { RefCell::new(BTreeMap::new()) };
+    static READ_TABLE_CACHE: RefCell<BTreeMap<ContextId, ReadTableCache>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,14 +113,51 @@ impl ReadTableCache {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct PageOffsetCache {
+    entries: Vec<(u64, u64)>,
+}
+
+impl PageOffsetCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: Vec::with_capacity(FILE_PAGE_OFFSET_CACHE_CAPACITY),
+        }
+    }
+
+    fn get(&self, page_no: u64) -> Option<u64> {
+        self.entries
+            .iter()
+            .find_map(|(cached_page, physical)| (*cached_page == page_no).then_some(*physical))
+    }
+
+    fn insert(&mut self, page_no: u64, physical: u64) {
+        if self
+            .entries
+            .iter()
+            .any(|(cached_page, _)| *cached_page == page_no)
+        {
+            return;
+        }
+        if self.entries.len() == FILE_PAGE_OFFSET_CACHE_CAPACITY {
+            self.entries.remove(0);
+        }
+        self.entries.push((page_no, physical));
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn set_failpoint(failpoint: StableBlobFailpoint) {
-    FAILPOINT.with(|slot| *slot.borrow_mut() = Some(failpoint));
+    if let Ok(context) = memory::active_context_id() {
+        FAILPOINTS.with(|slot| {
+            slot.borrow_mut().insert(context, failpoint);
+        });
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn clear_failpoint() {
-    FAILPOINT.with(|slot| *slot.borrow_mut() = None);
+    FAILPOINTS.with(|slot| slot.borrow_mut().clear());
 }
 
 pub(crate) fn ensure_page_map_layout() -> Result<(), StableMemoryError> {
@@ -164,18 +202,51 @@ pub(crate) fn read_at(offset: u64, dst: &mut [u8]) -> Result<bool, StableMemoryE
 }
 
 pub(crate) fn read_base_at(offset: u64, dst: &mut [u8]) -> Result<bool, StableMemoryError> {
-    dst.fill(0);
+    if dst.is_empty() {
+        return Ok(true);
+    }
     let block = Superblock::load()?;
+    read_base_at_with_block(&block, offset, dst)
+}
+
+pub(crate) fn read_base_at_with_block(
+    block: &Superblock,
+    offset: u64,
+    dst: &mut [u8],
+) -> Result<bool, StableMemoryError> {
     if dst.is_empty() {
         return Ok(true);
     }
     if offset >= block.db_size {
+        dst.fill(0);
         return Ok(false);
     }
     let requested = u64::try_from(dst.len()).map_err(|_| StableMemoryError::OffsetOverflow)?;
     let copied = requested.min(block.db_size - offset);
     let copied_len = usize::try_from(copied).map_err(|_| StableMemoryError::OffsetOverflow)?;
-    read_logical_range(&block, offset, &mut dst[..copied_len])?;
+    read_logical_range(block, offset, &mut dst[..copied_len])?;
+    dst[copied_len..].fill(0);
+    Ok(copied == requested)
+}
+
+pub(crate) fn read_base_at_with_page_cache(
+    block: &Superblock,
+    offset: u64,
+    dst: &mut [u8],
+    page_offsets: &mut PageOffsetCache,
+) -> Result<bool, StableMemoryError> {
+    if dst.is_empty() {
+        return Ok(true);
+    }
+    if offset >= block.db_size {
+        dst.fill(0);
+        return Ok(false);
+    }
+    let requested = u64::try_from(dst.len()).map_err(|_| StableMemoryError::OffsetOverflow)?;
+    let copied = requested.min(block.db_size - offset);
+    let copied_len = usize::try_from(copied).map_err(|_| StableMemoryError::OffsetOverflow)?;
+    read_logical_range_with_page_cache(block, offset, &mut dst[..copied_len], page_offsets)?;
+    dst[copied_len..].fill(0);
     Ok(copied == requested)
 }
 
@@ -187,6 +258,8 @@ pub(crate) fn read_base_page(page_no: u64) -> Result<Vec<u8>, StableMemoryError>
     }
     let physical = page_offset_for(&block, page_no)?;
     if physical != 0 {
+        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+        crate::read_metrics::record_stable_data_read(page.len());
         memory::read(physical, &mut page)?;
     }
     Ok(page)
@@ -538,9 +611,9 @@ fn load_segment_for_update<'a>(
     updates: &'a mut BTreeMap<u64, Vec<u64>>,
     segment_no: u64,
 ) -> Result<&'a mut Vec<u64>, StableMemoryError> {
-    if !updates.contains_key(&segment_no) {
+    if let std::collections::btree_map::Entry::Vacant(entry) = updates.entry(segment_no) {
         let table = read_segment_table(block, root, segment_no)?;
-        updates.insert(segment_no, table);
+        entry.insert(table);
     }
     updates
         .get_mut(&segment_no)
@@ -583,6 +656,15 @@ fn read_logical_range(
     offset: u64,
     dst: &mut [u8],
 ) -> Result<(), StableMemoryError> {
+    if dst.is_empty() {
+        return Ok(());
+    }
+    let in_page =
+        usize::try_from(offset % page_size()).map_err(|_| StableMemoryError::OffsetOverflow)?;
+    if dst.len() <= page_len() - in_page {
+        return read_logical_page_slice(block, offset / page_size(), in_page, dst);
+    }
+
     let mut copied_total = 0_usize;
     while copied_total < dst.len() {
         let absolute = checked_add(
@@ -593,19 +675,106 @@ fn read_logical_range(
         let in_page = usize::try_from(absolute % page_size())
             .map_err(|_| StableMemoryError::OffsetOverflow)?;
         let copied = (page_len() - in_page).min(dst.len() - copied_total);
-        let physical = page_offset_for(block, page_no)?;
-        if physical == 0 {
-            dst[copied_total..copied_total + copied].fill(0);
-        } else {
-            let stable_offset = checked_add(
-                physical,
-                u64::try_from(in_page).map_err(|_| StableMemoryError::OffsetOverflow)?,
-            )?;
-            memory::read(stable_offset, &mut dst[copied_total..copied_total + copied])?;
-        }
+        read_logical_page_slice(
+            block,
+            page_no,
+            in_page,
+            &mut dst[copied_total..copied_total + copied],
+        )?;
         copied_total += copied;
     }
     Ok(())
+}
+
+fn read_logical_range_with_page_cache(
+    block: &Superblock,
+    offset: u64,
+    dst: &mut [u8],
+    page_offsets: &mut PageOffsetCache,
+) -> Result<(), StableMemoryError> {
+    if dst.is_empty() {
+        return Ok(());
+    }
+    let in_page =
+        usize::try_from(offset % page_size()).map_err(|_| StableMemoryError::OffsetOverflow)?;
+    if dst.len() <= page_len() - in_page {
+        return read_logical_page_slice_with_page_cache(
+            block,
+            offset / page_size(),
+            in_page,
+            dst,
+            page_offsets,
+        );
+    }
+
+    let mut copied_total = 0_usize;
+    while copied_total < dst.len() {
+        let absolute = checked_add(
+            offset,
+            u64::try_from(copied_total).map_err(|_| StableMemoryError::OffsetOverflow)?,
+        )?;
+        let page_no = absolute / page_size();
+        let in_page = usize::try_from(absolute % page_size())
+            .map_err(|_| StableMemoryError::OffsetOverflow)?;
+        let copied = (page_len() - in_page).min(dst.len() - copied_total);
+        read_logical_page_slice_with_page_cache(
+            block,
+            page_no,
+            in_page,
+            &mut dst[copied_total..copied_total + copied],
+            page_offsets,
+        )?;
+        copied_total += copied;
+    }
+    Ok(())
+}
+
+fn read_logical_page_slice(
+    block: &Superblock,
+    page_no: u64,
+    in_page: usize,
+    dst: &mut [u8],
+) -> Result<(), StableMemoryError> {
+    let physical = page_offset_for(block, page_no)?;
+    if physical == 0 {
+        dst.fill(0);
+        return Ok(());
+    }
+    let stable_offset = checked_add(
+        physical,
+        u64::try_from(in_page).map_err(|_| StableMemoryError::OffsetOverflow)?,
+    )?;
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_stable_data_read(dst.len());
+    memory::read(stable_offset, dst)
+}
+
+fn read_logical_page_slice_with_page_cache(
+    block: &Superblock,
+    page_no: u64,
+    in_page: usize,
+    dst: &mut [u8],
+    page_offsets: &mut PageOffsetCache,
+) -> Result<(), StableMemoryError> {
+    let physical = match page_offsets.get(page_no) {
+        Some(physical) => physical,
+        None => {
+            let physical = page_offset_for(block, page_no)?;
+            page_offsets.insert(page_no, physical);
+            physical
+        }
+    };
+    if physical == 0 {
+        dst.fill(0);
+        return Ok(());
+    }
+    let stable_offset = checked_add(
+        physical,
+        u64::try_from(in_page).map_err(|_| StableMemoryError::OffsetOverflow)?,
+    )?;
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_stable_data_read(dst.len());
+    memory::read(stable_offset, dst)
 }
 
 fn page_offset_for(block: &Superblock, page_no: u64) -> Result<u64, StableMemoryError> {
@@ -633,14 +802,21 @@ fn read_page_table(block: &Superblock) -> Result<Vec<u64>, StableMemoryError> {
 }
 
 fn cached_page_offset_for(block: &Superblock, page_no: u64) -> Result<u64, StableMemoryError> {
+    let context = memory::active_context_id()?;
     let key = read_cache_key(block);
     let segment_no = segment_no(page_no);
     let index = segment_index(page_no)?;
     READ_TABLE_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
+        let mut caches = cache.borrow_mut();
+        let cache = caches.entry(context).or_insert_with(ReadTableCache::new);
         cache.ensure_key(key);
         if cache.root.is_empty() {
+            #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+            crate::read_metrics::record_page_table_root_miss();
             cache.root = read_root_table(block)?;
+        } else {
+            #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+            crate::read_metrics::record_page_table_root_hit();
         }
         let Some(segment_offset) = cache
             .root
@@ -653,8 +829,12 @@ fn cached_page_offset_for(block: &Superblock, page_no: u64) -> Result<u64, Stabl
             return Ok(0);
         }
         if cache.segments.contains_key(&segment_no) {
+            #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+            crate::read_metrics::record_page_table_segment_hit();
             cache.touch_segment(segment_no);
         } else {
+            #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+            crate::read_metrics::record_page_table_segment_miss();
             let table = read_segment_table_at(segment_offset)?;
             cache.insert_segment(segment_no, table);
         }
@@ -757,7 +937,7 @@ fn write_u64_table(entries: &[u64]) -> Result<u64, StableMemoryError> {
 }
 
 fn decode_u64_table(bytes: &[u8]) -> Result<Vec<u64>, StableMemoryError> {
-    if bytes.len() % 8 != 0 {
+    if !bytes.len().is_multiple_of(8) {
         return Err(StableMemoryError::OffsetOverflow);
     }
     let mut entries = Vec::with_capacity(bytes.len() / 8);
@@ -912,10 +1092,13 @@ fn fold_fnv1a64(mut hash: u64, bytes: &[u8]) -> u64 {
 }
 
 fn hit_failpoint(failpoint: StableBlobFailpoint) -> Result<(), StableMemoryError> {
-    FAILPOINT.with(|slot| {
+    let Ok(context) = memory::active_context_id() else {
+        return Ok(());
+    };
+    FAILPOINTS.with(|slot| {
         let mut slot = slot.borrow_mut();
-        if *slot == Some(failpoint) {
-            *slot = None;
+        if slot.get(&context).copied() == Some(failpoint) {
+            slot.remove(&context);
             Err(StableMemoryError::Failpoint(failpoint.name()))
         } else {
             Ok(())
@@ -982,5 +1165,35 @@ mod tests {
             imported_page_table(&block),
             Err(StableMemoryError::OffsetOverflow)
         ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn read_metrics_separate_table_cache_from_data_reads() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+        invalidate_read_cache();
+
+        let page = vec![7_u8; page_len()];
+        write_at(0, &page).unwrap();
+        invalidate_read_cache();
+        crate::read_metrics::reset_read_metrics();
+
+        let first = read_base_page(0).unwrap();
+        let second = read_base_page(0).unwrap();
+        let metrics = crate::read_metrics::read_metrics_snapshot();
+
+        assert_eq!(first, page);
+        assert_eq!(second, page);
+        assert!(metrics.stable_data_read_calls >= 2);
+        assert!(metrics.stable_data_read_bytes >= page_size() * 2);
+        assert!(metrics.page_table_root_misses >= 1);
+        assert!(metrics.page_table_root_hits >= 1);
+        assert!(metrics.page_table_segment_misses >= 1);
+        assert!(metrics.page_table_segment_hits >= 1);
+        #[cfg(feature = "bench-profile")]
+        assert!(metrics.superblock_loads <= 1);
+        #[cfg(not(feature = "bench-profile"))]
+        assert_eq!(metrics.superblock_loads, 0);
     }
 }

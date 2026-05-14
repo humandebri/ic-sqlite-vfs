@@ -1,0 +1,11 @@
+{
+  "canisters": {
+    "minimal_kv": {
+      "type": "custom",
+      "candid": "can.did",
+      "wasm": "target/wasm32-unknown-unknown/debug/minimal_kv.wasm",
+      "build": "cargo build --target wasm32-unknown-unknown"
+    }
+  },
+  "version": 1
+}

@@ -4,7 +4,9 @@
 //! inspect and migrate it without deserializing a Rust-specific structure.
 
 use crate::config::{SQLITE_PAGE_SIZE, SUPERBLOCK_OFFSET, SUPERBLOCK_SIZE};
-use crate::stable::memory::{self, StableMemoryError};
+use crate::stable::memory::{self, ContextId, StableMemoryError};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 const MAGIC: [u8; 8] = *b"ICSQLITE";
 const VERSION: u32 = 6;
@@ -13,6 +15,10 @@ pub const PAGE_MAP_LAYOUT_VERSION: u64 = 6;
 pub const FLAG_IMPORTING: u64 = 1;
 pub const FLAG_CHECKSUM_STALE: u64 = 1 << 1;
 pub const FLAG_CHECKSUM_REFRESHING: u64 = 1 << 2;
+
+thread_local! {
+    static SUPERBLOCK_CACHE: RefCell<BTreeMap<ContextId, Superblock>> = const { RefCell::new(BTreeMap::new()) };
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Superblock {
@@ -67,6 +73,12 @@ impl Superblock {
     }
 
     pub fn load() -> Result<Self, StableMemoryError> {
+        let context = memory::active_context_id()?;
+        if let Some(block) = SUPERBLOCK_CACHE.with(|cache| cache.borrow().get(&context).cloned()) {
+            return Ok(block);
+        }
+        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+        crate::read_metrics::record_superblock_load();
         memory::ensure_capacity(SUPERBLOCK_OFFSET + SUPERBLOCK_SIZE)?;
         let mut bytes = [0_u8; ENCODED_LEN];
         memory::read(SUPERBLOCK_OFFSET, &mut bytes)?;
@@ -79,6 +91,7 @@ impl Superblock {
         if !block.verify_checksum() {
             return Err(StableMemoryError::MetaChecksumMismatch);
         }
+        cache_superblock(&block);
         Ok(block)
     }
 
@@ -86,7 +99,9 @@ impl Superblock {
         let mut block = self.clone();
         block.version = VERSION;
         block.meta_checksum = block.compute_meta_checksum();
-        memory::write(SUPERBLOCK_OFFSET, &block.encode())
+        memory::write(SUPERBLOCK_OFFSET, &block.encode())?;
+        cache_superblock(&block);
+        Ok(())
     }
 
     pub fn set_db_size(size: u64) -> Result<(), StableMemoryError> {
@@ -219,6 +234,19 @@ impl Superblock {
         let mut copy = self.clone();
         copy.meta_checksum = 0;
         fnv1a64(&copy.encode())
+    }
+}
+
+#[doc(hidden)]
+pub fn clear_superblock_cache() {
+    SUPERBLOCK_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+fn cache_superblock(block: &Superblock) {
+    if let Ok(context) = memory::active_context_id() {
+        SUPERBLOCK_CACHE.with(|cache| {
+            cache.borrow_mut().insert(context, block.clone());
+        });
     }
 }
 

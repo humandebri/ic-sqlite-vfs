@@ -21,7 +21,7 @@ jobs:
       - name: Install WASI SDK
         run: |
           sudo apt-get update
-          sudo apt-get install -y wasi-libc clang wabt
+          sudo apt-get install -y ripgrep wasi-libc clang wabt
           sudo ln -sf "$(command -v clang)" /usr/local/bin/wasm32-wasi-clang
       - run: npm ci
       - run: cargo fmt --check

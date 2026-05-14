@@ -1,14 +1,254 @@
+use ic_sqlite_vfs::config::SQLITE_CACHE_SIZE_KIB;
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
+use ic_sqlite_vfs::sqlite_vfs::{self, ffi, lock, stable_blob};
 use ic_sqlite_vfs::stable::memory;
 use ic_sqlite_vfs::stable::meta::Superblock;
-use ic_sqlite_vfs::{params, Db};
+use ic_sqlite_vfs::{params, Db, DbError, DbHandle};
+use ic_stable_structures::{
+    memory_manager::{MemoryId, MemoryManager},
+    DefaultMemoryImpl,
+};
 use serial_test::serial;
+use std::ffi::{c_void, CStr, CString};
+use std::ptr;
+
+struct RawConnection {
+    raw: *mut ffi::sqlite3,
+}
+
+impl Drop for RawConnection {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::sqlite3_close(self.raw);
+        }
+    }
+}
+
+fn open_raw(filename: &str, flags: i32) -> Result<RawConnection, String> {
+    sqlite_vfs::register();
+    let filename = CString::new(filename).unwrap();
+    let vfs = CString::new(ic_sqlite_vfs::config::VFS_NAME).unwrap();
+    let mut db = ptr::null_mut();
+    let rc = unsafe { ffi::sqlite3_open_v2(filename.as_ptr(), &mut db, flags, vfs.as_ptr()) };
+    if rc == ffi::SQLITE_OK {
+        return Ok(RawConnection { raw: db });
+    }
+    let message = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)) }
+        .to_string_lossy()
+        .into_owned();
+    if !db.is_null() {
+        unsafe {
+            ffi::sqlite3_close(db);
+        }
+    }
+    Err(message)
+}
+
+fn exec_raw(connection: &RawConnection, sql: &str) -> Result<(), (i32, String)> {
+    let sql = CString::new(sql).unwrap();
+    let mut error = ptr::null_mut();
+    let rc = unsafe {
+        ffi::sqlite3_exec(
+            connection.raw,
+            sql.as_ptr(),
+            None,
+            ptr::null_mut(),
+            ptr::addr_of_mut!(error),
+        )
+    };
+    if rc == ffi::SQLITE_OK {
+        return Ok(());
+    }
+    let message = if error.is_null() {
+        unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(connection.raw)) }
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        let value = unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe {
+            ffi::sqlite3_free(error.cast::<c_void>());
+        }
+        value
+    };
+    Err((rc, message))
+}
+
+fn query_count_raw(connection: &RawConnection, sql: &str) -> i64 {
+    let sql = CString::new(sql).unwrap();
+    let mut statement = ptr::null_mut();
+    let rc = unsafe {
+        ffi::sqlite3_prepare_v2(
+            connection.raw,
+            sql.as_ptr(),
+            -1,
+            ptr::addr_of_mut!(statement),
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, ffi::SQLITE_OK);
+    let step = unsafe { ffi::sqlite3_step(statement) };
+    assert_eq!(step, ffi::SQLITE_ROW);
+    let value = unsafe { ffi::sqlite3_column_int64(statement, 0) };
+    let finalize = unsafe { ffi::sqlite3_finalize(statement) };
+    assert_eq!(finalize, ffi::SQLITE_OK);
+    value
+}
 
 fn reset() {
     stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
+    Db::init(memory::memory_for_tests()).unwrap();
+}
+
+#[test]
+#[serial]
+fn update_and_query_require_explicit_memory_initialization() {
+    stable_blob::invalidate_read_cache();
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+
+    assert!(matches!(
+        Db::query(|_| Ok::<_, ic_sqlite_vfs::DbError>(())),
+        Err(ic_sqlite_vfs::DbError::StableMemoryNotInitialized)
+    ));
+    assert!(matches!(
+        Db::update(|_| Ok::<_, ic_sqlite_vfs::DbError>(())),
+        Err(ic_sqlite_vfs::DbError::StableMemoryNotInitialized)
+    ));
+}
+
+#[test]
+#[serial]
+fn db_init_rejects_second_memory_in_same_instance() {
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    Db::init(memory::memory_for_tests()).unwrap();
+
+    assert!(matches!(
+        Db::init(memory::memory_for_tests()),
+        Err(ic_sqlite_vfs::DbError::StableMemoryAlreadyInitialized)
+    ));
+}
+
+#[test]
+#[serial]
+fn failed_db_init_allows_retry_with_another_memory() {
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    memory::init(manager.get(MemoryId::new(20))).unwrap();
+    let mut block = Superblock::fresh();
+    block.layout_version = 0;
+    block.store().unwrap();
+
+    memory::reset_for_tests();
+    let error = Db::init(manager.get(MemoryId::new(20))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(
+            ic_sqlite_vfs::stable::memory::StableMemoryError::UnsupportedLayoutVersion(0)
+        )
+    ));
+
+    Db::init(manager.get(MemoryId::new(21))).unwrap();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE recovered(k TEXT PRIMARY KEY NOT NULL);",
+    }])
+    .unwrap();
+}
+
+#[test]
+#[serial]
+fn different_memory_ids_keep_database_images_separate() {
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    Db::init(manager.get(MemoryId::new(10))).unwrap();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE split(k TEXT PRIMARY KEY NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| connection.execute("INSERT INTO split(k) VALUES ('a')", params![]))
+        .unwrap();
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    Db::init(manager.get(MemoryId::new(11))).unwrap();
+    let missing = Db::query(|connection| {
+        connection.query_optional_scalar::<i64>(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'split'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(missing, Some(0));
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    Db::init(manager.get(MemoryId::new(10))).unwrap();
+    let count = Db::query(|connection| {
+        connection.query_scalar::<i64>("SELECT COUNT(*) FROM split", params![])
+    })
+    .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+#[serial]
+fn db_handles_keep_simultaneous_contexts_separate() {
+    stable_blob::invalidate_read_cache();
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let first = DbHandle::init(manager.get(MemoryId::new(30))).unwrap();
+    let second = DbHandle::init(manager.get(MemoryId::new(31))).unwrap();
+
+    let migrations = [Migration {
+        version: 1,
+        sql: "CREATE TABLE multi(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }];
+    first.migrate(&migrations).unwrap();
+    second.migrate(&migrations).unwrap();
+
+    first
+        .update(|connection| {
+            connection.execute("INSERT INTO multi(k, v) VALUES ('k', 'first')", params![])
+        })
+        .unwrap();
+    second
+        .update(|connection| {
+            connection.execute("INSERT INTO multi(k, v) VALUES ('k', 'second')", params![])
+        })
+        .unwrap();
+
+    let first_value = first
+        .query(|connection| {
+            connection.query_scalar::<String>("SELECT v FROM multi WHERE k = 'k'", params![])
+        })
+        .unwrap();
+    let second_value = second
+        .query(|connection| {
+            connection.query_scalar::<String>("SELECT v FROM multi WHERE k = 'k'", params![])
+        })
+        .unwrap();
+    assert_eq!(first_value, "first");
+    assert_eq!(second_value, "second");
+
+    first.refresh_checksum().unwrap();
+    first.compact().unwrap();
+    let second_after_compact = second
+        .query(|connection| {
+            connection.query_scalar::<String>("SELECT v FROM multi WHERE k = 'k'", params![])
+        })
+        .unwrap();
+    assert_eq!(second_after_compact, "second");
 }
 
 #[test]
@@ -62,12 +302,9 @@ fn reusable_statement_handles_repeated_binds() {
         let mut values = Vec::new();
         for index in [0, 7, 15] {
             let key = format!("k{index}");
-            values.push(
-                statement
-                    .query_optional_scalar::<String>(params![key])?
-                    .unwrap(),
-            );
+            values.push(statement.query_optional_string_text(&key)?.unwrap());
         }
+        assert!(statement.query_optional_string_text("missing")?.is_none());
         Ok(values.join(","))
     })
     .unwrap();
@@ -123,6 +360,24 @@ fn query_connection_rejects_writes() {
     });
 
     assert!(result.is_err());
+}
+
+#[test]
+#[serial]
+fn read_only_connection_applies_cache_size_pragma() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE cache_size_guard(id INTEGER PRIMARY KEY);",
+    }])
+    .unwrap();
+
+    let cache_size = Db::query(|connection| {
+        connection.query_scalar::<i64>("PRAGMA cache_size", ic_sqlite_vfs::params![])
+    })
+    .unwrap();
+
+    assert_eq!(cache_size, -i64::from(SQLITE_CACHE_SIZE_KIB));
 }
 
 #[test]
@@ -283,6 +538,245 @@ fn read_table_cache_is_invalidated_after_publish_paths() {
 
 #[test]
 #[serial]
+fn query_closure_rejects_mutation_without_panic_or_stale_clear() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE reentrant_clear(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO reentrant_clear(k, v) VALUES ('key', 'before')")
+    })
+    .unwrap();
+
+    let (before, update_blocked, compact_blocked, still_before) = Db::query(|connection| {
+        let before = connection
+            .query_scalar::<String>("SELECT v FROM reentrant_clear WHERE k = 'key'", params![])?;
+        let update_blocked = matches!(
+            Db::update(|connection| {
+                connection.execute(
+                    "UPDATE reentrant_clear SET v = ?1 WHERE k = 'key'",
+                    params!["after"],
+                )
+            }),
+            Err(DbError::ReadConnectionInUse)
+        );
+        let compact_blocked = matches!(Db::compact(), Err(DbError::ReadConnectionInUse));
+        let still_before = connection
+            .query_scalar::<String>("SELECT v FROM reentrant_clear WHERE k = 'key'", params![])?;
+        Ok((before, update_blocked, compact_blocked, still_before))
+    })
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE reentrant_clear SET v = ?1 WHERE k = 'key'",
+            params!["after"],
+        )
+    })
+    .unwrap();
+    let after = Db::query(|connection| {
+        connection
+            .query_scalar::<String>("SELECT v FROM reentrant_clear WHERE k = 'key'", params![])
+    })
+    .unwrap();
+
+    assert_eq!(before, "before");
+    assert!(update_blocked);
+    assert!(compact_blocked);
+    assert_eq!(still_before, "before");
+    assert_eq!(after, "after");
+}
+
+#[test]
+#[serial]
+fn query_closure_rejects_checksum_refresh_without_panic() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE reentrant_checksum(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO reentrant_checksum(k, v) VALUES ('key', 'value')")
+    })
+    .unwrap();
+
+    let blocked = Db::query(|connection| {
+        let value = connection.query_scalar::<String>(
+            "SELECT v FROM reentrant_checksum WHERE k = 'key'",
+            params![],
+        )?;
+        Ok((
+            value,
+            matches!(Db::refresh_checksum(), Err(DbError::ReadConnectionInUse)),
+        ))
+    })
+    .unwrap();
+
+    assert_eq!(blocked, ("value".to_string(), true));
+}
+
+#[test]
+#[serial]
+fn query_closure_rejects_import_without_panic() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE reentrant_import(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO reentrant_import(k, v) VALUES ('key', 'value')")
+    })
+    .unwrap();
+
+    let blocked = Db::query(|connection| {
+        let value = connection
+            .query_scalar::<String>("SELECT v FROM reentrant_import WHERE k = 'key'", params![])?;
+        Ok((
+            value,
+            matches!(Db::begin_import(0, 0), Err(DbError::ReadConnectionInUse)),
+        ))
+    })
+    .unwrap();
+
+    assert_eq!(blocked, ("value".to_string(), true));
+}
+
+#[test]
+#[serial]
+fn cached_read_connection_sees_committed_update() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE read_connection_guard(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO read_connection_guard(k, v) VALUES ('key', 'before')")
+    })
+    .unwrap();
+
+    let before = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM read_connection_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(before, "before");
+
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE read_connection_guard SET v = ?1 WHERE k = 'key'",
+            params!["after"],
+        )
+    })
+    .unwrap();
+    let after = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM read_connection_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+
+    assert_eq!(after, "after");
+}
+
+#[test]
+#[serial]
+fn cached_read_connection_survives_failed_update() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE failed_update_guard(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO failed_update_guard(k, v) VALUES ('key', 'before')")
+    })
+    .unwrap();
+
+    let before = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM failed_update_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(before, "before");
+
+    let result = Db::update(|connection| {
+        connection.execute(
+            "UPDATE failed_update_guard SET v = ?1 WHERE k = 'key'",
+            params!["after"],
+        )?;
+        connection.execute_batch("INSERT INTO missing_table(value) VALUES (1)")?;
+        Ok(())
+    });
+    assert!(result.is_err());
+
+    let after = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM failed_update_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(after, "before");
+}
+
+#[test]
+#[serial]
+fn import_replaces_cached_read_connection() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE import_cache_guard(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO import_cache_guard(k, v) VALUES ('key', 'old')")
+    })
+    .unwrap();
+    let db_size = Superblock::load().unwrap().db_size;
+    let checksum = Db::refresh_checksum().unwrap();
+    let old_image = Db::export_chunk(0, db_size).unwrap();
+
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE import_cache_guard SET v = ?1 WHERE k = 'key'",
+            params!["new"],
+        )
+    })
+    .unwrap();
+    let new_value = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM import_cache_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(new_value, "new");
+
+    Db::begin_import(db_size, checksum).unwrap();
+    Db::import_chunk(0, &old_image).unwrap();
+    Db::finish_import().unwrap();
+    let imported = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM import_cache_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+
+    assert_eq!(imported, "old");
+}
+
+#[test]
+#[serial]
 fn failed_update_rolls_back_transaction() {
     reset();
     Db::migrate(&[Migration {
@@ -415,4 +909,50 @@ fn attached_path_containing_vfs_name_stays_separate() {
     .unwrap();
 
     assert_eq!(exists, 0);
+}
+
+#[test]
+#[serial]
+fn sqlite_uri_mode_ro_opens_main_db_read_only() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE raw_ro(k TEXT PRIMARY KEY NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| connection.execute_batch("INSERT INTO raw_ro(k) VALUES ('key')"))
+        .unwrap();
+
+    let raw = open_raw(
+        "file:/main.db?mode=ro",
+        ffi::SQLITE_OPEN_READONLY | ffi::SQLITE_OPEN_URI | ffi::SQLITE_OPEN_NOMUTEX,
+    )
+    .unwrap();
+    let count = query_count_raw(&raw, "SELECT COUNT(*) FROM raw_ro");
+    let write = exec_raw(&raw, "INSERT INTO raw_ro(k) VALUES ('blocked')");
+
+    assert_eq!(count, 1);
+    assert!(matches!(write, Err((code, _)) if code == ffi::SQLITE_READONLY));
+}
+
+#[test]
+#[serial]
+fn wal_journal_mode_is_rejected_by_sqlite_path() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE wal_guard(id INTEGER PRIMARY KEY);",
+    }])
+    .unwrap();
+
+    let result = Db::update(|connection| {
+        connection.query_scalar::<String>("PRAGMA journal_mode=WAL", params![])
+    });
+
+    match result {
+        Ok(mode) => assert_ne!(mode.to_ascii_lowercase(), "wal"),
+        Err(error) => {
+            assert!(error.to_string().contains("WAL") || error.to_string().contains("wal"))
+        }
+    }
 }

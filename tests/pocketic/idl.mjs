@@ -34,6 +34,7 @@ export const idlFactory = ({ IDL }) => {
   return IDL.Service({
     kv_put: IDL.Func([IDL.Text, IDL.Text], [result(IDL.Null)], []),
     kv_get: IDL.Func([IDL.Text], [result(IDL.Opt(IDL.Text))], ["query"]),
+    kv_get_many: IDL.Func([IDL.Vec(IDL.Text)], [result(IDL.Vec(IDL.Opt(IDL.Text)))], ["query"]),
     kv_set_note: IDL.Func([IDL.Text, IDL.Text], [result(IDL.Null)], []),
     kv_get_note: IDL.Func([IDL.Text], [result(IDL.Opt(IDL.Text))], ["query"]),
     kv_count: IDL.Func([], [result(IDL.Nat64)], ["query"]),

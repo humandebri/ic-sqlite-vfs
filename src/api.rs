@@ -4,11 +4,17 @@
 //! so a SQLite transaction cannot cross an `await` boundary.
 
 use crate::db::migrate::Migration;
+use crate::db::value::{to_sql_ref, ToSql};
 use crate::stable::memory;
 use crate::stable::meta::Superblock;
 use crate::Db;
 use candid::CandidType;
+use ic_stable_structures::{
+    memory_manager::{MemoryId, MemoryManager},
+    DefaultMemoryImpl,
+};
 use serde::Deserialize;
+use std::cell::RefCell;
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -23,6 +29,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE kv ADD COLUMN note TEXT;",
     },
 ];
+const MAX_KV_GET_MANY_KEYS: usize = 1_000;
+const SQLITE_MEMORY_ID: MemoryId = MemoryId::new(120);
+
+thread_local! {
+    static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
+        RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
+}
 
 #[derive(CandidType, Deserialize)]
 pub struct DbMeta {
@@ -58,12 +71,20 @@ pub struct ChecksumRefresh {
 
 #[ic_cdk::init]
 fn init() {
+    init_db();
     must(Db::migrate(MIGRATIONS));
 }
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
+    init_db();
     must(Db::migrate(MIGRATIONS));
+}
+
+fn init_db() {
+    MEMORY_MANAGER.with(|manager| {
+        must(Db::init(manager.borrow().get(SQLITE_MEMORY_ID)));
+    });
 }
 
 #[ic_cdk::update]
@@ -81,10 +102,28 @@ fn kv_put(key: String, value: String) -> Result<(), String> {
 #[ic_cdk::query]
 fn kv_get(key: String) -> Result<Option<String>, String> {
     Db::query(|connection| {
-        connection.query_optional_scalar::<String>(
-            "SELECT value FROM kv WHERE key = ?1",
-            crate::params![key],
-        )
+        connection.query_optional_string_text("SELECT value FROM kv WHERE key = ?1", &key)
+    })
+    .map_err(error_text)
+}
+
+#[ic_cdk::query]
+fn kv_get_many(keys: Vec<String>) -> Result<Vec<Option<String>>, String> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    if keys.len() > MAX_KV_GET_MANY_KEYS {
+        return Err(format!(
+            "kv_get_many accepts at most {MAX_KV_GET_MANY_KEYS} keys"
+        ));
+    }
+    let sql = values_lookup_sql(keys.len(), "value")?;
+    Db::query(|connection| {
+        let values = keys
+            .iter()
+            .map(|key| to_sql_ref(key) as &dyn ToSql)
+            .collect::<Vec<_>>();
+        connection.query_column::<Option<String>>(&sql, &values)
     })
     .map_err(error_text)
 }
@@ -103,12 +142,24 @@ fn kv_set_note(key: String, note: String) -> Result<(), String> {
 #[ic_cdk::query]
 fn kv_get_note(key: String) -> Result<Option<String>, String> {
     Db::query(|connection| {
-        connection.query_optional_scalar::<String>(
-            "SELECT note FROM kv WHERE key = ?1",
-            crate::params![key],
-        )
+        connection.query_optional_string_text("SELECT note FROM kv WHERE key = ?1", &key)
     })
     .map_err(error_text)
+}
+
+fn values_lookup_sql(count: usize, column: &str) -> Result<String, String> {
+    let mut sql = String::from("WITH lookup(ord, key) AS (VALUES ");
+    for index in 0..count {
+        if index > 0 {
+            sql.push(',');
+        }
+        let ordinal = index + 1;
+        sql.push_str(&format!("({index}, ?{ordinal})"));
+    }
+    sql.push_str(") SELECT kv.");
+    sql.push_str(column);
+    sql.push_str(" FROM lookup LEFT JOIN kv ON kv.key = lookup.key ORDER BY lookup.ord");
+    Ok(sql)
 }
 
 #[ic_cdk::query]

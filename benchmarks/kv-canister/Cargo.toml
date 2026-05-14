@@ -1,6 +1,6 @@
 [package]
 name = "ic-sqlite-vfs-kv-bench"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 publish = false
 
@@ -10,5 +10,6 @@ crate-type = ["cdylib"]
 [dependencies]
 candid = "0.10"
 ic-cdk = "0.20.1"
-ic-sqlite-vfs = { path = "../.." }
+ic-stable-structures = "0.7"
+ic-sqlite-vfs = { path = "../..", default-features = false, features = ["bench-profile", "sqlite-precompiled"] }
 serde = { version = "1", features = ["derive"] }

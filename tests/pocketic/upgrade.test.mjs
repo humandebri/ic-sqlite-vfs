@@ -27,7 +27,14 @@ async function stableImageSurvivesUpgrade(pic) {
   const { actor, canisterId } = await pic.setupCanister({ idlFactory, wasm });
 
   assert.deepEqual(await actor.kv_put("survives", "before-upgrade"), { Ok: null });
+  assert.deepEqual(await actor.kv_put("other", "second"), { Ok: null });
   assert.deepEqual(await actor.kv_get("survives"), { Ok: ["before-upgrade"] });
+  assert.deepEqual(await actor.kv_get_many(["other", "missing", "survives", "other"]), {
+    Ok: [["second"], [], ["before-upgrade"], ["second"]],
+  });
+  const tooMany = await actor.kv_get_many(Array.from({ length: 1001 }, (_, index) => `k${index}`));
+  assert.equal("Err" in tooMany, true);
+  assert.match(tooMany.Err, /at most 1000 keys/);
   const before = await actor.db_meta();
   assert.equal("Ok" in before, true);
   assert.equal(before.Ok.checksum_stale, true);

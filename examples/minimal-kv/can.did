@@ -1,0 +1,4 @@
+service : {
+  kv_get : (text) -> (variant { Ok : opt text; Err : text }) query;
+  kv_put : (text, text) -> (variant { Ok; Err : text });
+}

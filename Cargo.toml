@@ -1,6 +1,6 @@
 [package]
 name = "ic-sqlite-vfs"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "SQLite VFS backed directly by Internet Computer stable memory"
@@ -19,9 +19,12 @@ exclude = [
 ]
 
 [features]
-default = []
+default = ["sqlite-bundled"]
+bench-profile = []
 canister-api = []
 canister-api-test-failpoints = ["canister-api"]
+sqlite-bundled = []
+sqlite-precompiled = []
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -29,9 +32,12 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 candid = "0.10"
 ic-cdk = "0.20.1"
-libsqlite3-sys = { version = "0.37.0", features = ["bundled"] }
+ic-stable-structures = "0.7"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+
+[build-dependencies]
+cc = "1.2"
 
 [dev-dependencies]
 serial_test = "3"

@@ -1,7 +1,8 @@
 //! Thin SQLite C connection wrapper bound to the `icstable` VFS.
 //!
 //! `rusqlite` refuses `SQLITE_THREADSAFE=0`, so this crate keeps a small FFI
-//! facade. Connections are per-message and never shared.
+//! facade. Write connections are per-message; read-only connections may be
+//! reused inside one context cache.
 
 use crate::config::{SQLITE_URI, STATEMENT_CACHE_CAPACITY, VFS_NAME};
 use crate::db::row::{FromColumn, Row};
@@ -212,6 +213,31 @@ impl Connection {
         statement.query_one_named(values, f)
     }
 
+    /// Runs a single-row query.
+    ///
+    /// This is a `rusqlite`-style alias for [`Connection::query_one`].
+    pub fn query_row<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<T, DbError>
+    where
+        F: FnOnce(&Row<'_>) -> Result<T, DbError>,
+    {
+        self.query_one(sql, values, f)
+    }
+
+    /// Runs a single-row query with named parameters.
+    ///
+    /// This is a `rusqlite`-style alias for [`Connection::query_one_named`].
+    pub fn query_row_named<T, F>(
+        &self,
+        sql: &str,
+        values: &[(&str, &dyn ToSql)],
+        f: F,
+    ) -> Result<T, DbError>
+    where
+        F: FnOnce(&Row<'_>) -> Result<T, DbError>,
+    {
+        self.query_one_named(sql, values, f)
+    }
+
     pub fn query_optional<T, F>(
         &self,
         sql: &str,
@@ -259,6 +285,35 @@ impl Connection {
         statement.query_all_named(values, f)
     }
 
+    /// Maps all rows into a `Vec<T>`.
+    ///
+    /// Unlike `rusqlite::Statement::query_map`, this returns a collected
+    /// `Vec<T>`, not an iterator. That keeps the prepared statement lifetime
+    /// inside one synchronous canister message.
+    pub fn query_map<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<Vec<T>, DbError>
+    where
+        F: FnMut(&Row<'_>) -> Result<T, DbError>,
+    {
+        self.query_all(sql, values, f)
+    }
+
+    /// Maps all rows into a `Vec<T>` using named parameters.
+    ///
+    /// Unlike `rusqlite::Statement::query_map`, this returns a collected
+    /// `Vec<T>`, not an iterator. That keeps the prepared statement lifetime
+    /// inside one synchronous canister message.
+    pub fn query_map_named<T, F>(
+        &self,
+        sql: &str,
+        values: &[(&str, &dyn ToSql)],
+        f: F,
+    ) -> Result<Vec<T>, DbError>
+    where
+        F: FnMut(&Row<'_>) -> Result<T, DbError>,
+    {
+        self.query_all_named(sql, values, f)
+    }
+
     pub fn exists(&self, sql: &str, values: &[&dyn ToSql]) -> Result<bool, DbError> {
         self.query_optional(sql, values, |row| row.get::<i64>(0))
             .map(|value| value.unwrap_or(0) != 0)
@@ -286,6 +341,15 @@ impl Connection {
         values: &[&dyn ToSql],
     ) -> Result<Option<T>, DbError> {
         self.query_optional(sql, values, |row| row.get(0))
+    }
+
+    pub fn query_optional_string_text(
+        &self,
+        sql: &str,
+        value: &str,
+    ) -> Result<Option<String>, DbError> {
+        let mut statement = self.prepare(sql)?;
+        statement.query_optional_string_text(value)
     }
 
     pub fn query_optional_scalar_named<T: FromColumn>(
@@ -429,13 +493,13 @@ mod tests {
         stable_blob::invalidate_read_cache();
         memory::reset_for_tests();
         lock::reset_for_tests();
+        Db::init(memory::memory_for_tests()).unwrap();
     }
 
     #[test]
     #[serial]
     fn cached_statements_are_lru_bounded() {
         reset();
-        Db::init().unwrap();
         let connection = open_read_write().unwrap();
 
         for index in 0..(STATEMENT_CACHE_CAPACITY + 8) {
@@ -457,7 +521,6 @@ mod tests {
     #[serial]
     fn discarded_cached_statement_is_finalized_not_cached() {
         reset();
-        Db::init().unwrap();
         let connection = open_read_write().unwrap();
 
         let statement = connection.prepare_cached("SELECT 1").unwrap();
