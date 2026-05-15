@@ -1,7 +1,6 @@
 # API Stability
 
-`ic-sqlite-vfs` starts at `0.1.0`. `0.2.0` is the first
-MemoryManager-backed line.
+`0.2.0` is the first public MemoryManager-backed line.
 
 ## Stability Contract
 
@@ -22,9 +21,9 @@ may still break API or layout. Production users should pin exact versions.
 
 ## Release Notes
 
-`0.2.0` removes raw stable memory ownership. Applications must initialize their
-own `MemoryManager<DefaultMemoryImpl>`, choose a dedicated `MemoryId`, and pass
-the resulting `VirtualMemory<DefaultMemoryImpl>` to `Db::init(memory)`.
+Applications must initialize their own `MemoryManager<DefaultMemoryImpl>`,
+choose a dedicated `MemoryId`, and pass the resulting
+`VirtualMemory<DefaultMemoryImpl>` to `Db::init(memory)`.
 The crate does not reserve a `MemoryId`; the application must choose one,
 persist that choice across upgrades, and never reuse it for another stable
 structure.
@@ -47,8 +46,7 @@ any catalog, index, metadata, and reserved memories chosen by the application.
 This crate does not widen `MemoryId` or fork the `MemoryManager` layout.
 
 The multi-database API is still covered by the `0.x` compatibility rules.
-Production deployments should pin exact versions and use export/import, not
-in-place layout migration, when moving across incompatible releases.
+Production deployments should pin exact versions.
 
 `0.2.0` also adds `sqlite-precompiled`, which links the vendored
 `wasm32-unknown-unknown` SQLite archive without downstream build-support files.
@@ -57,22 +55,7 @@ in-place layout migration, when moving across incompatible releases.
 
 Canister upgrades are tested for the same crate version.
 
-Cross-version upgrade compatibility is not guaranteed in `0.x`. `0.1` raw
-stable memory layouts are not migrated in-place to `0.2`. Migrate with
-export/import:
-
-1. deploy the old version
-2. run `db_integrity_check`
-3. export the full DB image with `db_export_chunk`
-4. deploy the new version to a fresh canister or controlled upgrade path with a
-   dedicated `MemoryId`
-5. import with `db_begin_import`, `db_import_chunk`, `db_finish_import`
-6. run `db_integrity_check`
-
-These are crate-level primitives. Production applications should keep their own
-version-pinned export/import runbook, including source version, destination
-version, controller identity, freeze window, chunk size, checksum evidence, and
-rollback decision point.
+Cross-version upgrade compatibility is not promised during `0.x`.
 
 ## Current Layout
 

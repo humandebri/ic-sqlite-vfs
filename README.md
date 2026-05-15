@@ -26,9 +26,9 @@ The core VFS, transaction facade, import/export flow, and upgrade persistence
 tests are in place. This project has not promised compatibility for deployed
 canisters yet. `0.x` releases may introduce breaking changes.
 
-`0.2.0` is a breaking release: the crate no longer owns raw stable memory.
-Applications must pass a dedicated `VirtualMemory<DefaultMemoryImpl>` from their
-own `MemoryManager` to `Db::init(memory)`.
+`0.2.0` is the first public MemoryManager-backed release. Applications must pass
+a dedicated `VirtualMemory<DefaultMemoryImpl>` from their own `MemoryManager`
+to `Db::init(memory)`.
 
 See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `0.x` compatibility
 contract.
