@@ -127,7 +127,8 @@ fn bench_read(rows: u32) -> Result<BenchReport, String> {
         let mut total = 0_u64;
         let mut statement = connection.prepare_cached(POINT_READ_SQL)?;
         for index in 0..rows {
-            let key = format!("k{index:08}");
+            let mut key = [0_u8; 9];
+            let key = bench_key(index, &mut key);
             let value = statement
                 .query_row(params![key], |row| {
                     let value = row.get_ref(0)?;
@@ -146,6 +147,7 @@ fn bench_read(rows: u32) -> Result<BenchReport, String> {
 
 #[query]
 fn bench_many_rows(rows: u32) -> Result<BenchReport, String> {
+    warm_read_connection()?;
     let start = performance_counter(0);
     let checksum = with_connection(|connection| -> Result<u64, ic_rusqlite::Error> {
         let mut statement =
@@ -188,6 +190,7 @@ fn bench_get_many_in(rows: u32) -> Result<BenchReport, String> {
     if rows == 0 {
         return Err("rows must be positive".to_string());
     }
+    warm_read_connection()?;
     let start = performance_counter(0);
     let checksum = with_connection(|connection| -> Result<u64, ic_rusqlite::Error> {
         let sql = format!(
@@ -285,6 +288,7 @@ fn bench_keys(rows: u32) -> Vec<String> {
 }
 
 fn report(rows: u32, start: u64, checksum: u64) -> Result<BenchReport, String> {
+    let instructions = performance_counter(0).saturating_sub(start);
     let db_size = db_file_size()?;
     let stable_pages = ic_cdk::api::stable_size();
     let stable_bytes = stable_pages
@@ -292,7 +296,7 @@ fn report(rows: u32, start: u64, checksum: u64) -> Result<BenchReport, String> {
         .ok_or_else(|| "stable byte size overflow".to_string())?;
     Ok(BenchReport {
         rows: u64::from(rows),
-        instructions: performance_counter(0).saturating_sub(start),
+        instructions,
         checksum,
         db_size,
         stable_pages,
@@ -316,6 +320,21 @@ fn warm_point_read_statement() -> Result<(), String> {
         Ok(())
     })
     .map_err(error_text)
+}
+
+fn warm_read_connection() -> Result<(), String> {
+    with_connection(|_| -> Result<(), ic_rusqlite::Error> { Ok(()) }).map_err(error_text)
+}
+
+fn bench_key(index: u32, out: &mut [u8; 9]) -> &str {
+    out[0] = b'k';
+    let mut value = index;
+    for byte in out[1..].iter_mut().rev() {
+        *byte = b'0' + u8::try_from(value % 10).expect("digit fits u8");
+        value /= 10;
+    }
+    // SAFETY: bytes are always ASCII `k` followed by decimal digits.
+    unsafe { std::str::from_utf8_unchecked(out) }
 }
 
 fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {

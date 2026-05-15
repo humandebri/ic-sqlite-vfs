@@ -16,6 +16,9 @@ use ic_stable_structures::{
 use serde::Deserialize;
 use std::cell::RefCell;
 
+#[cfg(feature = "canister-api-test-failpoints")]
+mod sqlite_feature_probe;
+
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -278,6 +281,13 @@ fn db_test_trap_after_stable_write(ordinal: u64) -> Result<(), String> {
         ordinal,
     });
     Ok(())
+}
+
+#[cfg(feature = "canister-api-test-failpoints")]
+#[ic_cdk::update]
+fn db_test_sqlite_feature_probe() -> Result<(), String> {
+    require_controller()?;
+    sqlite_feature_probe::run()
 }
 
 #[cfg(feature = "canister-api-test-failpoints")]

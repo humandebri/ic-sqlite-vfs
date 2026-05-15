@@ -13,10 +13,10 @@ for arg in "$@"; do
     continue
   fi
   case "$arg" in
-    --target)
+    --target | -target)
       SKIP_NEXT_TARGET=1
       ;;
-    --target=wasm32-wasi | --target=wasm32-wasip1 | --target=wasm32-unknown-unknown)
+    --target=* | -target=*)
       ;;
     *)
       ARGS+=("$arg")

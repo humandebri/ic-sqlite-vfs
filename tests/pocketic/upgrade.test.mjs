@@ -14,6 +14,7 @@ test("PocketIC persistence and failpoint regressions", { timeout }, async () => 
   const pic = await PocketIc.create(server.getUrl(), { processingTimeoutMs: timeout });
   try {
     await stableImageSurvivesUpgrade(pic);
+    await precompiledSqliteArchiveHasExpectedFeatures(pic);
     await stableWriteTrapRollsBackFailedUpdate(pic);
     await chunkedImportRejectsWrongChecksum(pic);
     await managementMethodsRequireController(pic);
@@ -64,6 +65,12 @@ async function stableWriteTrapRollsBackFailedUpdate(pic) {
 
   assert.deepEqual(await actor.kv_get("trap"), { Ok: ["before"] });
   assert.deepEqual(await actor.db_integrity_check(), { Ok: "ok" });
+}
+
+async function precompiledSqliteArchiveHasExpectedFeatures(pic) {
+  const { actor } = await pic.setupCanister({ idlFactory, wasm: failpointWasm });
+
+  assert.deepEqual(await actor.db_test_sqlite_feature_probe(), { Ok: null });
 }
 
 async function chunkedImportRejectsWrongChecksum(pic) {

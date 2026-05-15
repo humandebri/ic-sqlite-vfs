@@ -1,7 +1,7 @@
 //! Prepared statement lifecycle and row iteration.
 //!
-//! Each execution resets and clears bindings first. `Drop` finalizes the SQLite
-//! statement, so prepared statements can be reused without leaking C resources.
+//! Each execution resets and rebinds the statement. `Drop` finalizes regular
+//! statements, while cached statements clear bindings before returning to cache.
 
 use crate::db::connection::sqlite_error;
 use crate::db::row::{FromColumn, Row};
@@ -319,10 +319,6 @@ impl<'connection> Statement<'connection> {
         if reset_rc != ffi::SQLITE_OK {
             return Err(sqlite_error(self.db, reset_rc));
         }
-        let clear_rc = unsafe { ffi::sqlite3_clear_bindings(self.raw.as_ptr()) };
-        if clear_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, clear_rc));
-        }
         bind_all(self.raw.as_ptr(), values)
     }
 
@@ -336,10 +332,6 @@ impl<'connection> Statement<'connection> {
         let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
         if reset_rc != ffi::SQLITE_OK {
             return Err(sqlite_error(self.db, reset_rc));
-        }
-        let clear_rc = unsafe { ffi::sqlite3_clear_bindings(self.raw.as_ptr()) };
-        if clear_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, clear_rc));
         }
         let len = std::ffi::c_int::try_from(value.len()).map_err(|_| DbError::TextTooLarge)?;
         let bind_rc = unsafe {
@@ -362,10 +354,6 @@ impl<'connection> Statement<'connection> {
         let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
         if reset_rc != ffi::SQLITE_OK {
             return Err(sqlite_error(self.db, reset_rc));
-        }
-        let clear_rc = unsafe { ffi::sqlite3_clear_bindings(self.raw.as_ptr()) };
-        if clear_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, clear_rc));
         }
         bind_named_all(self.raw.as_ptr(), values)
     }

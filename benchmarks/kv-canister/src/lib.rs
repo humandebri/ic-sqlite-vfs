@@ -578,11 +578,12 @@ fn bench_key(index: u32, out: &mut [u8; 9]) -> &str {
 }
 
 fn report(rows: u32, start: u64, checksum: u64) -> Result<BenchReport, String> {
+    let instructions = performance_counter(0).saturating_sub(start);
     let block = Superblock::load().map_err(|error| error.to_string())?;
     let stable_pages = memory::size_pages();
     Ok(BenchReport {
         rows: u64::from(rows),
-        instructions: performance_counter(0) - start,
+        instructions,
         checksum,
         db_size: block.db_size,
         stable_pages,

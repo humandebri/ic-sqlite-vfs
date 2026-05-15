@@ -62,7 +62,7 @@ fn sqlite_flags(manifest_dir: &Path) -> Vec<String> {
         .unwrap_or_else(|error| panic!("read {}: {}", path.display(), error))
         .lines()
         .map(str::trim)
-        .filter(|flag| !flag.is_empty())
+        .filter(|flag| !flag.is_empty() && !flag.starts_with('#'))
         .map(str::to_owned)
         .collect()
 }
