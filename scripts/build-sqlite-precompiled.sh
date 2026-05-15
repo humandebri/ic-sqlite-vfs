@@ -27,7 +27,10 @@ mkdir -p "$(dirname "$OBJ")" "$(dirname "$LIB")"
 
 DEFINE_FLAGS=()
 while IFS= read -r flag; do
+  flag="${flag#"${flag%%[![:space:]]*}"}"
+  flag="${flag%"${flag##*[![:space:]]}"}"
   [[ -n "$flag" ]] || continue
+  [[ "$flag" != \#* ]] || continue
   DEFINE_FLAGS+=("-D$flag")
 done < vendor/sqlite/build-flags.txt
 

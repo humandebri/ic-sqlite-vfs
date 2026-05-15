@@ -49,6 +49,7 @@ export const idlFactory = ({ IDL }) => {
     db_finish_import: IDL.Func([], [result(IDL.Null)], []),
     db_cancel_import: IDL.Func([], [result(IDL.Null)], []),
     db_compact: IDL.Func([], [result(IDL.Null)], []),
+    db_test_sqlite_feature_probe: IDL.Func([], [result(IDL.Null)], []),
     db_test_trap_after_stable_write: IDL.Func([IDL.Nat64], [result(IDL.Null)], []),
     db_test_clear_failpoints: IDL.Func([], [result(IDL.Null)], [])
   });

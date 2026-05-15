@@ -8,6 +8,10 @@ use ic_cdk::{api::performance_counter, init, post_upgrade, query, update};
 use ic_rusqlite::{params, params_from_iter, with_connection, OptionalExtension};
 use serde::Deserialize;
 
+mod key;
+
+use key::{bench_key, validate_fixed_bench_key_rows};
+
 const STABLE_PAGE_SIZE: u64 = 65_536;
 const MIGRATION_SQL: &str = "CREATE TABLE IF NOT EXISTS bench (
     key TEXT PRIMARY KEY NOT NULL,
@@ -121,13 +125,15 @@ fn bench_update_only(rows: u32) -> Result<BenchReport, String> {
 
 #[query]
 fn bench_read(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     warm_point_read_statement()?;
     let start = performance_counter(0);
     let checksum = with_connection(|connection| -> Result<u64, ic_rusqlite::Error> {
         let mut total = 0_u64;
         let mut statement = connection.prepare_cached(POINT_READ_SQL)?;
         for index in 0..rows {
-            let key = format!("k{index:08}");
+            let mut key = [0_u8; 9];
+            let key = bench_key(index, &mut key);
             let value = statement
                 .query_row(params![key], |row| {
                     let value = row.get_ref(0)?;
@@ -146,6 +152,7 @@ fn bench_read(rows: u32) -> Result<BenchReport, String> {
 
 #[query]
 fn bench_many_rows(rows: u32) -> Result<BenchReport, String> {
+    warm_read_connection()?;
     let start = performance_counter(0);
     let checksum = with_connection(|connection| -> Result<u64, ic_rusqlite::Error> {
         let mut statement =
@@ -188,6 +195,7 @@ fn bench_get_many_in(rows: u32) -> Result<BenchReport, String> {
     if rows == 0 {
         return Err("rows must be positive".to_string());
     }
+    warm_read_connection()?;
     let start = performance_counter(0);
     let checksum = with_connection(|connection| -> Result<u64, ic_rusqlite::Error> {
         let sql = format!(
@@ -285,6 +293,7 @@ fn bench_keys(rows: u32) -> Vec<String> {
 }
 
 fn report(rows: u32, start: u64, checksum: u64) -> Result<BenchReport, String> {
+    let instructions = performance_counter(0).saturating_sub(start);
     let db_size = db_file_size()?;
     let stable_pages = ic_cdk::api::stable_size();
     let stable_bytes = stable_pages
@@ -292,7 +301,7 @@ fn report(rows: u32, start: u64, checksum: u64) -> Result<BenchReport, String> {
         .ok_or_else(|| "stable byte size overflow".to_string())?;
     Ok(BenchReport {
         rows: u64::from(rows),
-        instructions: performance_counter(0).saturating_sub(start),
+        instructions,
         checksum,
         db_size,
         stable_pages,
@@ -316,6 +325,10 @@ fn warm_point_read_statement() -> Result<(), String> {
         Ok(())
     })
     .map_err(error_text)
+}
+
+fn warm_read_connection() -> Result<(), String> {
+    with_connection(|_| -> Result<(), ic_rusqlite::Error> { Ok(()) }).map_err(error_text)
 }
 
 fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {

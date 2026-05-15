@@ -18,6 +18,10 @@ use ic_stable_structures::{
 use serde::Deserialize;
 use std::cell::RefCell;
 
+mod key;
+
+use key::{bench_key, validate_fixed_bench_key_rows};
+
 const MIGRATIONS: &[Migration] = &[Migration {
     version: 1,
     sql: "CREATE TABLE IF NOT EXISTS bench (
@@ -171,6 +175,7 @@ fn bench_update_only(rows: u32) -> Result<BenchReport, String> {
 
 #[query]
 fn bench_read(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     warm_point_read_statement()?;
     let start = performance_counter(0);
     let checksum = Db::query(|connection| {
@@ -248,6 +253,7 @@ fn db_stats() -> Result<DbStatsReport, String> {
 
 #[query]
 fn bench_read_profile(rows: u32) -> Result<BenchReadProfileReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     warm_point_read_statement()?;
     read_metrics::reset_read_metrics();
     let start = performance_counter(0);
@@ -566,23 +572,13 @@ impl BenchReadProfile {
     }
 }
 
-fn bench_key(index: u32, out: &mut [u8; 9]) -> &str {
-    out[0] = b'k';
-    let mut value = index;
-    for byte in out[1..].iter_mut().rev() {
-        *byte = b'0' + u8::try_from(value % 10).expect("digit fits u8");
-        value /= 10;
-    }
-    // SAFETY: bytes are always ASCII `k` followed by decimal digits.
-    unsafe { std::str::from_utf8_unchecked(out) }
-}
-
 fn report(rows: u32, start: u64, checksum: u64) -> Result<BenchReport, String> {
+    let instructions = performance_counter(0).saturating_sub(start);
     let block = Superblock::load().map_err(|error| error.to_string())?;
     let stable_pages = memory::size_pages();
     Ok(BenchReport {
         rows: u64::from(rows),
-        instructions: performance_counter(0) - start,
+        instructions,
         checksum,
         db_size: block.db_size,
         stable_pages,

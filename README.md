@@ -457,26 +457,27 @@ For manual local-network checks, run `scripts/bench-kv-local.sh 1000`.
 
 KV workload, current PocketIC harness. Each workload runs in a fresh canister.
 Read workloads use a warm read connection; point reads also warm the cached
-point-read statement before instruction measurement.
+point-read statement before instruction measurement. Instruction measurement
+stops before `BenchReport` metadata collection.
 
 | Workload | ic-sqlite-vfs | wasi2ic + ic-rusqlite | Result |
 |---|---:|---:|---:|
-| reset + insert, 1000 rows | 16.13M | 86.51M | 5.4x fewer instructions |
-| insert only into empty table, 1000 rows | 15.62M | 85.90M | 5.5x fewer instructions |
-| insert only into empty table, 5000 rows | 84.41M | 440.58M | 5.2x fewer instructions |
-| append insert, 5000 existing + 1000 new | 19.22M | 88.97M | 4.6x fewer instructions |
-| insert/update upsert, 1000 rows | 19.32M | 89.49M | 4.6x fewer instructions |
-| update only by primary key, 1000 rows | 22.45M | 83.58M | 3.7x fewer instructions |
-| update only by primary key, 5000 rows | 115.94M | 425.26M | 3.7x fewer instructions |
-| point read, 1 key | 0.058M | 0.029M | wasi2ic lower on this harness |
-| point read, 10 keys | 0.189M | 0.145M | wasi2ic lower on this harness |
-| point read, 100 keys | 1.50M | 1.29M | wasi2ic lower on this harness |
-| point read, 1000 keys | 14.90M | 12.92M | wasi2ic lower on this harness |
-| bulk read ordered scan, 100 rows | 0.264M | 0.245M | roughly equal |
-| bulk read ordered scan, 1000 rows | 1.60M | 1.67M | ic-sqlite-vfs slightly lower |
-| bulk read ordered scan, 5000 rows | 7.59M | 8.00M | ic-sqlite-vfs slightly lower |
-| `WHERE key IN (...)`, 100 keys | 1.78M | 1.68M | wasi2ic lower on this harness |
-| `WHERE key IN (...)`, 1000 keys | 19.85M | 18.53M | wasi2ic lower on this harness |
+| reset + insert, 1000 rows | 16.01M | 86.50M | 5.4x fewer instructions |
+| insert only into empty table, 1000 rows | 15.50M | 85.89M | 5.5x fewer instructions |
+| insert only into empty table, 5000 rows | 83.81M | 440.57M | 5.3x fewer instructions |
+| append insert, 5000 existing + 1000 new | 19.10M | 88.96M | 4.7x fewer instructions |
+| insert/update upsert, 1000 rows | 19.20M | 89.48M | 4.7x fewer instructions |
+| update only by primary key, 1000 rows | 22.33M | 83.57M | 3.7x fewer instructions |
+| update only by primary key, 5000 rows | 115.33M | 425.24M | 3.7x fewer instructions |
+| point read, 1 key | 0.058M | 0.015M | wasi2ic lower on this harness |
+| point read, 10 keys | 0.187M | 0.109M | wasi2ic lower on this harness |
+| point read, 100 keys | 1.49M | 1.06M | wasi2ic lower on this harness |
+| point read, 1000 keys | 14.83M | 10.70M | wasi2ic lower on this harness |
+| bulk read ordered scan, 100 rows | 0.264M | 0.233M | wasi2ic lower on this harness |
+| bulk read ordered scan, 1000 rows | 1.60M | 1.66M | ic-sqlite-vfs slightly lower |
+| bulk read ordered scan, 5000 rows | 7.59M | 7.99M | ic-sqlite-vfs slightly lower |
+| `WHERE key IN (...)`, 100 keys | 1.77M | 1.67M | wasi2ic lower on this harness |
+| `WHERE key IN (...)`, 1000 keys | 19.80M | 18.52M | wasi2ic lower on this harness |
 
 Repeated point reads execute one SQLite statement per key inside the canister.
 They mostly measure bind/reset/step wrapper overhead, not stable-memory I/O.
