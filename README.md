@@ -20,7 +20,7 @@ memory pages through a segmented page table.
 
 ## Status
 
-Current public release: `0.2.0`.
+Current public release: `0.2.1`.
 
 The core VFS, transaction facade, import/export flow, and upgrade persistence
 tests are in place. This project has not promised compatibility for deployed
@@ -223,7 +223,7 @@ only for this repository's reference canister.
 
 ```toml
 [dependencies]
-ic-sqlite-vfs = { version = "0.2.0", default-features = false, features = ["sqlite-precompiled"] }
+ic-sqlite-vfs = { version = "0.2.1", default-features = false, features = ["sqlite-precompiled"] }
 ic-stable-structures = "0.7"
 ```
 
