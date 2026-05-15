@@ -1,21 +1,6 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
-
-const SQLITE_FLAGS: &[&str] = &[
-    "SQLITE_CORE",
-    "SQLITE_DEFAULT_FOREIGN_KEYS=1",
-    "SQLITE_ENABLE_API_ARMOR",
-    "SQLITE_USE_URI",
-    "SQLITE_OS_OTHER=1",
-    "SQLITE_THREADSAFE=0",
-    "SQLITE_OMIT_WAL",
-    "SQLITE_TEMP_STORE=3",
-    "SQLITE_OMIT_DATETIME_FUNCS",
-    "SQLITE_OMIT_DEPRECATED",
-    "SQLITE_OMIT_LOAD_EXTENSION",
-    "SQLITE_OMIT_SHARED_CACHE",
-    "SQLITE_DEFAULT_MEMSTATUS=0",
-];
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -58,13 +43,26 @@ fn link_precompiled(manifest_dir: &Path, target: &str) {
 fn build_bundled(manifest_dir: &Path) {
     println!("cargo:rerun-if-changed=vendor/sqlite/src/sqlite3.c");
     println!("cargo:rerun-if-changed=vendor/sqlite/src/sqlite3.h");
+    println!("cargo:rerun-if-changed=scripts/wasm32-unknown-unknown-cc.sh");
+    let flags = sqlite_flags(manifest_dir);
     let mut build = cc::Build::new();
     build
         .file(manifest_dir.join("vendor/sqlite/src/sqlite3.c"))
         .include(manifest_dir.join("vendor/sqlite/src"))
         .warnings(false);
-    for flag in SQLITE_FLAGS {
-        build.flag(format!("-D{flag}"));
+    for flag in flags {
+        build.flag(format!("-D{}", flag));
     }
     build.compile("sqlite3");
+}
+
+fn sqlite_flags(manifest_dir: &Path) -> Vec<String> {
+    let path = manifest_dir.join("vendor/sqlite/build-flags.txt");
+    fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {}", path.display(), error))
+        .lines()
+        .map(str::trim)
+        .filter(|flag| !flag.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
