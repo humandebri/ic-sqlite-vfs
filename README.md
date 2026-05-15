@@ -511,7 +511,7 @@ Wasm size:
 
 | Implementation | Wasm |
 |---|---:|
-| ic-sqlite-vfs reference canister | 1.62 MB |
+| ic-sqlite-vfs reference canister | 1.63 MB |
 | wasi2ic KV benchmark canister | 3.07 MB |
 
 The instruction gap comes from removing WASI fd emulation and mapping SQLite
@@ -524,15 +524,15 @@ Native performance probe, measured locally on 2026-05-15 with
 |---:|---:|---:|---:|---:|
 | 100 | 0 ms | 0 ms | 0 ms | 64 KiB |
 | 1,000 | 1 ms | 0 ms | 0 ms | 144 KiB |
-| 10,000 | 13 ms | 0 ms | 2 ms | 672 KiB |
-| 20,000 | 25 ms | 0 ms | 4 ms | 1.25 MiB |
-| 100,000 | 129 ms | 0 ms | 24 ms | 6.09 MiB |
+| 10,000 | 12 ms | 0 ms | 2 ms | 672 KiB |
+| 20,000 | 27 ms | 0 ms | 5 ms | 1.25 MiB |
+| 100,000 | 133 ms | 0 ms | 25 ms | 6.09 MiB |
 
 For 20,000 rows in the same native probe:
 
 | Workload | elapsed | xRead calls | stable data reads | root hit/miss | segment hit/miss | superblock loads |
 |---|---:|---:|---:|---:|---:|---:|
-| indexed point reads | 50 ms | 20,080 | 20,080 | 79 / 1 | 79 / 1 | 0 |
+| indexed point reads | 52 ms | 20,080 | 20,080 | 79 / 1 | 79 / 1 | 0 |
 | `LIKE '%stable%'` scan | 2 ms | 1 | 1 | 0 / 0 | 0 / 0 | 0 |
 | full logical export | 0 ms | 0 | 80 | 80 / 0 | 80 / 0 | 0 |
 
