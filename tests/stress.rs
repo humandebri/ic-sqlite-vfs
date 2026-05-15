@@ -66,6 +66,35 @@ fn duplicate_migration_version_is_rejected_before_schema_changes() {
 
 #[test]
 #[serial]
+fn migration_registry_records_versions_without_wall_clock_time() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE clockless(id INTEGER PRIMARY KEY);",
+    }])
+    .unwrap();
+
+    let columns = Db::query(|connection| {
+        connection.query_column::<String>(
+            "SELECT name FROM pragma_table_info('__ic_sqlite_migrations') ORDER BY cid",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(columns, vec!["version"]);
+
+    let version = Db::query(|connection| {
+        connection.query_scalar::<i64>(
+            "SELECT version FROM __ic_sqlite_migrations WHERE version = 1",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(version, 1);
+}
+
+#[test]
+#[serial]
 fn deterministic_fuzz_matches_model() {
     reset();
     Db::migrate(&[Migration {

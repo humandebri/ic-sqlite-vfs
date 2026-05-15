@@ -238,7 +238,9 @@ For migration from `ic-sqlite` or `ic-rusqlite`, see
 Minimal canister pattern:
 
 `Db::migrate` records applied migration versions, so migration SQL should be a
-versioned step rather than an idempotent `IF NOT EXISTS` schema initializer.
+versioned step rather than an idempotent `IF NOT EXISTS` schema initializer. The
+migration registry stores only versions and does not depend on SQLite date/time
+functions.
 
 ```rust
 use ic_sqlite_vfs::db::migrate::Migration;
@@ -414,6 +416,8 @@ The bundled SQLite build uses:
 ```text
 SQLITE_OS_OTHER=1
 SQLITE_THREADSAFE=0
+SQLITE_ENABLE_FTS5
+SQLITE_OMIT_LOCALTIME
 SQLITE_OMIT_LOAD_EXTENSION
 SQLITE_OMIT_SHARED_CACHE
 SQLITE_OMIT_WAL
@@ -421,12 +425,19 @@ SQLITE_DEFAULT_MEMSTATUS=0
 SQLITE_TEMP_STORE=3
 ```
 
+The authoritative SQLite flag list is `vendor/sqlite/build-flags.txt`.
+`sqlite-bundled` reads it during Cargo builds, and
+`scripts/build-sqlite-precompiled.sh` uses it when regenerating the vendored
+archive.
+FTS5, UTC date/time functions, and JSON functions are enabled. Local time
+modifiers are omitted because canister SQL should use UTC time.
+
 `SQLITE_OS_OTHER=1` removes SQLite's default Unix/Windows/OS backends. This
 crate provides `sqlite3_os_init()` and registers only the `icstable` VFS.
 
 ## Benchmarks
 
-Measured locally on 2026-05-14 with PocketIC. The main metric is IC
+Measured locally on 2026-05-15 with PocketIC. The main metric is IC
 instructions from `ic_cdk::api::performance_counter(0)`.
 
 The benchmark harness lives in `benchmarks/kv-canister` and can be run with:
@@ -450,17 +461,17 @@ point-read statement before instruction measurement.
 
 | Workload | ic-sqlite-vfs | wasi2ic + ic-rusqlite | Result |
 |---|---:|---:|---:|
-| reset + insert, 1000 rows | 16.06M | 86.51M | 5.4x fewer instructions |
-| insert only into empty table, 1000 rows | 15.55M | 85.90M | 5.5x fewer instructions |
-| insert only into empty table, 5000 rows | 84.35M | 440.58M | 5.2x fewer instructions |
-| append insert, 5000 existing + 1000 new | 19.50M | 88.97M | 4.6x fewer instructions |
-| insert/update upsert, 1000 rows | 19.26M | 89.49M | 4.6x fewer instructions |
-| update only by primary key, 1000 rows | 22.38M | 83.58M | 3.7x fewer instructions |
-| update only by primary key, 5000 rows | 115.88M | 425.26M | 3.7x fewer instructions |
-| point read, 1 key | 0.057M | 0.029M | wasi2ic lower on this harness |
-| point read, 10 keys | 0.187M | 0.145M | wasi2ic lower on this harness |
-| point read, 100 keys | 1.49M | 1.29M | wasi2ic lower on this harness |
-| point read, 1000 keys | 14.82M | 12.92M | wasi2ic lower on this harness |
+| reset + insert, 1000 rows | 16.13M | 86.51M | 5.4x fewer instructions |
+| insert only into empty table, 1000 rows | 15.62M | 85.90M | 5.5x fewer instructions |
+| insert only into empty table, 5000 rows | 84.41M | 440.58M | 5.2x fewer instructions |
+| append insert, 5000 existing + 1000 new | 19.22M | 88.97M | 4.6x fewer instructions |
+| insert/update upsert, 1000 rows | 19.32M | 89.49M | 4.6x fewer instructions |
+| update only by primary key, 1000 rows | 22.45M | 83.58M | 3.7x fewer instructions |
+| update only by primary key, 5000 rows | 115.94M | 425.26M | 3.7x fewer instructions |
+| point read, 1 key | 0.058M | 0.029M | wasi2ic lower on this harness |
+| point read, 10 keys | 0.189M | 0.145M | wasi2ic lower on this harness |
+| point read, 100 keys | 1.50M | 1.29M | wasi2ic lower on this harness |
+| point read, 1000 keys | 14.90M | 12.92M | wasi2ic lower on this harness |
 | bulk read ordered scan, 100 rows | 0.264M | 0.245M | roughly equal |
 | bulk read ordered scan, 1000 rows | 1.60M | 1.67M | ic-sqlite-vfs slightly lower |
 | bulk read ordered scan, 5000 rows | 7.59M | 8.00M | ic-sqlite-vfs slightly lower |
@@ -500,29 +511,29 @@ Wasm size:
 
 | Implementation | Wasm |
 |---|---:|
-| ic-sqlite-vfs reference canister | 1.68 MB |
-| wasi2ic KV benchmark canister | 3.00 MB |
+| ic-sqlite-vfs reference canister | 1.62 MB |
+| wasi2ic KV benchmark canister | 3.07 MB |
 
 The instruction gap comes from removing WASI fd emulation and mapping SQLite
 pager I/O directly to stable memory offsets.
 
-Native performance probe, measured locally on 2026-05-13 with
+Native performance probe, measured locally on 2026-05-15 with
 `cargo test --test sqlite_perf_probe -- --ignored --nocapture`:
 
 | Rows | batch insert | single update after insert | refresh checksum | db_size |
 |---:|---:|---:|---:|---:|
 | 100 | 0 ms | 0 ms | 0 ms | 64 KiB |
 | 1,000 | 1 ms | 0 ms | 0 ms | 144 KiB |
-| 10,000 | 14 ms | 0 ms | 3 ms | 672 KiB |
-| 20,000 | 31 ms | 0 ms | 6 ms | 1.25 MiB |
-| 100,000 | 174 ms | 0 ms | 32 ms | 6.09 MiB |
+| 10,000 | 13 ms | 0 ms | 2 ms | 672 KiB |
+| 20,000 | 25 ms | 0 ms | 4 ms | 1.25 MiB |
+| 100,000 | 129 ms | 0 ms | 24 ms | 6.09 MiB |
 
 For 20,000 rows in the same native probe:
 
 | Workload | elapsed | xRead calls | stable data reads | root hit/miss | segment hit/miss | superblock loads |
 |---|---:|---:|---:|---:|---:|---:|
-| indexed point reads | 36 ms | 20,080 | 20,080 | 79 / 1 | 79 / 1 | 0 |
-| `LIKE '%stable%'` scan | 2 ms | 56 | 56 | 54 / 0 | 54 / 0 | 0 |
+| indexed point reads | 50 ms | 20,080 | 20,080 | 79 / 1 | 79 / 1 | 0 |
+| `LIKE '%stable%'` scan | 2 ms | 1 | 1 | 0 / 0 | 0 / 0 | 0 |
 | full logical export | 0 ms | 0 | 80 | 80 / 0 | 80 / 0 | 0 |
 
 The write workload numbers exclude a full DB checksum scan from the commit

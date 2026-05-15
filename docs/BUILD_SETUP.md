@@ -3,6 +3,8 @@
 `sqlite-precompiled` is the recommended canister build path. It links the
 vendored `wasm32-unknown-unknown` SQLite archive and needs no workspace-level C
 compiler setup.
+The vendored archive is built with FTS5, UTC date/time functions, and JSON
+functions enabled.
 
 ```toml
 ic-sqlite-vfs = { version = "0.2.0", default-features = false, features = ["sqlite-precompiled"] }
@@ -21,6 +23,10 @@ scripts/build-sqlite-precompiled.sh
 
 The script uses `wasm32-wasi-clang` by default. Set `WASI_CC` or `LLVM_AR` when
 using non-standard tool locations.
+Both `sqlite-precompiled` regeneration and `sqlite-bundled` use
+`vendor/sqlite/build-flags.txt` as the SQLite compile flag source.
+Local time modifiers are intentionally omitted; use UTC date/time functions in
+canister SQL.
 
 ## Legacy Bundled Path
 
