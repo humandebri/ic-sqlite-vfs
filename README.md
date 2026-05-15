@@ -76,7 +76,21 @@ managed by the application's single `MemoryManager<DefaultMemoryImpl>`.
 database facade in the current Wasm instance. Calling it twice returns
 `DbError::StableMemoryAlreadyInitialized`. Use `DbHandle::init(memory)` for
 multiple simultaneous SQLite databases, with a distinct stable `MemoryId` per
-handle.
+handle. Each handle owns one independent SQLite image. This is not a mount-id
+or filename namespace inside one image; SQLite still opens `/main.db` for each
+handle, and the active context selects the backing `VirtualMemory`.
+
+The underlying `ic-stable-structures` `MemoryManager` supports `MemoryId`
+values `0..=254`; `255` is reserved internally as the unallocated marker.
+Per-archive or per-slot databases are therefore a bounded design: one slot uses
+one `MemoryId`, one `DbHandle`, and one SQLite image. The slot catalog
+(`archive_id -> slot_id -> MemoryId`) belongs to the consuming canister and
+must stay stable across upgrades.
+
+For compatibility-oriented layouts, use `MemoryId::new(120)` as the default
+SQLite slot anchor. A single-database canister can use `120` directly. A
+per-slot archive can treat `120` as the migrated/default slot, then allocate
+additional archive slots from an adjacent application-owned range.
 
 ## Project Positioning
 
@@ -291,7 +305,12 @@ fn get(key: String) -> Result<Option<String>, String> {
 
 For multiple SQLite databases in one Wasm instance, use `DbHandle::init(memory)`
 with one dedicated `MemoryId` per handle. The global `Db` facade remains a
-single default database for compatibility.
+single default database for compatibility. `DbHandle` models independent
+SQLite images, not multiple mounted filenames inside one image. Archive and
+restore flows therefore operate per handle through that handle's logical
+database image. A per-archive or per-slot design should keep a stable external
+slot catalog and reject new archive creation when the chosen `MemoryId` range is
+exhausted instead of moving existing slots.
 
 For repeated operations in one message, reuse a prepared statement:
 

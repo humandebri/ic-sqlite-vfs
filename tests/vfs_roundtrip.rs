@@ -253,6 +253,63 @@ fn db_handles_keep_simultaneous_contexts_separate() {
 
 #[test]
 #[serial]
+fn db_handle_export_import_roundtrip_is_scoped_to_handle() {
+    stable_blob::invalidate_read_cache();
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let first = DbHandle::init(manager.get(MemoryId::new(34))).unwrap();
+    let second = DbHandle::init(manager.get(MemoryId::new(35))).unwrap();
+
+    let migrations = [Migration {
+        version: 1,
+        sql: "CREATE TABLE scoped(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }];
+    first.migrate(&migrations).unwrap();
+    second.migrate(&migrations).unwrap();
+
+    first
+        .update(|connection| {
+            connection.execute("INSERT INTO scoped(k, v) VALUES ('k', 'old')", params![])
+        })
+        .unwrap();
+    second
+        .update(|connection| {
+            connection.execute("INSERT INTO scoped(k, v) VALUES ('k', 'second')", params![])
+        })
+        .unwrap();
+
+    let first_size = first.query(|_| Ok(Superblock::load()?.db_size)).unwrap();
+    let first_checksum = first.refresh_checksum().unwrap();
+    let first_image = first.export_chunk(0, first_size).unwrap();
+
+    first
+        .update(|connection| {
+            connection.execute("UPDATE scoped SET v = 'new' WHERE k = 'k'", params![])
+        })
+        .unwrap();
+
+    first.begin_import(first_size, first_checksum).unwrap();
+    first.import_chunk(0, &first_image).unwrap();
+    first.finish_import().unwrap();
+
+    let first_value = first
+        .query(|connection| {
+            connection.query_scalar::<String>("SELECT v FROM scoped WHERE k = 'k'", params![])
+        })
+        .unwrap();
+    let second_value = second
+        .query(|connection| {
+            connection.query_scalar::<String>("SELECT v FROM scoped WHERE k = 'k'", params![])
+        })
+        .unwrap();
+
+    assert_eq!(first_value, "old");
+    assert_eq!(second_value, "second");
+}
+
+#[test]
+#[serial]
 fn persists_rows_after_reopen() {
     reset();
     Db::migrate(&[Migration {

@@ -37,6 +37,27 @@ key-value、BTree、append-only log で足りる用途は `ic-stable-structures`
 
 SQLite を選ぶ条件は、schema migration、複合 index、relational constraint、ad-hoc query の価値が storage 複雑性を上回る場合に限定する。
 
+## Per-slot Databases
+
+Per-archive / per-slot 構成では、1 slot は 1 dedicated `MemoryId`、1
+`DbHandle`、1 SQLite image に対応する。`MemoryId` は `0..=254` の範囲で
+利用側が予約し、`255` は `ic-stable-structures` の内部 marker のため使用しない。
+
+`MemoryId::new(120)` は `ic-rusqlite` の default mounted DB に合わせる
+default slot anchor とする。単一DBでは `120` を使う。per-slot archive
+では migrated/default slot を `120` に置くか、`120` を index/default DB
+に予約し、隣接する利用側 range を archive slots に割り当てる。
+
+slot catalog は利用 canister の責務。`archive_id -> slot_id -> MemoryId`
+を stable state に保存し、`init` と `post_upgrade` で catalog から同じ
+handle set を再構築する。既存 slot の `MemoryId` は変更しない。
+
+slot 枯渇時は新規 archive 作成を拒否する。既存 DB を別 `MemoryId` へ移動して空きを作らない。削除済み slot を再利用する場合は generation または tombstone を保存し、古い archive 参照が新しい occupant を開かないようにする。
+
+管理操作は slot 単位で実行する。`integrity_check`、checksum refresh、
+import/export、compact は対象 `DbHandle` を明示し、catalog snapshot と
+各 image の対応を保存する。
+
 ## Migration Failure Recovery
 
 Migration は `Db::migrate` から一括 transaction で実行する。失敗時は SQL を rollback し、`superblock.schema_version` は更新しない。

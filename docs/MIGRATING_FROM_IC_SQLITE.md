@@ -34,6 +34,44 @@ fn init_db() {
 Call `init_db()` from both `#[ic_cdk::init]` and `#[ic_cdk::post_upgrade]`,
 then run `Db::migrate(...)`.
 
+## Multiple databases / mount IDs
+
+`DbHandle::init(memory)` supports several independent SQLite images in one Wasm
+instance. Give each handle its own dedicated `MemoryId` and keep that mapping
+stable across upgrades.
+
+This is not a replacement for a mount-id or filename namespace inside one
+SQLite image. Existing `index DB + user DB slots` designs should map each slot
+to a stable `MemoryId`, then recreate the same handles after upgrade from the
+stored slot catalog.
+
+The consuming canister owns that slot catalog. Store
+`archive_id -> slot_id -> MemoryId` in stable state, choose the usable
+`MemoryId` range before launch, and never move an existing slot to another
+`MemoryId`. The supported `ic-stable-structures` line allows `MemoryId` values
+`0..=254`; `255` is reserved internally and `MemoryId::new(255)` is invalid.
+Index DBs, catalog DBs, metadata stores, and reserved ranges consume the same
+finite ID space.
+
+Use `MemoryId::new(120)` as the default slot anchor when preserving
+`ic-rusqlite` mounted DB conventions. For a migrated single DB, keep that image
+at `120`. For per-slot archives, either assign the migrated/default archive to
+`120` or reserve `120` for the index/default DB, then allocate neighboring slot
+IDs from an application-owned range. Record the choice in the slot catalog; the
+crate does not reserve the range.
+
+Per-slot archives are therefore a bounded design. If no free slot remains,
+reject archive creation. Reuse deleted slots only when the application tracks a
+generation number or tombstone state so stale archive references cannot open the
+new occupant's SQLite image.
+
+Archive and restore operate on one logical SQLite image at a time through
+export/import. A multi-slot archive should snapshot the full slot catalog,
+export each handle separately, and restore each image into the matching
+`MemoryId`. Do not pack several independent SQLite databases into one
+`VirtualMemory`, and do not depend on a forked `u16` `MemoryId` layout for this
+crate.
+
 ## Access Pattern
 
 Old `with_connection` style:

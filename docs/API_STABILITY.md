@@ -35,7 +35,20 @@ initialization returns `DbError::StableMemoryNotInitialized`.
 Calling `Db::init(memory)` twice in the same Wasm instance returns
 `DbError::StableMemoryAlreadyInitialized`. `DbHandle::init(memory)` is the
 additive multi-database API for advanced users that need several independent
-SQLite images in one Wasm instance.
+SQLite images in one Wasm instance. Each handle must use a dedicated
+`MemoryId`; `DbHandle` does not provide a mount-id namespace inside a single
+SQLite image.
+
+`ic-stable-structures` `MemoryId` is `u8`-backed in the supported 0.7 line.
+Values `0..=254` are usable by applications. `MemoryId::new(255)` is invalid
+because `255` is the internal unallocated-bucket marker. Per-archive and
+per-slot database designs must treat that as a hard capacity bound, including
+any catalog, index, metadata, and reserved memories chosen by the application.
+This crate does not widen `MemoryId` or fork the `MemoryManager` layout.
+
+The multi-database API is still covered by the `0.x` compatibility rules.
+Production deployments should pin exact versions and use export/import, not
+in-place layout migration, when moving across incompatible releases.
 
 `0.2.0` also adds `sqlite-precompiled`, which links the vendored
 `wasm32-unknown-unknown` SQLite archive without downstream build-support files.
