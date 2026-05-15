@@ -69,6 +69,11 @@ export/import:
 5. import with `db_begin_import`, `db_import_chunk`, `db_finish_import`
 6. run `db_integrity_check`
 
+These are crate-level primitives. Production applications should keep their own
+version-pinned export/import runbook, including source version, destination
+version, controller identity, freeze window, chunk size, checksum evidence, and
+rollback decision point.
+
 ## Current Layout
 
 `0.2.0` uses:

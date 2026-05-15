@@ -237,6 +237,9 @@ For migration from `ic-sqlite` or `ic-rusqlite`, see
 
 Minimal canister pattern:
 
+`Db::migrate` records applied migration versions, so migration SQL should be a
+versioned step rather than an idempotent `IF NOT EXISTS` schema initializer.
+
 ```rust
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::{params, Db};
@@ -255,7 +258,7 @@ thread_local! {
 
 const MIGRATIONS: &[Migration] = &[Migration {
     version: 1,
-    sql: "CREATE TABLE IF NOT EXISTS kv (
+    sql: "CREATE TABLE kv (
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
     );",

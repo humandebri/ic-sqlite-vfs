@@ -19,7 +19,7 @@ use std::cell::RefCell;
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
-        sql: "CREATE TABLE IF NOT EXISTS kv (
+        sql: "CREATE TABLE kv (
             key TEXT PRIMARY KEY NOT NULL,
             value TEXT NOT NULL
         );",

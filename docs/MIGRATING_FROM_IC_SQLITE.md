@@ -143,12 +143,15 @@ keeps statement lifetimes inside one synchronous canister message.
   `DbError::ReadConnectionInUse`.
 - Use migrations for schema changes:
 
+`Db::migrate` records applied versions. Treat each SQL body as one versioned
+step, not as an idempotent `IF NOT EXISTS` initializer.
+
 ```rust
 use ic_sqlite_vfs::db::migrate::Migration;
 
 const MIGRATIONS: &[Migration] = &[Migration {
     version: 1,
-    sql: "CREATE TABLE IF NOT EXISTS kv (
+    sql: "CREATE TABLE kv (
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
     );",

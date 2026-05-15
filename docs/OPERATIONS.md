@@ -7,98 +7,134 @@ Canister `init` and `post_upgrade` must initialize one
 `Db::init(memory)` before any DB operation. The same `MemoryId` must be used for
 the lifetime of the deployed canister.
 
-公開 update API は同期関数だけで実装する。`Db::update` は `FnOnce(&mut UpdateConnection<'_>) -> Result<T, DbError>` だけを受け取り、Future を受け取らない。transaction 中の `await` は禁止。
+Public update APIs must be synchronous. `Db::update` accepts only
+`FnOnce(&mut UpdateConnection<'_>) -> Result<T, DbError>` and does not accept a
+future. `await` inside a transaction is forbidden.
 
-CI では `scripts/check-no-await.sh` で `src` 内の `.await` と `async fn` を拒否する。
+CI rejects `.await` and `async fn` under `src` through
+`scripts/check-no-await.sh`.
 
-SQLite transaction 中の `xWrite` と `xTruncate` は stable memory へ直書きしない。heap overlay にpage単位で蓄積し、SQLite `COMMIT` 成功後にdirty pageと新page tableを追記する。最後にsuperblockのactive page table offsetを更新する。通常の `Err`、SQL rollback、panic はactive page tableを変更しない。
+SQLite `xWrite` and `xTruncate` calls inside a transaction do not write
+directly to stable memory. They accumulate page-sized changes in a heap overlay.
+After SQLite `COMMIT` succeeds, the crate appends dirty pages and a new page
+table, then updates the superblock active page table offset. Normal `Err`
+returns, SQL rollback, and panic do not change the active page table.
 
 ## Query Policy
 
-このライブラリは任意 SQL の index 利用や query complexity を判定しない。保証範囲は同期 transaction、`await` 禁止の検出、query connection の read-only/query-only、管理 checksum/import/export の整合性まで。
+This library does not analyze arbitrary SQL for index use or query complexity.
+Its guarantee stops at synchronous transactions, `await` rejection, read-only
+and query-only query connections, and admin checksum/import/export consistency.
 
-利用 canister は業務 query ごとに `WHERE`、index、`LIMIT`、pagination、最大入力長を設計する。reference canister は任意 SQL endpoint を公開しない。
+The consuming canister must design `WHERE` clauses, indexes, `LIMIT`,
+pagination, and input length caps for each application query. The reference
+canister does not expose an arbitrary SQL endpoint.
 
-危険扱いにする SQL:
+Treat these SQL patterns as unsafe for public APIs unless tightly bounded:
 
 - full scan
-- 巨大 result set
+- huge result set
 - `LIKE '%foo%'`
-- join 多用
+- join-heavy query
 - unbounded `ORDER BY`
-- 巨大 `BLOB`
-- primary key/index なし filter
+- huge `BLOB`
+- filter without a primary key or index
 
-1 call の cycles/instruction 制限を超える大量 row 取得は trap し得る。公開 API は point read、indexed range read、明示 page size を基本にする。
+Fetching many rows in one call can exceed the IC cycles or instruction limit
+and trap. Public APIs should prefer point reads, indexed range reads, and
+explicit page sizes.
 
 ## Storage Choice
 
-key-value、BTree、append-only log で足りる用途は `ic-stable-structures` を優先する。構成が単純で、SQL planner と VFS のリスクがない。
+Prefer `ic-stable-structures` when a key-value store, BTree, or append-only log
+is enough. That shape is simpler and avoids SQL planner and VFS risk.
 
-SQLite を選ぶ条件は、schema migration、複合 index、relational constraint、ad-hoc query の価値が storage 複雑性を上回る場合に限定する。
+Choose SQLite only when schema migrations, compound indexes, relational
+constraints, or ad-hoc queries are worth the extra storage complexity.
 
 ## Per-slot Databases
 
-Per-archive / per-slot 構成では、1 slot は 1 dedicated `MemoryId`、1
-`DbHandle`、1 SQLite image に対応する。`MemoryId` は `0..=254` の範囲で
-利用側が予約し、`255` は `ic-stable-structures` の内部 marker のため使用しない。
+In a per-archive or per-slot layout, one slot maps to one dedicated `MemoryId`,
+one `DbHandle`, and one SQLite image. The consuming canister reserves
+`MemoryId` values in the `0..=254` range. `255` is the internal
+`ic-stable-structures` marker and must not be used.
 
-`MemoryId::new(120)` は `ic-rusqlite` の default mounted DB に合わせる
-default slot anchor とする。単一DBでは `120` を使う。per-slot archive
-では migrated/default slot を `120` に置くか、`120` を index/default DB
-に予約し、隣接する利用側 range を archive slots に割り当てる。
+`MemoryId::new(120)` is the default slot anchor that matches the
+`ic-rusqlite` default mounted DB. A single-DB canister can use `120` directly.
+A per-slot archive can put the migrated/default slot at `120`, or reserve `120`
+for the index/default DB and allocate adjacent application-owned IDs for
+archive slots.
 
-slot catalog は利用 canister の責務。`archive_id -> slot_id -> MemoryId`
-を stable state に保存し、`init` と `post_upgrade` で catalog から同じ
-handle set を再構築する。既存 slot の `MemoryId` は変更しない。
+The slot catalog belongs to the consuming canister. Store
+`archive_id -> slot_id -> MemoryId` in stable state, then rebuild the same
+handle set from the catalog in `init` and `post_upgrade`. Never change the
+`MemoryId` of an existing slot.
 
-slot 枯渇時は新規 archive 作成を拒否する。既存 DB を別 `MemoryId` へ移動して空きを作らない。削除済み slot を再利用する場合は generation または tombstone を保存し、古い archive 参照が新しい occupant を開かないようにする。
+When slots are exhausted, reject new archive creation. Do not move an existing
+DB to another `MemoryId` to free a slot. If deleted slots are reused, store a
+generation or tombstone so stale archive references cannot open the new
+occupant.
 
-管理操作は slot 単位で実行する。`integrity_check`、checksum refresh、
-import/export、compact は対象 `DbHandle` を明示し、catalog snapshot と
-各 image の対応を保存する。
+Run admin operations per slot. `integrity_check`, checksum refresh,
+import/export, and compact must name the target `DbHandle`; backups should save
+the catalog snapshot and the matching image for each slot.
 
 ## Migration Failure Recovery
 
-Migration は `Db::migrate` から一括 transaction で実行する。失敗時は SQL を rollback し、`superblock.schema_version` は更新しない。
+Migrations run through `Db::migrate` in one transaction. On failure, SQL is
+rolled back and `superblock.schema_version` is not advanced.
 
-復旧手順:
+Recovery steps:
 
-1. `db_meta` で `schema_version`, `checksum`, `checksum_stale` を確認する。
-2. `db_integrity_check` が `ok` を返すことを確認する。
-3. 失敗 migration の SQL を修正する。
-4. 同じ canister を upgrade し、`post_upgrade` の `Db::init(memory)` 後に管理 update から migration を再実行する。
-5. `db_meta.schema_version` が target version へ進むことを確認する。
+1. Check `schema_version`, `checksum`, and `checksum_stale` through `db_meta`.
+2. Confirm that `db_integrity_check` returns `ok`.
+3. Fix the failed migration SQL.
+4. Upgrade the same canister, then rerun migration from an admin update after
+   `Db::init(memory)` in `post_upgrade`.
+5. Confirm that `db_meta.schema_version` advanced to the target version.
 
 ## Import
 
-Import は controller 限定APIで実行し、checksum 一致を必須にする。
+Import must run through controller-only APIs and must require checksum match.
 
-1. import 元で `db_refresh_checksum_chunk(max_bytes)` を `complete == true` まで実行する。
-2. `db_meta` で `db_size`, `checksum`, `last_tx_id` を取得する。
-3. `db_export_chunk(offset, len)` で全 byte を取得する。
-4. export 後に `db_meta.last_tx_id` が変化していないことを確認する。
-5. import 先で `db_begin_import(total_size, expected_checksum)` を呼ぶ。
-6. offset 0 から順番に `db_import_chunk` を呼ぶ。
-7. `db_finish_import` が checksum を検証し、import flag を解除する。
+1. On the source, run `db_refresh_checksum_chunk(max_bytes)` until
+   `complete == true`.
+2. Read `db_size`, `checksum`, and `last_tx_id` from `db_meta`.
+3. Read every byte through `db_export_chunk(offset, len)`.
+4. After export, confirm that `db_meta.last_tx_id` did not change.
+5. On the destination, call `db_begin_import(total_size, expected_checksum)`.
+6. Call `db_import_chunk` in order from offset 0.
+7. `db_finish_import` verifies checksum and clears the import flag.
 
-Import 中は SQLite VFS が `/main.db` open を拒否するため、通常 DB API は失敗する。checksum 不一致時は staging 領域を破棄し、既存DBを維持して import flag を解除する。未完了 import を中止する場合は controller が `db_cancel_import` を呼ぶ。
+During import, the SQLite VFS rejects `/main.db` open, so normal DB APIs fail.
+On checksum mismatch, the staging area is discarded, the existing DB is kept,
+and the import flag is cleared. To abort an unfinished import, the controller
+calls `db_cancel_import`.
 
 ## Capacity
 
-Selected `VirtualMemory` grow 失敗時は `current_pages` と `required_pages` を含む error を返す。呼び出し側は retry せず、容量上限・cycle 残量・chunk size を確認する。
+If growing the selected `VirtualMemory` fails, the error includes
+`current_pages` and `required_pages`. The caller should not retry blindly; check
+capacity limits, remaining cycles, and chunk size.
 
-通常 commit は安全な publish のため、dirty page、dirty segment table、新root tableを追記してからsuperblockを更新する。小更新の容量増分は概ねdirty page数とdirty segment数に比例する。`db_meta.compact_recommended == true` の場合、controllerが `db_compact` を実行する。
+Normal commits publish safely by appending dirty pages, dirty segment tables,
+and a new root table before updating the superblock. Capacity growth for small
+updates is roughly proportional to the number of dirty pages and dirty
+segments. When `db_meta.compact_recommended == true`, a controller can run
+`db_compact`.
 
 ## Integrity
 
-管理系監視は以下を定期確認する。
+Admin monitoring should check these values periodically:
 
 - `db_integrity_check == "ok"`
 - `db_meta.importing == false`
-- `db_meta.checksum_stale == false` または controller の checksum refresh job が進行中
+- `db_meta.checksum_stale == false` or a controller checksum refresh job is in
+  progress
 - `db_meta.checksum_refreshing == false`
 - `db_meta.orphan_ratio_basis_points`
 - `db_meta.compact_recommended`
 
-`db_meta.checksum` は last verified checksum。`checksum_stale == true` は更新後の正常状態でも発生する。必要な場合は controller が `db_refresh_checksum_chunk` を完了まで実行して直近検証済みに戻す。
+`db_meta.checksum` is the last verified checksum. `checksum_stale == true` can
+be normal after updates. When a fresh verified checksum is required, a
+controller should run `db_refresh_checksum_chunk` to completion.
