@@ -8,6 +8,10 @@ use ic_cdk::{api::performance_counter, init, post_upgrade, query, update};
 use ic_rusqlite::{params, params_from_iter, with_connection, OptionalExtension};
 use serde::Deserialize;
 
+mod key;
+
+use key::{bench_key, validate_fixed_bench_key_rows};
+
 const STABLE_PAGE_SIZE: u64 = 65_536;
 const MIGRATION_SQL: &str = "CREATE TABLE IF NOT EXISTS bench (
     key TEXT PRIMARY KEY NOT NULL,
@@ -121,6 +125,7 @@ fn bench_update_only(rows: u32) -> Result<BenchReport, String> {
 
 #[query]
 fn bench_read(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     warm_point_read_statement()?;
     let start = performance_counter(0);
     let checksum = with_connection(|connection| -> Result<u64, ic_rusqlite::Error> {
@@ -324,17 +329,6 @@ fn warm_point_read_statement() -> Result<(), String> {
 
 fn warm_read_connection() -> Result<(), String> {
     with_connection(|_| -> Result<(), ic_rusqlite::Error> { Ok(()) }).map_err(error_text)
-}
-
-fn bench_key(index: u32, out: &mut [u8; 9]) -> &str {
-    out[0] = b'k';
-    let mut value = index;
-    for byte in out[1..].iter_mut().rev() {
-        *byte = b'0' + u8::try_from(value % 10).expect("digit fits u8");
-        value /= 10;
-    }
-    // SAFETY: bytes are always ASCII `k` followed by decimal digits.
-    unsafe { std::str::from_utf8_unchecked(out) }
 }
 
 fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
