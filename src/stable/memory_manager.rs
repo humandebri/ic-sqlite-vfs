@@ -26,6 +26,9 @@ impl<M: Memory> MemoryManager<M> {
     }
 
     pub fn init_with_bucket_size(memory: M, bucket_size_in_pages: u16) -> Self {
+        if bucket_size_in_pages == 0 {
+            panic!("bucket size must be greater than zero");
+        }
         Self {
             inner: Rc::new(RefCell::new(MemoryManagerInner::init(
                 memory,
@@ -33,7 +36,6 @@ impl<M: Memory> MemoryManager<M> {
             ))),
         }
     }
-
     pub fn get(&self, id: MemoryId) -> VirtualMemory<M> {
         VirtualMemory {
             id,
@@ -42,14 +44,12 @@ impl<M: Memory> MemoryManager<M> {
         }
     }
 }
-
 #[derive(Clone)]
 pub struct VirtualMemory<M: Memory> {
     id: MemoryId,
     memory_manager: Rc<RefCell<MemoryManagerInner<M>>>,
     cache: BucketCache,
 }
-
 impl<M: Memory> Memory for VirtualMemory<M> {
     fn size(&self) -> u64 {
         self.memory_manager.borrow().memory_size(self.id)
@@ -86,7 +86,6 @@ struct MemoryManagerInner<M: Memory> {
     memory_sizes_in_pages: [u64; MAX_NUM_MEMORIES as usize],
     memory_buckets: Vec<Vec<BucketId>>,
 }
-
 impl<M: Memory> MemoryManagerInner<M> {
     fn init(memory: M, bucket_size_in_pages: u16) -> Self {
         if memory.size() == 0 {
@@ -118,7 +117,6 @@ impl<M: Memory> MemoryManagerInner<M> {
         );
         manager
     }
-
     fn load(memory: M) -> Self {
         let mut header = vec![0_u8; HEADER_SIZE as usize];
         memory.read(0, &mut header);
@@ -151,7 +149,6 @@ impl<M: Memory> MemoryManagerInner<M> {
             memory_buckets,
         }
     }
-
     fn save_header(&self) {
         let mut header = [0_u8; HEADER_SIZE as usize];
         header[0..3].copy_from_slice(MAGIC);
@@ -178,8 +175,19 @@ impl<M: Memory> MemoryManagerInner<M> {
         let current_buckets = self.num_buckets_needed(old_size);
         let required_buckets = self.num_buckets_needed(new_size);
         let new_buckets = required_buckets - current_buckets;
-        if new_buckets + u64::from(self.allocated_buckets) > MAX_NUM_BUCKETS {
+        let target_allocated_buckets = new_buckets + u64::from(self.allocated_buckets);
+        if target_allocated_buckets > MAX_NUM_BUCKETS {
             return -1;
+        }
+
+        let pages_needed = BUCKETS_OFFSET_IN_PAGES
+            + u64::from(self.bucket_size_in_pages) * target_allocated_buckets;
+        let current_pages = self.memory.size();
+        if pages_needed > current_pages {
+            let previous = self.memory.grow(pages_needed - current_pages);
+            if previous < 0 {
+                return -1;
+            }
         }
 
         let memory_bucket = &mut self.memory_buckets[id.0 as usize];
@@ -189,13 +197,6 @@ impl<M: Memory> MemoryManagerInner<M> {
             memory_bucket.push(bucket);
             write_growing(&self.memory, bucket_allocations_address(bucket), &[id.0]);
             self.allocated_buckets += 1;
-        }
-
-        let pages_needed = BUCKETS_OFFSET_IN_PAGES
-            + u64::from(self.bucket_size_in_pages) * u64::from(self.allocated_buckets);
-        if pages_needed > self.memory.size() {
-            let previous = self.memory.grow(pages_needed - self.memory.size());
-            assert!(previous >= 0, "{id:?}: grow failed");
         }
 
         self.memory_sizes_in_pages[id.0 as usize] = new_size;
@@ -218,11 +219,11 @@ impl<M: Memory> MemoryManagerInner<M> {
         if count == 0 {
             return;
         }
+        self.assert_bounds(id, offset, count as u64, "read");
         if let Some(real) = cache.get(VirtualSegment::new(offset, count as u64)) {
             self.memory.read_unsafe(real, dst, count);
             return;
         }
-        self.assert_bounds(id, offset, count as u64, "read");
         let mut bytes_read = 0_u64;
         self.for_each_bucket(id, offset, count as u64, cache, |address, len| {
             self.memory
@@ -235,11 +236,11 @@ impl<M: Memory> MemoryManagerInner<M> {
         if src.is_empty() {
             return;
         }
+        self.assert_bounds(id, offset, src.len() as u64, "write");
         if let Some(real) = cache.get(VirtualSegment::new(offset, src.len() as u64)) {
             self.memory.write(real, src);
             return;
         }
-        self.assert_bounds(id, offset, src.len() as u64, "write");
         let mut written = 0_u64;
         self.for_each_bucket(id, offset, src.len() as u64, cache, |address, len| {
             self.memory

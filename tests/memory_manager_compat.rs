@@ -1,6 +1,8 @@
 use ic_sqlite_vfs::config::STABLE_PAGE_SIZE;
 use ic_sqlite_vfs::stable::memory_manager::{MemoryId, MemoryManager};
 use ic_sqlite_vfs::stable::raw_memory::{DefaultMemoryImpl, Memory};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use upstream_ic_stable_structures::memory_manager::{
     MemoryId as UpstreamMemoryId, MemoryManager as UpstreamMemoryManager,
 };
@@ -39,6 +41,59 @@ fn memory_manager_reloads_interleaved_bucket_layout() {
 fn memory_manager_matches_upstream_layout_for_valid_operations() {
     assert_matches_upstream_layout(1);
     assert_matches_upstream_layout(128);
+}
+
+#[test]
+#[should_panic(expected = "MemoryId(0): read out of bounds")]
+fn cached_read_checks_logical_bounds() {
+    let backing = DefaultMemoryImpl::default();
+    let manager = MemoryManager::init(backing);
+    let memory = manager.get(MemoryId::new(0));
+
+    assert_eq!(memory.grow(1), 0);
+    memory.write(0, &[42]);
+
+    let mut byte = [0_u8; 1];
+    memory.read(STABLE_PAGE_SIZE, &mut byte);
+}
+
+#[test]
+#[should_panic(expected = "MemoryId(0): write out of bounds")]
+fn cached_write_checks_logical_bounds() {
+    let backing = DefaultMemoryImpl::default();
+    let manager = MemoryManager::init(backing);
+    let memory = manager.get(MemoryId::new(0));
+
+    assert_eq!(memory.grow(1), 0);
+    memory.write(0, &[42]);
+
+    memory.write(STABLE_PAGE_SIZE, &[1]);
+}
+
+#[test]
+#[should_panic(expected = "bucket size must be greater than zero")]
+fn init_with_bucket_size_rejects_zero_bucket_size() {
+    let backing = DefaultMemoryImpl::default();
+
+    let _manager = MemoryManager::init_with_bucket_size(backing, 0);
+}
+
+#[test]
+fn grow_failure_returns_minus_one_without_metadata_changes() {
+    let backing = FailingGrowMemory::new(1);
+    let manager = MemoryManager::init_with_bucket_size(backing.clone(), 1);
+    let memory = manager.get(MemoryId::new(0));
+
+    assert_eq!(memory.grow(1), -1);
+    assert_eq!(memory.size(), 0);
+    assert_eq!(backing.allocation_owner(0), 255);
+
+    backing.set_max_pages(2);
+    let reloaded = MemoryManager::init(backing.clone());
+    let reloaded_memory = reloaded.get(MemoryId::new(0));
+
+    assert_eq!(reloaded_memory.size(), 0);
+    assert_eq!(backing.allocation_owner(0), 255);
 }
 
 fn assert_matches_upstream_layout(bucket_size_in_pages: u16) {
@@ -136,4 +191,71 @@ fn deterministic_bytes(seed: u64, len: usize) -> Vec<u8> {
     (0..len)
         .map(|index| seed.wrapping_add(index as u64).wrapping_mul(31) as u8)
         .collect()
+}
+
+#[derive(Clone)]
+struct FailingGrowMemory {
+    bytes: Rc<RefCell<Vec<u8>>>,
+    max_pages: Rc<Cell<u64>>,
+}
+
+impl FailingGrowMemory {
+    fn new(max_pages: u64) -> Self {
+        Self {
+            bytes: Rc::new(RefCell::new(Vec::new())),
+            max_pages: Rc::new(Cell::new(max_pages)),
+        }
+    }
+
+    fn set_max_pages(&self, max_pages: u64) {
+        self.max_pages.set(max_pages);
+    }
+
+    fn allocation_owner(&self, bucket: u64) -> u8 {
+        const HEADER_SIZE: u64 = 3 + 1 + 2 + 2 + 32 + 255 * 8;
+
+        self.bytes.borrow()[(HEADER_SIZE + bucket) as usize]
+    }
+}
+
+impl Memory for FailingGrowMemory {
+    fn size(&self) -> u64 {
+        self.bytes.borrow().len() as u64 / STABLE_PAGE_SIZE
+    }
+
+    fn grow(&self, pages: u64) -> i64 {
+        let size = self.size();
+        let Some(next_size) = size.checked_add(pages) else {
+            return -1;
+        };
+        if next_size > self.max_pages.get() {
+            return -1;
+        }
+        let Some(next_bytes) = next_size.checked_mul(STABLE_PAGE_SIZE) else {
+            return -1;
+        };
+        if next_bytes > usize::MAX as u64 {
+            return -1;
+        }
+        self.bytes.borrow_mut().resize(next_bytes as usize, 0);
+        size as i64
+    }
+
+    fn read(&self, offset: u64, dst: &mut [u8]) {
+        let end = checked_end(offset, dst.len(), "read");
+        dst.copy_from_slice(&self.bytes.borrow()[offset as usize..end]);
+    }
+
+    fn write(&self, offset: u64, src: &[u8]) {
+        let end = checked_end(offset, src.len(), "write");
+        self.bytes.borrow_mut()[offset as usize..end].copy_from_slice(src);
+    }
+}
+
+fn checked_end(offset: u64, len: usize, operation: &str) -> usize {
+    let end = offset
+        .checked_add(len as u64)
+        .unwrap_or_else(|| panic!("{operation}: out of bounds"));
+    assert!(end <= usize::MAX as u64, "{operation}: out of bounds");
+    end as usize
 }
