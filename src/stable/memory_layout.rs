@@ -43,13 +43,7 @@ impl VirtualSegment {
     }
 
     fn contains(self, other: Self) -> bool {
-        let Some(self_end) = self.address.checked_add(self.length) else {
-            return false;
-        };
-        let Some(other_end) = other.address.checked_add(other.length) else {
-            return false;
-        };
-        self.address <= other.address && other_end <= self_end
+        virtual_segment_contains(self.address, self.length, other.address, other.length)
     }
 
     fn address(self) -> u64 {
@@ -88,6 +82,23 @@ pub(super) fn bucket_allocations_address(id: BucketId) -> u64 {
     HEADER_SIZE + u64::from(id.0)
 }
 
+pub(super) fn virtual_segment_contains(
+    address: u64,
+    length: u64,
+    other_address: u64,
+    other_length: u64,
+) -> bool {
+    if length > u64::MAX - address {
+        return false;
+    }
+    if other_length > u64::MAX - other_address {
+        return false;
+    }
+    let end = address + length;
+    let other_end = other_address + other_length;
+    address <= other_address && other_end <= end
+}
+
 pub(super) fn write_growing<M: Memory>(memory: &M, offset: u64, bytes: &[u8]) {
     let end = offset
         .checked_add(bytes.len() as u64)
@@ -109,7 +120,7 @@ pub(super) fn read_u64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BucketCache, VirtualSegment};
+    use super::{virtual_segment_contains, BucketCache, VirtualSegment};
 
     #[test]
     fn virtual_segment_contains_rejects_overflowing_ranges() {
@@ -119,6 +130,10 @@ mod tests {
         assert!(!segment.contains(VirtualSegment::new(u64::MAX - 4, 8)));
         assert!(
             !VirtualSegment::new(u64::MAX - 4, 8).contains(VirtualSegment::new(u64::MAX - 3, 1))
+        );
+        assert_eq!(
+            segment.contains(VirtualSegment::new(120, 10)),
+            virtual_segment_contains(100, 50, 120, 10)
         );
     }
 
