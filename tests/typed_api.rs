@@ -180,6 +180,62 @@ fn query_helpers_report_missing_rows_and_collect_rows() {
 
 #[test]
 #[serial]
+fn specialized_query_fast_paths_match_generic_queries() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE fast_items(k TEXT PRIMARY KEY, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+
+    Db::update(|connection| {
+        connection.execute(
+            "INSERT INTO fast_items(k, v) VALUES
+                (?1, ?2),
+                (?3, ?4),
+                (?5, ?6),
+                (?7, ?8)",
+            params![
+                "alpha",
+                "one",
+                "nul",
+                "A\0B",
+                "",
+                "empty-key",
+                "long",
+                "0123456789abcdef".repeat(16)
+            ],
+        )
+    })
+    .unwrap();
+
+    Db::query(|connection| {
+        for key in ["alpha", "nul", "", "long", "missing"] {
+            let fast = connection
+                .query_optional_string_text("SELECT v FROM fast_items WHERE k = ?1", key)?;
+            let generic = connection.query_optional_scalar::<String>(
+                "SELECT v FROM fast_items WHERE k = ?1",
+                params![key],
+            )?;
+            assert_eq!(fast, generic);
+        }
+
+        let sql = "SELECT v FROM fast_items WHERE k IN (?1, ?2, ?3, ?4) ORDER BY k";
+        let keys = ["alpha", "nul", "", "missing"];
+        let generic =
+            connection.query_column::<String>(sql, params![keys[0], keys[1], keys[2], keys[3]])?;
+        let expected_len = generic.iter().map(String::len).sum::<usize>() as u64;
+        let first = connection.query_text_iter_text_len_sum(sql, keys.iter().copied())?;
+        let second = connection.query_text_iter_text_len_sum(sql, keys.iter().copied())?;
+        assert_eq!(first, expected_len);
+        assert_eq!(second, expected_len);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[serial]
 fn specialized_execute_helpers_reuse_borrowed_text_bindings() {
     reset();
     Db::migrate(&[Migration {

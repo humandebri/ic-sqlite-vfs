@@ -1,4 +1,4 @@
-use ic_sqlite_vfs::config::SQLITE_CACHE_SIZE_KIB;
+use ic_sqlite_vfs::config::{SQLITE_CACHE_SIZE_KIB, SQLITE_PAGE_SIZE};
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::sqlite_vfs::{self, ffi, lock, stable_blob};
 use ic_sqlite_vfs::stable::memory;
@@ -423,6 +423,63 @@ fn prepared_statement_cache_reuses_sql_with_repeated_binds() {
     })
     .unwrap();
     assert_eq!(values, vec!["one".to_string(), "two".to_string()]);
+}
+
+#[test]
+#[serial]
+fn blob_boundaries_survive_compact_export_and_import() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE boundary_blob(id INTEGER PRIMARY KEY, body BLOB NOT NULL);",
+    }])
+    .unwrap();
+
+    let page = usize::try_from(SQLITE_PAGE_SIZE).unwrap();
+    let blobs = vec![
+        deterministic_blob(1, 1),
+        deterministic_blob(2, page - 1),
+        deterministic_blob(3, page),
+        deterministic_blob(4, page + 1),
+        deterministic_blob(5, page * 2 + 17),
+    ];
+
+    Db::update(|connection| {
+        let mut statement =
+            connection.prepare("INSERT INTO boundary_blob(id, body) VALUES (?1, ?2)")?;
+        for (index, blob) in blobs.iter().enumerate() {
+            statement.execute(params![i64::try_from(index + 1).unwrap(), blob.clone()])?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_boundary_blobs(&blobs);
+
+    Db::compact().unwrap();
+    assert_boundary_blobs(&blobs);
+
+    let db_size = Superblock::load().unwrap().db_size;
+    let checksum = Db::refresh_checksum().unwrap();
+    let image = Db::export_chunk(0, db_size).unwrap();
+    Db::begin_import(db_size, checksum).unwrap();
+    Db::import_chunk(0, &image).unwrap();
+    Db::finish_import().unwrap();
+    assert_boundary_blobs(&blobs);
+}
+
+fn assert_boundary_blobs(expected: &[Vec<u8>]) {
+    let rows = Db::query(|connection| {
+        connection.query_column::<Vec<u8>>("SELECT body FROM boundary_blob ORDER BY id", params![])
+    })
+    .unwrap();
+    assert_eq!(rows, expected);
+    assert_eq!(Db::integrity_check().unwrap(), "ok");
+}
+
+fn deterministic_blob(seed: u8, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|index| seed.wrapping_add(index as u8).wrapping_mul(17))
+        .collect()
 }
 
 #[test]
