@@ -10,6 +10,5 @@ crate-type = ["cdylib"]
 [dependencies]
 candid = "0.10"
 ic-cdk = "0.20.1"
-ic-stable-structures = "0.7"
 ic-sqlite-vfs = { path = "../..", default-features = false, features = ["bench-profile", "sqlite-precompiled"] }
 serde = { version = "1", features = ["derive"] }

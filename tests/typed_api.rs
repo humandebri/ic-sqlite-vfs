@@ -98,6 +98,7 @@ fn query_helpers_report_missing_rows_and_collect_rows() {
         let mut statement = connection.prepare("INSERT INTO items(id, name) VALUES (?1, ?2)")?;
         statement.execute(params![1_i64, "one"])?;
         statement.execute(params![2_i64, "two"])?;
+        statement.execute(params![3_i64, "A\0B"])?;
         Ok(())
     })
     .unwrap();
@@ -106,7 +107,54 @@ fn query_helpers_report_missing_rows_and_collect_rows() {
         connection.query_column::<String>("SELECT name FROM items ORDER BY id", params![])
     })
     .unwrap();
-    assert_eq!(names, vec!["one".to_string(), "two".to_string()]);
+    assert_eq!(
+        names,
+        vec!["one".to_string(), "two".to_string(), "A\0B".to_string()]
+    );
+
+    let lengths = Db::query(|connection| {
+        let mut statement = connection.prepare("SELECT name FROM items ORDER BY id")?;
+        let mut rows = statement.query(params![])?;
+        let mut lengths = Vec::new();
+        while let Some(len) = rows.next_text_len_zero()? {
+            lengths.push(len);
+        }
+        Ok(lengths)
+    })
+    .unwrap();
+    assert_eq!(lengths, vec![3, 3, 3]);
+
+    let cached_optional = Db::query(|connection| {
+        let first = connection
+            .query_optional_string_text("SELECT name FROM items WHERE name = ?1", "A\0B")?;
+        let second = connection
+            .query_optional_string_text("SELECT name FROM items WHERE name = ?1", "two")?;
+        let missing = connection
+            .query_optional_string_text("SELECT name FROM items WHERE name = ?1", "missing")?;
+        Ok((first, second, missing))
+    })
+    .unwrap();
+    assert_eq!(
+        cached_optional,
+        (Some("A\0B".to_string()), Some("two".to_string()), None)
+    );
+
+    let cached_temporary_key = Db::query(|connection| {
+        let first = connection.query_optional_string_text(
+            "SELECT name FROM items WHERE name = ?1",
+            &["t", "wo"].concat(),
+        )?;
+        let second = connection.query_optional_string_text(
+            "SELECT name FROM items WHERE name = ?1",
+            &["A\0", "B"].concat(),
+        )?;
+        Ok((first, second))
+    })
+    .unwrap();
+    assert_eq!(
+        cached_temporary_key,
+        (Some("two".to_string()), Some("A\0B".to_string()))
+    );
 
     let exists = Db::query(|connection| {
         connection.exists(
@@ -119,15 +167,196 @@ fn query_helpers_report_missing_rows_and_collect_rows() {
 
     let optional = Db::query(|connection| {
         connection
-            .query_optional_scalar::<String>("SELECT name FROM items WHERE id = ?1", params![3_i64])
+            .query_optional_scalar::<String>("SELECT name FROM items WHERE id = ?1", params![4_i64])
     })
     .unwrap();
     assert_eq!(optional, None);
 
     let missing = Db::query(|connection| {
-        connection.query_scalar::<String>("SELECT name FROM items WHERE id = ?1", params![3_i64])
+        connection.query_scalar::<String>("SELECT name FROM items WHERE id = ?1", params![4_i64])
     });
     assert!(matches!(missing, Err(DbError::NotFound)));
+}
+
+#[test]
+#[serial]
+fn specialized_execute_helpers_reuse_borrowed_text_bindings() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE typed_exec(
+            id INTEGER PRIMARY KEY,
+            group_id INTEGER NOT NULL,
+            body TEXT NOT NULL
+        );",
+    }])
+    .unwrap();
+
+    Db::update(|connection| {
+        connection.execute_text_text(
+            "INSERT INTO typed_exec(id, group_id, body) VALUES (3, ?1, ?2)",
+            "8",
+            "three",
+        )?;
+
+        let mut one_text =
+            connection.prepare("INSERT INTO typed_exec(id, group_id, body) VALUES (?1, 0, ?2)")?;
+        one_text.execute_i64_text(1, "one")?;
+
+        let mut two_ints =
+            connection.prepare("INSERT INTO typed_exec(id, group_id, body) VALUES (?1, ?2, ?3)")?;
+        two_ints.execute_i64_i64_text(2, 7, "two")
+    })
+    .unwrap();
+
+    let rows = Db::query(|connection| {
+        connection.query_column::<String>(
+            "SELECT group_id || ':' || body FROM typed_exec ORDER BY id",
+            params![],
+        )
+    })
+    .unwrap();
+
+    assert_eq!(rows, vec!["0:one", "7:two", "8:three"]);
+}
+
+#[test]
+#[serial]
+fn specialized_execute_helpers_clear_temporary_bindings_before_return() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE temporary_exec(
+            id INTEGER PRIMARY KEY,
+            group_id INTEGER NOT NULL,
+            body TEXT NOT NULL,
+            blob_body BLOB NOT NULL DEFAULT x''
+        );",
+    }])
+    .unwrap();
+
+    Db::update(|connection| {
+        connection.execute_text_text(
+            "INSERT INTO temporary_exec(id, group_id, body) VALUES (1, ?1, ?2)",
+            &format!("{}", 10),
+            &format!("body-{}", 1),
+        )?;
+        {
+            let mut cached = connection.prepare_cached(
+                "INSERT INTO temporary_exec(id, group_id, body) VALUES (?1, 15, ?2)",
+            )?;
+            cached.execute_i64_text(6, &format!("body-{}", 6))?;
+        }
+        {
+            let mut cached = connection.prepare_cached(
+                "INSERT INTO temporary_exec(id, group_id, body) VALUES (?1, 15, ?2)",
+            )?;
+            cached.execute_i64_text(7, &format!("body-{}", 7))?;
+        }
+
+        let mut text_statement = connection
+            .prepare("INSERT INTO temporary_exec(id, group_id, body) VALUES (?1, 20, ?2)")?;
+        text_statement.execute_i64_text(2, &format!("body-{}", 2))?;
+        text_statement.execute_i64_text(3, &format!("body-{}", 3))?;
+
+        let mut blob_statement =
+            connection.prepare("UPDATE temporary_exec SET blob_body = ?2 WHERE id = ?1")?;
+        blob_statement.execute_i64_blob(2, format!("blob-{}", 2).as_bytes())?;
+        blob_statement.execute_i64_blob(3, format!("blob-{}", 3).as_bytes())?;
+
+        let mut mixed_statement = connection
+            .prepare("INSERT INTO temporary_exec(id, group_id, body) VALUES (?1, ?2, ?3)")?;
+        mixed_statement.execute_i64_i64_text(4, 40, &format!("body-{}", 4))?;
+        mixed_statement.execute_i64_i64_text(5, 50, &format!("body-{}", 5))
+    })
+    .unwrap();
+
+    let rows = Db::query(|connection| {
+        connection.query_column::<String>(
+            "SELECT group_id || ':' || body || ':' || length(blob_body)
+             FROM temporary_exec
+             ORDER BY id",
+            params![],
+        )
+    })
+    .unwrap();
+
+    assert_eq!(
+        rows,
+        vec![
+            "10:body-1:0",
+            "20:body-2:6",
+            "20:body-3:6",
+            "40:body-4:0",
+            "50:body-5:0",
+            "15:body-6:0",
+            "15:body-7:0",
+        ]
+    );
+}
+
+#[test]
+#[serial]
+fn connection_changes_reports_last_statement_row_count() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE change_items(id INTEGER PRIMARY KEY, value TEXT NOT NULL);",
+    }])
+    .unwrap();
+
+    Db::update(|connection| {
+        connection.execute_batch(
+            "INSERT INTO change_items(id, value) VALUES
+                (1, 'one'),
+                (2, 'two'),
+                (3, 'three')",
+        )?;
+        assert_eq!(connection.changes(), 3);
+
+        connection.execute(
+            "UPDATE change_items SET value = ?1 WHERE id <= ?2",
+            params!["updated", 2_i64],
+        )?;
+        assert_eq!(connection.changes(), 2);
+
+        connection.execute(
+            "UPDATE change_items SET value = ?1 WHERE id = ?2",
+            params!["missing", 99_i64],
+        )?;
+        assert_eq!(connection.changes(), 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[serial]
+fn specialized_execute_blob_helper_reuses_borrowed_bytes() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE typed_blob(
+            id INTEGER PRIMARY KEY,
+            body BLOB NOT NULL
+        );",
+    }])
+    .unwrap();
+
+    Db::update(|connection| {
+        let mut statement =
+            connection.prepare("INSERT INTO typed_blob(id, body) VALUES (?1, ?2)")?;
+        statement.execute_i64_blob(1, b"abc")?;
+        statement.execute_i64_blob(2, b"")
+    })
+    .unwrap();
+
+    let rows = Db::query(|connection| {
+        connection.query_column::<i64>("SELECT length(body) FROM typed_blob ORDER BY id", params![])
+    })
+    .unwrap();
+
+    assert_eq!(rows, vec![3, 0]);
 }
 
 #[test]
@@ -288,6 +517,104 @@ fn statement_row_iterator_steps_until_done() {
     .unwrap();
 
     assert_eq!(values, vec!["a".to_string(), "b".to_string()]);
+
+    let limited = Db::query(|connection| {
+        let mut statement =
+            connection.prepare("SELECT name FROM iter_items WHERE id <= ?1 ORDER BY id")?;
+        let mut rows = statement.query_i64(1)?;
+        let mut values = Vec::new();
+        while let Some(row) = rows.next_row()? {
+            values.push(row.get::<String>(0)?);
+        }
+        Ok(values)
+    })
+    .unwrap();
+    assert_eq!(limited, vec!["a".to_string()]);
+
+    let text_len_total = Db::query(|connection| {
+        let mut statement = connection.prepare("SELECT name FROM iter_items ORDER BY id")?;
+        let mut rows = statement.query(params![])?;
+        let mut total = 0_usize;
+        while let Some(len) = rows.next_text_len_zero()? {
+            total += len;
+        }
+        Ok(total)
+    })
+    .unwrap();
+    assert_eq!(text_len_total, 2);
+
+    let text_values = Db::query(|connection| {
+        let mut statement =
+            connection.prepare("SELECT name FROM iter_items WHERE name IN (?1, ?2) ORDER BY id")?;
+        let values = ["a", "b"];
+        let mut rows = statement.query_texts(&values)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next_row()? {
+            out.push(row.get::<String>(0)?);
+        }
+        Ok(out)
+    })
+    .unwrap();
+    assert_eq!(text_values, vec!["a".to_string(), "b".to_string()]);
+
+    let text_values_iter = Db::query(|connection| {
+        let mut statement =
+            connection.prepare("SELECT name FROM iter_items WHERE name IN (?1, ?2) ORDER BY id")?;
+        let values = ["a", "b"];
+        let mut rows = statement.query_text_iter(values.iter().copied())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next_row()? {
+            out.push(row.get::<String>(0)?);
+        }
+        Ok(out)
+    })
+    .unwrap();
+    assert_eq!(text_values_iter, vec!["a".to_string(), "b".to_string()]);
+
+    let ephemeral_text_values_iter = Db::query(|connection| {
+        let mut statement =
+            connection.prepare("SELECT name FROM iter_items WHERE name IN (?1, ?2) ORDER BY id")?;
+        let values = ["a", "b"];
+        let mut rows = statement.query_text_iter_ephemeral(values.iter().copied())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next_row()? {
+            out.push(row.get::<String>(0)?);
+        }
+        Ok(out)
+    })
+    .unwrap();
+    assert_eq!(
+        ephemeral_text_values_iter,
+        vec!["a".to_string(), "b".to_string()]
+    );
+
+    let ephemeral_drop_then_reuse = Db::query(|connection| {
+        let mut statement =
+            connection.prepare("SELECT name FROM iter_items WHERE name IN (?1, ?2) ORDER BY id")?;
+        {
+            let values = ["a".to_string(), "b".to_string()];
+            let mut rows =
+                statement.query_text_iter_ephemeral(values.iter().map(String::as_str))?;
+            assert_eq!(
+                rows.next_row()?
+                    .map(|row| row.get::<String>(0))
+                    .transpose()?,
+                Some("a".to_string())
+            );
+        }
+        let values = ["b", "a"];
+        let mut rows = statement.query_text_iter_ephemeral(values.iter().copied())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next_row()? {
+            out.push(row.get::<String>(0)?);
+        }
+        Ok(out)
+    })
+    .unwrap();
+    assert_eq!(
+        ephemeral_drop_then_reuse,
+        vec!["a".to_string(), "b".to_string()]
+    );
 
     let count = Db::query(|connection| {
         let mut statement = connection.prepare("SELECT COUNT(*) FROM iter_items")?;

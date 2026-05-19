@@ -85,11 +85,11 @@ impl ToSql for Null {
     }
 }
 
-pub(crate) fn bind_all(
+pub(crate) fn bind_all_with_count(
     statement: *mut ffi::sqlite3_stmt,
     values: &[&dyn ToSql],
+    expected: usize,
 ) -> Result<(), DbError> {
-    let expected = parameter_count(statement)?;
     if values.len() != expected {
         return Err(DbError::ParameterCountMismatch {
             expected,

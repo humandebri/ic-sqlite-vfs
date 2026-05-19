@@ -21,7 +21,7 @@ may still break API or layout. Production users should pin exact versions.
 
 ## Release Notes
 
-Applications must initialize their own `MemoryManager<DefaultMemoryImpl>`,
+Applications initialize a `MemoryManager<DefaultMemoryImpl>` from this crate,
 choose a dedicated `MemoryId`, and pass the resulting
 `VirtualMemory<DefaultMemoryImpl>` to `Db::init(memory)`.
 The crate does not reserve a `MemoryId`; the application must choose one,
@@ -38,12 +38,12 @@ SQLite images in one Wasm instance. Each handle must use a dedicated
 `MemoryId`; `DbHandle` does not provide a mount-id namespace inside a single
 SQLite image.
 
-`ic-stable-structures` `MemoryId` is `u8`-backed in the supported 0.7 line.
-Values `0..=254` are usable by applications. `MemoryId::new(255)` is invalid
-because `255` is the internal unallocated-bucket marker. Per-archive and
-per-slot database designs must treat that as a hard capacity bound, including
-any catalog, index, metadata, and reserved memories chosen by the application.
-This crate does not widen `MemoryId` or fork the `MemoryManager` layout.
+The bundled MemoryManager-compatible `MemoryId` is `u8`-backed. Values
+`0..=254` are usable by applications. `MemoryId::new(255)` is invalid because
+`255` is the internal unallocated-bucket marker. Per-archive and per-slot
+database designs must treat that as a hard capacity bound, including any
+catalog, index, metadata, and reserved memories chosen by the application. This
+crate keeps the `ic-stable-structures` 0.7 MemoryManager stable-memory layout.
 
 The multi-database API is still covered by the `0.x` compatibility rules.
 Production deployments should pin exact versions.

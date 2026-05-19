@@ -45,6 +45,114 @@ const idlFactory = ({ IDL }) => {
     page_table_segment_misses: IDL.Nat64,
     superblock_loads: IDL.Nat64,
   });
+  const BenchGetManyProfileReport = IDL.Record({
+    rows: IDL.Nat64,
+    instructions: IDL.Nat64,
+    checksum: IDL.Nat64,
+    db_size: IDL.Nat64,
+    stable_pages: IDL.Nat64,
+    stable_bytes: IDL.Nat64,
+    open_query: IDL.Nat64,
+    sql_build: IDL.Nat64,
+    key_build: IDL.Nat64,
+    prepare: IDL.Nat64,
+    bind: IDL.Nat64,
+    row_scan: IDL.Nat64,
+    report: IDL.Nat64,
+    x_read_calls: IDL.Nat64,
+    x_read_bytes: IDL.Nat64,
+    stable_data_read_calls: IDL.Nat64,
+    stable_data_read_bytes: IDL.Nat64,
+    page_table_root_hits: IDL.Nat64,
+    page_table_root_misses: IDL.Nat64,
+    page_table_segment_hits: IDL.Nat64,
+    page_table_segment_misses: IDL.Nat64,
+    superblock_loads: IDL.Nat64,
+  });
+  const BenchWriteProfileReport = IDL.Record({
+    rows: IDL.Nat64,
+    instructions: IDL.Nat64,
+    checksum: IDL.Nat64,
+    db_size: IDL.Nat64,
+    stable_pages: IDL.Nat64,
+    stable_bytes: IDL.Nat64,
+    open_update: IDL.Nat64,
+    prepare: IDL.Nat64,
+    key_value_format: IDL.Nat64,
+    execute_total: IDL.Nat64,
+    reset_bind: IDL.Nat64,
+    step: IDL.Nat64,
+    report: IDL.Nat64,
+    x_read_calls: IDL.Nat64,
+    x_read_bytes: IDL.Nat64,
+    x_write_calls: IDL.Nat64,
+    x_write_bytes: IDL.Nat64,
+    x_file_size_calls: IDL.Nat64,
+    x_lock_calls: IDL.Nat64,
+    x_unlock_calls: IDL.Nat64,
+    x_check_reserved_lock_calls: IDL.Nat64,
+    x_file_control_calls: IDL.Nat64,
+    x_device_characteristics_calls: IDL.Nat64,
+    stable_data_read_calls: IDL.Nat64,
+    stable_data_read_bytes: IDL.Nat64,
+    stable_data_write_calls: IDL.Nat64,
+    stable_data_write_bytes: IDL.Nat64,
+    stable_grow_calls: IDL.Nat64,
+    stable_grow_pages: IDL.Nat64,
+    page_table_root_hits: IDL.Nat64,
+    page_table_root_misses: IDL.Nat64,
+    page_table_segment_hits: IDL.Nat64,
+    page_table_segment_misses: IDL.Nat64,
+    superblock_loads: IDL.Nat64,
+    commit_load: IDL.Nat64,
+    commit_build_segments: IDL.Nat64,
+    commit_capacity: IDL.Nat64,
+    commit_page_write: IDL.Nat64,
+    commit_table_write: IDL.Nat64,
+    commit_superblock_store: IDL.Nat64,
+  });
+  const BenchGrowthProfileReport = IDL.Record({
+    rows: IDL.Nat64,
+    writes: IDL.Nat64,
+    instructions: IDL.Nat64,
+    checksum: IDL.Nat64,
+    db_size: IDL.Nat64,
+    stable_pages: IDL.Nat64,
+    stable_bytes: IDL.Nat64,
+    open_update: IDL.Nat64,
+    key_value_format: IDL.Nat64,
+    prepare: IDL.Nat64,
+    execute_total: IDL.Nat64,
+    changes: IDL.Nat64,
+    report: IDL.Nat64,
+    x_read_calls: IDL.Nat64,
+    x_read_bytes: IDL.Nat64,
+    x_write_calls: IDL.Nat64,
+    x_write_bytes: IDL.Nat64,
+    x_file_size_calls: IDL.Nat64,
+    x_lock_calls: IDL.Nat64,
+    x_unlock_calls: IDL.Nat64,
+    x_check_reserved_lock_calls: IDL.Nat64,
+    x_file_control_calls: IDL.Nat64,
+    x_device_characteristics_calls: IDL.Nat64,
+    stable_data_read_calls: IDL.Nat64,
+    stable_data_read_bytes: IDL.Nat64,
+    stable_data_write_calls: IDL.Nat64,
+    stable_data_write_bytes: IDL.Nat64,
+    stable_grow_calls: IDL.Nat64,
+    stable_grow_pages: IDL.Nat64,
+    page_table_root_hits: IDL.Nat64,
+    page_table_root_misses: IDL.Nat64,
+    page_table_segment_hits: IDL.Nat64,
+    page_table_segment_misses: IDL.Nat64,
+    superblock_loads: IDL.Nat64,
+    commit_load: IDL.Nat64,
+    commit_build_segments: IDL.Nat64,
+    commit_capacity: IDL.Nat64,
+    commit_page_write: IDL.Nat64,
+    commit_table_write: IDL.Nat64,
+    commit_superblock_store: IDL.Nat64,
+  });
   const DbStatsReport = IDL.Record({
     db_size: IDL.Nat64,
     stable_pages: IDL.Nat64,
@@ -59,19 +167,36 @@ const idlFactory = ({ IDL }) => {
     bench_append_insert: IDL.Func([IDL.Nat32, IDL.Nat32], [result(BenchReport)], []),
     bench_update_only: IDL.Func([IDL.Nat32], [result(BenchReport)], []),
     bench_read: IDL.Func([IDL.Nat32], [result(BenchReport)], ["query"]),
+    bench_read_public_helper: IDL.Func([IDL.Nat32], [result(BenchReport)], ["query"]),
+    bench_read_prepare_each: IDL.Func([IDL.Nat32], [result(BenchReport)], ["query"]),
     bench_read_profile: IDL.Func(
       [IDL.Nat32],
       [result(BenchReadProfileReport)],
       ["query"],
     ),
     bench_get_many_in: IDL.Func([IDL.Nat32], [result(BenchReport)], ["query"]),
+    bench_get_many_in_profile: IDL.Func(
+      [IDL.Nat32],
+      [result(BenchGetManyProfileReport)],
+      ["query"],
+    ),
     db_stats: IDL.Func([], [result(DbStatsReport)], ["query"]),
     bench_write: IDL.Func([IDL.Nat32], [result(BenchReport)], []),
+    bench_write_profile: IDL.Func(
+      [IDL.Nat32],
+      [result(BenchWriteProfileReport)],
+      [],
+    ),
     bench_large_blob: IDL.Func([IDL.Nat32], [result(BenchReport)], []),
     bench_many_rows: IDL.Func([IDL.Nat32], [result(BenchReport)], ["query"]),
     bench_unbounded_order_by: IDL.Func([IDL.Nat32], [result(BenchReport)], []),
     bench_join: IDL.Func([IDL.Nat32], [result(BenchReport)], []),
     bench_growth: IDL.Func([IDL.Nat32, IDL.Nat32], [result(BenchReport)], []),
+    bench_growth_profile: IDL.Func(
+      [IDL.Nat32, IDL.Nat32],
+      [result(BenchGrowthProfileReport)],
+      [],
+    ),
   });
 };
 
@@ -81,19 +206,33 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
   try {
     const resetActor = await setupActor(pic);
     const reset = await callReport("bench_reset_1000_clean", resetActor.bench_reset(1_000));
-    assertWithinBaseline("bench_reset_1000_clean", reset, 16_060_164n, 25n, 10n);
+    assertWithinBaseline("bench_reset_1000_clean", reset, 10_623_761n, 25n, 10n);
     await callReport("db_stats_after_reset_1000_clean", resetActor.db_stats());
 
     const readActor = await setupActor(pic);
     await callReport("bench_reset_1000_for_point_read", readActor.bench_reset(1_000));
     const read1 = await assertLimitCase("bench_read_1", readActor.bench_read(1));
-    assertWithinBaseline("bench_read_1", read1, 57_315n, 25n, 10n);
+    assertWithinBaseline("bench_read_1", read1, 46_515n, 25n, 10n);
     const read10 = await assertLimitCase("bench_read_10", readActor.bench_read(10));
-    assertWithinBaseline("bench_read_10", read10, 187_202n, 25n, 10n);
+    assertWithinBaseline("bench_read_10", read10, 132_896n, 25n, 10n);
     const read100 = await assertLimitCase("bench_read_100", readActor.bench_read(100));
-    assertWithinBaseline("bench_read_100", read100, 1_489_122n, 25n, 10n);
+    assertWithinBaseline("bench_read_100", read100, 999_756n, 25n, 10n);
     const read = await callReport("bench_read_1000", readActor.bench_read(1_000));
-    assertWithinBaseline("bench_read", read, 14_824_983n, 25n, 10n);
+    assertWithinBaseline("bench_read", read, 9_982_767n, 25n, 10n);
+    const publicHelperRead = await assertLimitCase(
+      "bench_read_public_helper_1000",
+      readActor.bench_read_public_helper(1_000),
+    );
+    const prepareEachRead = await assertLimitCase(
+      "bench_read_prepare_each_1000",
+      readActor.bench_read_prepare_each(1_000),
+    );
+    assertWithinBaseline("bench_read_public_helper_1000", publicHelperRead, 11_965_551n, 25n, 10n);
+    assertWithinBaseline("bench_read_prepare_each_1000", prepareEachRead, 39_354_703n, 25n, 10n);
+    assert(
+      publicHelperRead.instructions * 2n <= prepareEachRead.instructions,
+      `public helper read should reuse prepared statements: public=${formatReport(publicHelperRead)}, prepareEach=${formatReport(prepareEachRead)}`,
+    );
     const readProfile = await callReport(
       "bench_read_profile",
       readActor.bench_read_profile(1_000),
@@ -104,8 +243,16 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
     const writeActor = await setupActor(pic);
     await callReport("bench_reset_1000_for_write", writeActor.bench_reset(1_000));
     const write = await callReport("bench_write_1000_clean", writeActor.bench_write(1_000));
-    assertWithinBaseline("bench_write_1000_clean", write, 19_255_157n, 25n, 10n);
+    assertWithinBaseline("bench_write_1000_clean", write, 13_174_459n, 25n, 10n);
     await callReport("db_stats_after_write_clean", writeActor.db_stats());
+
+    const writeProfileActor = await setupActor(pic);
+    await callReport("bench_reset_1000_for_write_profile", writeProfileActor.bench_reset(1_000));
+    const writeProfile = await callReport(
+      "bench_write_profile",
+      writeProfileActor.bench_write_profile(1_000),
+    );
+    assertWriteProfile(write, writeProfile);
 
     await scenario(pic, "insert_only_1000", async (actor) => {
       await assertLimitCase("bench_insert_only_1000", actor.bench_insert_only(1_000));
@@ -116,7 +263,7 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
       await callReport("db_stats_after_insert_only_5000", actor.db_stats());
       return report;
     });
-    assertWithinBaseline("bench_insert_only_5000", insert5000, 84_353_100n, 25n, 10n);
+    assertWithinBaseline("bench_insert_only_5000", insert5000, 60_218_159n, 25n, 10n);
     await scenario(pic, "append_insert_5000_1000", async (actor) => {
       await assertLimitCase(
         "bench_append_insert_5000_1000",
@@ -133,47 +280,81 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
       await callReport("db_stats_after_update_only_5000", actor.db_stats());
       return report;
     });
-    assertWithinBaseline("bench_update_only_5000", update5000, 115_875_483n, 25n, 10n);
+    assertWithinBaseline("bench_update_only_5000", update5000, 90_402_768n, 25n, 10n);
 
     const bulkActor = await setupActor(pic);
     await callReport("bench_reset_5000_clean", bulkActor.bench_reset(5_000));
     await assertLimitCase("bench_many_rows_100", bulkActor.bench_many_rows(100));
     await assertLimitCase("bench_many_rows_1000", bulkActor.bench_many_rows(1_000));
     const bulk5000 = await assertLimitCase("bench_many_rows_5000", bulkActor.bench_many_rows(5_000));
-    assertWithinBaseline("bench_many_rows_5000", bulk5000, 7_587_529n, 25n, 10n);
-    await assertLimitCase("bench_get_many_in_100", bulkActor.bench_get_many_in(100));
-    await assertLimitCase("bench_get_many_in_1000", bulkActor.bench_get_many_in(1_000));
+    assertWithinBaseline("bench_many_rows_5000", bulk5000, 6_460_904n, 25n, 10n);
+    const getMany100 = await assertLimitCase(
+      "bench_get_many_in_100",
+      bulkActor.bench_get_many_in(100),
+    );
+    const getMany1000 = await assertLimitCase(
+      "bench_get_many_in_1000",
+      bulkActor.bench_get_many_in(1_000),
+    );
+    assertWithinBaseline("bench_get_many_in_100", getMany100, 1_313_458n, 25n, 10n);
+    assertWithinBaseline("bench_get_many_in_1000", getMany1000, 14_353_642n, 25n, 10n);
+    const getManyProfile = await callReport(
+      "bench_get_many_in_profile",
+      bulkActor.bench_get_many_in_profile(1_000),
+    );
+    assertGetManyProfile(getMany1000, getManyProfile);
     await callReport("db_stats_after_5000_clean", bulkActor.db_stats());
 
-    await scenario(pic, "large_blob_64k", async (actor) => {
-      await assertLimitCase("bench_large_blob_64k", actor.bench_large_blob(64 * 1024));
+    const largeBlob64k = await scenario(pic, "large_blob_64k", async (actor) => {
+      const report = await assertLimitCase(
+        "bench_large_blob_64k",
+        actor.bench_large_blob(64 * 1024),
+      );
       await callReport("db_stats_after_large_blob_64k", actor.db_stats());
+      return report;
     });
-    await scenario(pic, "large_blob_256k", async (actor) => {
-      await assertLimitCase("bench_large_blob_256k", actor.bench_large_blob(256 * 1024));
+    assertWithinBaseline("bench_large_blob_64k", largeBlob64k, 918_765n, 25n, 10n);
+    const largeBlob256k = await scenario(pic, "large_blob_256k", async (actor) => {
+      const report = await assertLimitCase(
+        "bench_large_blob_256k",
+        actor.bench_large_blob(256 * 1024),
+      );
       await callReport("db_stats_after_large_blob_256k", actor.db_stats());
+      return report;
     });
+    assertWithinBaseline("bench_large_blob_256k", largeBlob256k, 2_188_597n, 25n, 10n);
 
-    await scenario(pic, "unbounded_order_by_5000", async (actor) => {
-      await assertLimitCase("bench_unbounded_order_by_5000", actor.bench_unbounded_order_by(5_000));
+    const orderBy = await scenario(pic, "unbounded_order_by_5000", async (actor) => {
+      const report = await assertLimitCase(
+        "bench_unbounded_order_by_5000",
+        actor.bench_unbounded_order_by(5_000),
+      );
       await callReport("db_stats_after_unbounded_order_by_5000", actor.db_stats());
+      return report;
     });
-    await scenario(pic, "join_2000", async (actor) => {
-      await assertLimitCase("bench_join_2000", actor.bench_join(2_000));
+    assertWithinBaseline("bench_unbounded_order_by_5000", orderBy, 65_926_719n, 25n, 10n);
+    const join = await scenario(pic, "join_2000", async (actor) => {
+      const report = await assertLimitCase("bench_join_2000", actor.bench_join(2_000));
       await callReport("db_stats_after_join_2000", actor.db_stats());
+      return report;
     });
+    assertWithinBaseline("bench_join_2000", join, 16_613_620n, 25n, 10n);
     const growth1k = await scenario(pic, "growth_1000_20", async (actor) =>
       assertLimitCase("bench_growth_1000_20", actor.bench_growth(1_000, 20)),
     );
     const growth5k = await scenario(pic, "growth_5000_20", async (actor) =>
       assertLimitCase("bench_growth_5000_20", actor.bench_growth(5_000, 20)),
     );
-    assertWithinBaseline("bench_growth_1000_20", growth1k, 25_143_585n, 25n, 10n);
-    assertWithinBaseline("bench_growth_5000_20", growth5k, 25_158_511n, 25n, 10n);
+    assertWithinBaseline("bench_growth_1000_20", growth1k, 2_631_116n, 25n, 10n);
+    assertWithinBaseline("bench_growth_5000_20", growth5k, 2_670_918n, 25n, 10n);
     assert(
       growth5k.instructions <= growth1k.instructions * 2n,
       `bench_growth should not scale with DB size: 1k=${formatReport(growth1k)}, 5k=${formatReport(growth5k)}`,
     );
+    const growthProfile = await scenario(pic, "growth_profile_1000_20", async (actor) =>
+      callReport("bench_growth_profile_1000_20", actor.bench_growth_profile(1_000, 20)),
+    );
+    assertGrowthProfile(growth1k, growthProfile);
   } finally {
     await pic.tearDown();
     await server.stop();
@@ -248,12 +429,131 @@ function assertReadProfile(read, profile) {
   );
 
   assert(profile.x_read_calls > 0n, "bench_read_profile reported no xRead calls");
+  assert(
+    profile.x_read_calls <= 5n,
+    `bench_read_profile should keep read-only pager reads cached: ${formatReport(profile)}`,
+  );
   assert(profile.stable_data_read_calls > 0n, "bench_read_profile reported no stable reads");
+}
+
+function assertGetManyProfile(getMany, profile) {
+  assert.equal(profile.rows, getMany.rows, "get_many profile row count differs");
+  assert.equal(profile.checksum, getMany.checksum, "get_many profile checksum differs");
+  assert(
+    profile.instructions <= getMany.instructions * 2n,
+    `bench_get_many_in_profile is too far from bench_get_many_in: getMany=${formatReport(getMany)}, profile=${formatReport(profile)}`,
+  );
+
+  const topLevel =
+    profile.open_query +
+    profile.sql_build +
+    profile.key_build +
+    profile.prepare +
+    profile.bind +
+    profile.row_scan +
+    profile.report;
+  assert(topLevel > 0n, "bench_get_many_in_profile reported no top-level work");
+  assert(
+    topLevel <= profile.instructions,
+    `get_many profile top-level timings exceed total instructions: topLevel=${topLevel}, profile=${formatReport(profile)}`,
+  );
+  assert(profile.sql_build > 0n, "bench_get_many_in_profile reported no SQL build work");
+  assert(profile.key_build > 0n, "bench_get_many_in_profile reported no key build work");
+  assert(profile.bind > 0n, "bench_get_many_in_profile reported no bind work");
+  assert(profile.row_scan > 0n, "bench_get_many_in_profile reported no row scan work");
+  assert(profile.x_read_calls > 0n, "bench_get_many_in_profile reported no xRead calls");
+  assert(profile.stable_data_read_calls > 0n, "bench_get_many_in_profile reported no stable reads");
+}
+
+function assertWriteProfile(write, profile) {
+  assert.equal(profile.rows, write.rows, "profile row count differs from bench_write");
+  assert.equal(profile.checksum, write.checksum, "profile checksum differs from bench_write");
+  assert(
+    profile.instructions <= write.instructions * 2n,
+    `bench_write_profile is too far from bench_write: write=${formatReport(write)}, profile=${formatReport(profile)}`,
+  );
+
+  const topLevel =
+    profile.open_update +
+    profile.prepare +
+    profile.key_value_format +
+    profile.execute_total +
+    profile.report;
+  assert(topLevel > 0n, "bench_write_profile reported no top-level work");
+  assert(
+    topLevel <= profile.instructions,
+    `write profile top-level timings exceed total instructions: topLevel=${topLevel}, profile=${formatReport(profile)}`,
+  );
+
+  const statementParts = profile.reset_bind + profile.step;
+  assert(statementParts > 0n, "bench_write_profile reported no statement work");
+  assert(
+    statementParts <= profile.execute_total,
+    `write statement timings exceed execute total: statementParts=${statementParts}, profile=${formatReport(profile)}`,
+  );
+
+  assert(profile.x_write_calls > 0n, "bench_write_profile reported no xWrite calls");
+  assert(profile.stable_data_write_calls > 0n, "bench_write_profile reported no stable writes");
+
+  const commitParts =
+    profile.commit_load +
+    profile.commit_build_segments +
+    profile.commit_capacity +
+    profile.commit_page_write +
+    profile.commit_table_write +
+    profile.commit_superblock_store;
+  assert(commitParts > 0n, "bench_write_profile reported no commit work");
+  assert(
+    commitParts <= profile.instructions,
+    `write commit timings exceed total instructions: commitParts=${commitParts}, profile=${formatReport(profile)}`,
+  );
+}
+
+function assertGrowthProfile(growth, profile) {
+  assert.equal(profile.rows, growth.rows, "growth profile row count differs");
+  assert.equal(profile.writes, growth.checksum, "growth profile write count differs");
+  assert.equal(profile.checksum, growth.checksum, "growth profile checksum differs");
+  assert(
+    profile.instructions <= growth.instructions * 2n,
+    `bench_growth_profile is too far from bench_growth: growth=${formatReport(growth)}, profile=${formatReport(profile)}`,
+  );
+
+  const topLevel =
+    profile.open_update +
+    profile.key_value_format +
+    profile.prepare +
+    profile.execute_total +
+    profile.changes +
+    profile.report;
+  assert(topLevel > 0n, "bench_growth_profile reported no top-level work");
+  assert(
+    topLevel <= profile.instructions,
+    `growth profile top-level timings exceed total instructions: topLevel=${topLevel}, profile=${formatReport(profile)}`,
+  );
+  assert(profile.open_update > 0n, "bench_growth_profile reported no update open work");
+  assert(profile.prepare > 0n, "bench_growth_profile reported no prepare work");
+  assert(profile.execute_total > 0n, "bench_growth_profile reported no execute work");
+  assert(profile.x_write_calls > 0n, "bench_growth_profile reported no xWrite calls");
+  assert(profile.stable_data_write_calls > 0n, "bench_growth_profile reported no stable writes");
+
+  const commitParts =
+    profile.commit_load +
+    profile.commit_build_segments +
+    profile.commit_capacity +
+    profile.commit_page_write +
+    profile.commit_table_write +
+    profile.commit_superblock_store;
+  assert(commitParts > 0n, "bench_growth_profile reported no commit work");
+  assert(
+    commitParts <= profile.instructions,
+    `growth commit timings exceed total instructions: commitParts=${commitParts}, profile=${formatReport(profile)}`,
+  );
 }
 
 function formatReport(report) {
   const fields = [
     "rows" in report ? `rows=${report.rows}` : undefined,
+    "writes" in report ? `writes=${report.writes}` : undefined,
     "instructions" in report ? `instructions=${report.instructions}` : undefined,
     "checksum" in report ? `checksum=${report.checksum}` : undefined,
     `db_size=${report.db_size}`,
@@ -265,7 +565,7 @@ function formatReport(report) {
       ? `sqlite_freelist_count=${report.sqlite_freelist_count}`
       : undefined,
   ].filter(Boolean);
-  if ("open_query" in report) {
+  if ("query_optional_string_text_total" in report) {
     fields.push(
       `open_query=${report.open_query}`,
       `prepare=${report.prepare}`,
@@ -286,5 +586,64 @@ function formatReport(report) {
       `superblock_loads=${report.superblock_loads}`,
     );
   }
-  return fields.join(", ");
+  if ("sql_build" in report) {
+    fields.push(
+      `open_query=${report.open_query}`,
+      `sql_build=${report.sql_build}`,
+      `key_build=${report.key_build}`,
+      `prepare=${report.prepare}`,
+      `bind=${report.bind}`,
+      `row_scan=${report.row_scan}`,
+      `report=${report.report}`,
+      `x_read_calls=${report.x_read_calls}`,
+      `x_read_bytes=${report.x_read_bytes}`,
+      `stable_data_read_calls=${report.stable_data_read_calls}`,
+      `stable_data_read_bytes=${report.stable_data_read_bytes}`,
+      `page_table_root_hits=${report.page_table_root_hits}`,
+      `page_table_root_misses=${report.page_table_root_misses}`,
+      `page_table_segment_hits=${report.page_table_segment_hits}`,
+      `page_table_segment_misses=${report.page_table_segment_misses}`,
+      `superblock_loads=${report.superblock_loads}`,
+    );
+  }
+  if ("open_update" in report) {
+    fields.push(
+      `open_update=${report.open_update}`,
+      `prepare=${report.prepare}`,
+      `key_value_format=${report.key_value_format}`,
+      `execute_total=${report.execute_total}`,
+      "changes" in report ? `changes=${report.changes}` : undefined,
+      "reset_bind" in report ? `reset_bind=${report.reset_bind}` : undefined,
+      "step" in report ? `step=${report.step}` : undefined,
+      `report=${report.report}`,
+      `x_read_calls=${report.x_read_calls}`,
+      `x_read_bytes=${report.x_read_bytes}`,
+      `x_write_calls=${report.x_write_calls}`,
+      `x_write_bytes=${report.x_write_bytes}`,
+      `x_file_size_calls=${report.x_file_size_calls}`,
+      `x_lock_calls=${report.x_lock_calls}`,
+      `x_unlock_calls=${report.x_unlock_calls}`,
+      `x_check_reserved_lock_calls=${report.x_check_reserved_lock_calls}`,
+      `x_file_control_calls=${report.x_file_control_calls}`,
+      `x_device_characteristics_calls=${report.x_device_characteristics_calls}`,
+      `stable_data_read_calls=${report.stable_data_read_calls}`,
+      `stable_data_read_bytes=${report.stable_data_read_bytes}`,
+      `stable_data_write_calls=${report.stable_data_write_calls}`,
+      `stable_data_write_bytes=${report.stable_data_write_bytes}`,
+      `stable_grow_calls=${report.stable_grow_calls}`,
+      `stable_grow_pages=${report.stable_grow_pages}`,
+      `page_table_root_hits=${report.page_table_root_hits}`,
+      `page_table_root_misses=${report.page_table_root_misses}`,
+      `page_table_segment_hits=${report.page_table_segment_hits}`,
+      `page_table_segment_misses=${report.page_table_segment_misses}`,
+      `superblock_loads=${report.superblock_loads}`,
+      `commit_load=${report.commit_load}`,
+      `commit_build_segments=${report.commit_build_segments}`,
+      `commit_capacity=${report.commit_capacity}`,
+      `commit_page_write=${report.commit_page_write}`,
+      `commit_table_write=${report.commit_table_write}`,
+      `commit_superblock_store=${report.commit_superblock_store}`,
+    );
+  }
+  return fields.filter(Boolean).join(", ");
 }

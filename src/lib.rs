@@ -1,6 +1,6 @@
 //! IC canister crate root for the `icstable` SQLite VFS.
 //!
-//! The database image is stored inside a caller-provided MemoryManager virtual
+//! The database image is stored inside a MemoryManager-compatible virtual
 //! memory. SQLite reaches it only through `sqlite3_vfs` callbacks, so no POSIX
 //! or WASI filesystem is used.
 
@@ -21,6 +21,8 @@ pub mod stable;
 
 pub use db::{Db, DbError, DbHandle};
 pub use stable::memory::DbMemory;
+pub use stable::memory_manager::{MemoryId, MemoryManager};
+pub use stable::raw_memory::DefaultMemoryImpl;
 
 #[macro_export]
 macro_rules! params {

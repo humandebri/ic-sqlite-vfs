@@ -4,4 +4,7 @@
 //! caller-provided virtual memory backend.
 
 pub mod memory;
+mod memory_layout;
+pub mod memory_manager;
 pub mod meta;
+pub mod raw_memory;

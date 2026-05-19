@@ -22,8 +22,6 @@ pub struct IcStableFile {
     read_only: bool,
     read_snapshot: Option<Superblock>,
     read_page_offsets: stable_blob::PageOffsetCache,
-    chunk_size: c_int,
-    size_hint: u64,
     powersafe_overwrite: bool,
 }
 
@@ -49,8 +47,6 @@ impl IcStableFile {
             read_only,
             read_snapshot,
             read_page_offsets: stable_blob::PageOffsetCache::new(),
-            chunk_size: 0,
-            size_hint: 0,
             powersafe_overwrite: true,
         }
     }
@@ -113,43 +109,42 @@ unsafe extern "C" fn x_read(
     };
     let dst = std::slice::from_raw_parts_mut(buf.cast::<u8>(), amount);
     let file = &mut *file.cast::<IcStableFile>();
+    if let FileKind::Temp(temp) = &mut file.kind {
+        return if temp.read(offset, dst) {
+            ffi::SQLITE_OK
+        } else {
+            ffi::SQLITE_IOERR_SHORT_READ
+        };
+    }
     memory::with_context(file.context, || {
-        let complete = match &mut file.kind {
-            FileKind::Main => {
-                #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-                crate::read_metrics::record_x_read(amount);
-                let result = if file.read_only {
-                    if file.read_snapshot.is_none() {
-                        match Superblock::load() {
-                            Ok(block) => file.read_snapshot = Some(block),
-                            Err(error) => {
-                                vfs::record_last_error(ffi::SQLITE_IOERR_READ, error.to_string());
-                                return ffi::SQLITE_IOERR_READ;
-                            }
-                        }
-                    }
-                    let block = file
-                        .read_snapshot
-                        .as_ref()
-                        .expect("read snapshot was initialized");
-                    stable_blob::read_base_at_with_page_cache(
-                        block,
-                        offset,
-                        dst,
-                        &mut file.read_page_offsets,
-                    )
-                } else {
-                    stable_blob::read_at(offset, dst)
-                };
-                match result {
-                    Ok(value) => value,
+        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+        crate::read_metrics::record_x_read(amount);
+        let result = if file.read_only {
+            let block = match &file.read_snapshot {
+                Some(block) => block,
+                None => match Superblock::load() {
+                    Ok(block) => file.read_snapshot.insert(block),
                     Err(error) => {
                         vfs::record_last_error(ffi::SQLITE_IOERR_READ, error.to_string());
                         return ffi::SQLITE_IOERR_READ;
                     }
-                }
+                },
+            };
+            stable_blob::read_base_at_with_page_cache(
+                block,
+                offset,
+                dst,
+                &mut file.read_page_offsets,
+            )
+        } else {
+            stable_blob::read_at(offset, dst)
+        };
+        let complete = match result {
+            Ok(value) => value,
+            Err(error) => {
+                vfs::record_last_error(ffi::SQLITE_IOERR_READ, error.to_string());
+                return ffi::SQLITE_IOERR_READ;
             }
-            FileKind::Temp(temp) => temp.read(offset, dst),
         };
         if complete {
             ffi::SQLITE_OK
@@ -166,32 +161,32 @@ unsafe extern "C" fn x_write(
     offset: ffi::sqlite3_int64,
 ) -> c_int {
     let file = &mut *file.cast::<IcStableFile>();
+    if file.read_only {
+        vfs::record_last_error(ffi::SQLITE_READONLY, "write attempted on read-only file");
+        return ffi::SQLITE_READONLY;
+    }
+    let Some(amount) = checked_amount(amount) else {
+        return ffi::SQLITE_IOERR_WRITE;
+    };
+    let Some(offset) = checked_offset(offset) else {
+        return ffi::SQLITE_IOERR_WRITE;
+    };
+    let bytes = std::slice::from_raw_parts(buf.cast::<u8>(), amount);
+    if let FileKind::Temp(temp) = &mut file.kind {
+        return if temp.write(offset, bytes) {
+            ffi::SQLITE_OK
+        } else {
+            ffi::SQLITE_IOERR_WRITE
+        };
+    }
     memory::with_context(file.context, || {
-        if file.read_only {
-            vfs::record_last_error(ffi::SQLITE_READONLY, "write attempted on read-only file");
-            return ffi::SQLITE_READONLY;
-        }
-        let Some(amount) = checked_amount(amount) else {
-            return ffi::SQLITE_IOERR_WRITE;
-        };
-        let Some(offset) = checked_offset(offset) else {
-            return ffi::SQLITE_IOERR_WRITE;
-        };
-        let bytes = std::slice::from_raw_parts(buf.cast::<u8>(), amount);
-        match &mut file.kind {
-            FileKind::Main => match stable_blob::write_at(offset, bytes) {
-                Ok(()) => ffi::SQLITE_OK,
-                Err(error) => {
-                    vfs::record_last_error(ffi::SQLITE_IOERR_WRITE, error.to_string());
-                    ffi::SQLITE_IOERR_WRITE
-                }
-            },
-            FileKind::Temp(temp) => {
-                if temp.write(offset, bytes) {
-                    ffi::SQLITE_OK
-                } else {
-                    ffi::SQLITE_IOERR_WRITE
-                }
+        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+        crate::read_metrics::record_x_write(amount);
+        match stable_blob::write_at(offset, bytes) {
+            Ok(()) => ffi::SQLITE_OK,
+            Err(error) => {
+                vfs::record_last_error(ffi::SQLITE_IOERR_WRITE, error.to_string());
+                ffi::SQLITE_IOERR_WRITE
             }
         }
     })
@@ -199,29 +194,25 @@ unsafe extern "C" fn x_write(
 
 unsafe extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: ffi::sqlite3_int64) -> c_int {
     let file = &mut *file.cast::<IcStableFile>();
-    memory::with_context(file.context, || {
-        if file.read_only {
-            vfs::record_last_error(ffi::SQLITE_READONLY, "truncate attempted on read-only file");
-            return ffi::SQLITE_READONLY;
-        }
-        let Some(size) = checked_offset(size) else {
-            return ffi::SQLITE_IOERR_TRUNCATE;
+    if file.read_only {
+        vfs::record_last_error(ffi::SQLITE_READONLY, "truncate attempted on read-only file");
+        return ffi::SQLITE_READONLY;
+    }
+    let Some(size) = checked_offset(size) else {
+        return ffi::SQLITE_IOERR_TRUNCATE;
+    };
+    if let FileKind::Temp(temp) = &mut file.kind {
+        return if temp.truncate(size) {
+            ffi::SQLITE_OK
+        } else {
+            ffi::SQLITE_IOERR_TRUNCATE
         };
-        match &mut file.kind {
-            FileKind::Main => match stable_blob::truncate(size) {
-                Ok(()) => ffi::SQLITE_OK,
-                Err(error) => {
-                    vfs::record_last_error(ffi::SQLITE_IOERR_TRUNCATE, error.to_string());
-                    ffi::SQLITE_IOERR_TRUNCATE
-                }
-            },
-            FileKind::Temp(temp) => {
-                if temp.truncate(size) {
-                    ffi::SQLITE_OK
-                } else {
-                    ffi::SQLITE_IOERR_TRUNCATE
-                }
-            }
+    }
+    memory::with_context(file.context, || match stable_blob::truncate(size) {
+        Ok(()) => ffi::SQLITE_OK,
+        Err(error) => {
+            vfs::record_last_error(ffi::SQLITE_IOERR_TRUNCATE, error.to_string());
+            ffi::SQLITE_IOERR_TRUNCATE
         }
     })
 }
@@ -234,17 +225,50 @@ unsafe extern "C" fn x_file_size(
     file: *mut ffi::sqlite3_file,
     out: *mut ffi::sqlite3_int64,
 ) -> c_int {
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_x_file_size();
     let file = &mut *file.cast::<IcStableFile>();
-    memory::with_context(file.context, || {
-        let size = match &mut file.kind {
-            FileKind::Main => match stable_blob::file_size() {
-                Ok(value) => value,
+    if let FileKind::Temp(temp) = &file.kind {
+        let Ok(size) = ffi::sqlite3_int64::try_from(temp.len()) else {
+            return ffi::SQLITE_IOERR_FSTAT;
+        };
+        *out = size;
+        return ffi::SQLITE_OK;
+    }
+    if file.read_only {
+        if let Some(block) = &file.read_snapshot {
+            let Ok(size) = ffi::sqlite3_int64::try_from(block.db_size) else {
+                return ffi::SQLITE_IOERR_FSTAT;
+            };
+            *out = size;
+            return ffi::SQLITE_OK;
+        }
+        return memory::with_context(file.context, || {
+            let size = match Superblock::load() {
+                Ok(block) => {
+                    let size = block.db_size;
+                    file.read_snapshot = Some(block);
+                    size
+                }
                 Err(error) => {
                     vfs::record_last_error(ffi::SQLITE_IOERR_FSTAT, error.to_string());
                     return ffi::SQLITE_IOERR_FSTAT;
                 }
-            },
-            FileKind::Temp(temp) => temp.len(),
+            };
+            let Ok(size) = ffi::sqlite3_int64::try_from(size) else {
+                return ffi::SQLITE_IOERR_FSTAT;
+            };
+            *out = size;
+            ffi::SQLITE_OK
+        });
+    }
+    memory::with_context(file.context, || {
+        let size = match stable_blob::file_size() {
+            Ok(value) => value,
+            Err(error) => {
+                vfs::record_last_error(ffi::SQLITE_IOERR_FSTAT, error.to_string());
+                return ffi::SQLITE_IOERR_FSTAT;
+            }
         };
         let Ok(size) = ffi::sqlite3_int64::try_from(size) else {
             return ffi::SQLITE_IOERR_FSTAT;
@@ -255,35 +279,41 @@ unsafe extern "C" fn x_file_size(
 }
 
 unsafe extern "C" fn x_lock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int {
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_x_lock();
     let file = &mut *file.cast::<IcStableFile>();
-    memory::with_context(file.context, || {
-        if matches!(file.kind, FileKind::Main) {
-            lock::lock(level);
-        }
-        ffi::SQLITE_OK
-    })
+    if !matches!(file.kind, FileKind::Main) {
+        return ffi::SQLITE_OK;
+    }
+    lock::lock_for(file.context, level);
+    ffi::SQLITE_OK
 }
 
 unsafe extern "C" fn x_unlock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int {
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_x_unlock();
     let file = &mut *file.cast::<IcStableFile>();
-    memory::with_context(file.context, || {
-        if matches!(file.kind, FileKind::Main) {
-            lock::unlock(level);
-        }
-        ffi::SQLITE_OK
-    })
+    if !matches!(file.kind, FileKind::Main) {
+        return ffi::SQLITE_OK;
+    }
+    lock::unlock_for(file.context, level);
+    ffi::SQLITE_OK
 }
 
 unsafe extern "C" fn x_check_reserved_lock(file: *mut ffi::sqlite3_file, out: *mut c_int) -> c_int {
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_x_check_reserved_lock();
     let file = &mut *file.cast::<IcStableFile>();
-    memory::with_context(file.context, || {
-        *out = if matches!(file.kind, FileKind::Main) && lock::has_reserved() {
-            1
-        } else {
-            0
-        };
-        ffi::SQLITE_OK
-    })
+    if !matches!(file.kind, FileKind::Main) {
+        *out = 0;
+        return ffi::SQLITE_OK;
+    }
+    *out = if lock::has_reserved_for(file.context) {
+        1
+    } else {
+        0
+    };
+    ffi::SQLITE_OK
 }
 
 unsafe extern "C" fn x_file_control(
@@ -291,25 +321,15 @@ unsafe extern "C" fn x_file_control(
     op: c_int,
     arg: *mut c_void,
 ) -> c_int {
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_x_file_control();
     let file = &mut *file.cast::<IcStableFile>();
-    memory::with_context(file.context, || match op {
-        ffi::SQLITE_FCNTL_LOCKSTATE => write_c_int(arg, lock::level()),
-        ffi::SQLITE_FCNTL_LAST_ERRNO => write_c_int(arg, vfs::last_errno()),
-        ffi::SQLITE_FCNTL_SIZE_HINT => {
-            if !arg.is_null() {
-                let hint = *(arg.cast::<ffi::sqlite3_int64>());
-                if hint >= 0 {
-                    file.size_hint = u64::try_from(hint).unwrap_or(u64::MAX);
-                }
-            }
-            ffi::SQLITE_OK
+    match op {
+        ffi::SQLITE_FCNTL_LOCKSTATE => write_c_int(arg, lock::level_for(file.context)),
+        ffi::SQLITE_FCNTL_LAST_ERRNO => {
+            memory::with_context(file.context, || write_c_int(arg, vfs::last_errno()))
         }
-        ffi::SQLITE_FCNTL_CHUNK_SIZE => {
-            if !arg.is_null() {
-                file.chunk_size = *(arg.cast::<c_int>());
-            }
-            ffi::SQLITE_OK
-        }
+        ffi::SQLITE_FCNTL_SIZE_HINT | ffi::SQLITE_FCNTL_CHUNK_SIZE => ffi::SQLITE_OK,
         ffi::SQLITE_FCNTL_HAS_MOVED => write_c_int(arg, 0),
         ffi::SQLITE_FCNTL_VFSNAME => {
             if arg.is_null() {
@@ -332,15 +352,24 @@ unsafe extern "C" fn x_file_control(
             ffi::SQLITE_OK
         }
         _ => ffi::SQLITE_NOTFOUND,
-    })
+    }
 }
 
 unsafe extern "C" fn x_sector_size(_file: *mut ffi::sqlite3_file) -> c_int {
     c_int::try_from(SQLITE_PAGE_SIZE).expect("page size fits c_int")
 }
 
-unsafe extern "C" fn x_device_characteristics(_file: *mut ffi::sqlite3_file) -> c_int {
-    0
+unsafe extern "C" fn x_device_characteristics(file: *mut ffi::sqlite3_file) -> c_int {
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_x_device_characteristics();
+    let file = &mut *file.cast::<IcStableFile>();
+    if file.powersafe_overwrite {
+        // Stable writes affect only the requested byte range; page-map publish
+        // happens separately through the superblock.
+        ffi::SQLITE_IOCAP_POWERSAFE_OVERWRITE
+    } else {
+        0
+    }
 }
 
 fn checked_amount(amount: c_int) -> Option<usize> {
@@ -366,7 +395,10 @@ unsafe fn write_c_int(arg: *mut c_void, value: c_int) -> c_int {
 
 #[cfg(test)]
 mod tests {
-    use super::{install, x_check_reserved_lock, x_close, x_file_control, x_lock, x_unlock};
+    use super::{
+        install, x_check_reserved_lock, x_close, x_device_characteristics, x_file_control, x_lock,
+        x_unlock,
+    };
     use super::{FileKind, IcStableFile};
     use crate::sqlite_vfs::{ffi, lock, vfs};
     use crate::stable::memory::{self, ContextId};
@@ -396,6 +428,11 @@ mod tests {
         let raw = unsafe { install_main_file(&mut storage, context) };
 
         unsafe {
+            assert_eq!(
+                x_device_characteristics(raw),
+                ffi::SQLITE_IOCAP_POWERSAFE_OVERWRITE
+            );
+
             lock::lock(ffi::SQLITE_LOCK_RESERVED);
             let mut lock_state = 0;
             assert_eq!(
@@ -429,7 +466,6 @@ mod tests {
                 ),
                 ffi::SQLITE_OK
             );
-            assert_eq!((*raw.cast::<IcStableFile>()).size_hint, 8192);
 
             let mut chunk_size = 4096;
             assert_eq!(
@@ -440,7 +476,6 @@ mod tests {
                 ),
                 ffi::SQLITE_OK
             );
-            assert_eq!((*raw.cast::<IcStableFile>()).chunk_size, 4096);
 
             let mut has_moved = 1;
             assert_eq!(
@@ -475,6 +510,7 @@ mod tests {
                 ffi::SQLITE_OK
             );
             assert_eq!(psow, 0);
+            assert_eq!(x_device_characteristics(raw), 0);
 
             assert_eq!(
                 x_file_control(raw, 999_999, ptr::null_mut()),

@@ -81,7 +81,7 @@ impl Superblock {
         crate::read_metrics::record_superblock_load();
         memory::ensure_capacity(SUPERBLOCK_OFFSET + SUPERBLOCK_SIZE)?;
         let mut bytes = [0_u8; ENCODED_LEN];
-        memory::read(SUPERBLOCK_OFFSET, &mut bytes)?;
+        memory::read_preallocated(SUPERBLOCK_OFFSET, &mut bytes)?;
         let block = Self::decode(&bytes);
         if block.magic != MAGIC {
             let fresh = Self::fresh();
@@ -96,18 +96,40 @@ impl Superblock {
     }
 
     pub fn store(&self) -> Result<(), StableMemoryError> {
+        self.store_with_capacity_check()
+    }
+
+    fn store_with_capacity_check(&self) -> Result<(), StableMemoryError> {
         let mut block = self.clone();
         block.version = VERSION;
         block.meta_checksum = block.compute_meta_checksum();
         memory::write(SUPERBLOCK_OFFSET, &block.encode())?;
-        cache_superblock(&block);
+        cache_superblock_owned(block);
+        Ok(())
+    }
+
+    fn store_preallocated(&self) -> Result<(), StableMemoryError> {
+        let mut block = self.clone();
+        block.version = VERSION;
+        block.meta_checksum = block.compute_meta_checksum();
+        memory::write_prechecked(SUPERBLOCK_OFFSET, &block.encode())?;
+        cache_superblock_owned(block);
+        Ok(())
+    }
+
+    fn store_preallocated_unmetered(&self) -> Result<(), StableMemoryError> {
+        let mut block = self.clone();
+        block.version = VERSION;
+        block.meta_checksum = block.compute_meta_checksum();
+        memory::write_prechecked_unmetered(SUPERBLOCK_OFFSET, &block.encode())?;
+        cache_superblock_owned(block);
         Ok(())
     }
 
     pub fn set_db_size(size: u64) -> Result<(), StableMemoryError> {
         let mut block = Self::load()?;
         block.db_size = size;
-        block.store()
+        block.store_preallocated()
     }
 
     pub fn record_committed_tx() -> Result<(), StableMemoryError> {
@@ -115,7 +137,7 @@ impl Superblock {
         block.last_tx_id = block.last_tx_id.saturating_add(1);
         block.flags |= FLAG_CHECKSUM_STALE;
         block.clear_checksum_refresh();
-        block.store()
+        block.store_preallocated()
     }
 
     pub fn commit_db_image(db_base_offset: u64, db_size: u64) -> Result<(), StableMemoryError> {
@@ -125,7 +147,7 @@ impl Superblock {
         block.last_tx_id = block.last_tx_id.saturating_add(1);
         block.flags |= FLAG_CHECKSUM_STALE;
         block.clear_checksum_refresh();
-        block.store()
+        block.store_preallocated()
     }
 
     pub fn commit_page_map(
@@ -141,7 +163,23 @@ impl Superblock {
         block.last_tx_id = block.last_tx_id.saturating_add(1);
         block.flags |= FLAG_CHECKSUM_STALE;
         block.clear_checksum_refresh();
-        block.store()
+        block.store_preallocated()
+    }
+
+    pub fn commit_page_map_unmetered(
+        page_table_offset: u64,
+        page_count: u64,
+        db_size: u64,
+    ) -> Result<(), StableMemoryError> {
+        let mut block = Self::load()?;
+        block.page_table_offset = page_table_offset;
+        block.page_count = page_count;
+        block.db_size = db_size;
+        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
+        block.last_tx_id = block.last_tx_id.saturating_add(1);
+        block.flags |= FLAG_CHECKSUM_STALE;
+        block.clear_checksum_refresh();
+        block.store_preallocated_unmetered()
     }
 
     pub fn store_page_map_without_tx(
@@ -154,7 +192,20 @@ impl Superblock {
         block.page_count = page_count;
         block.db_size = db_size;
         block.layout_version = PAGE_MAP_LAYOUT_VERSION;
-        block.store()
+        block.store_preallocated()
+    }
+
+    pub fn store_page_map_without_tx_unmetered(
+        page_table_offset: u64,
+        page_count: u64,
+        db_size: u64,
+    ) -> Result<(), StableMemoryError> {
+        let mut block = Self::load()?;
+        block.page_table_offset = page_table_offset;
+        block.page_count = page_count;
+        block.db_size = db_size;
+        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
+        block.store_preallocated_unmetered()
     }
 
     pub fn verify_checksum(&self) -> bool {
@@ -243,9 +294,13 @@ pub fn clear_superblock_cache() {
 }
 
 fn cache_superblock(block: &Superblock) {
+    cache_superblock_owned(block.clone());
+}
+
+fn cache_superblock_owned(block: Superblock) {
     if let Ok(context) = memory::active_context_id() {
         SUPERBLOCK_CACHE.with(|cache| {
-            cache.borrow_mut().insert(context, block.clone());
+            cache.borrow_mut().insert(context, block);
         });
     }
 }
