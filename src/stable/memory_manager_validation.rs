@@ -5,8 +5,8 @@
 
 use crate::config::STABLE_PAGE_SIZE;
 use crate::stable::memory_layout::{
-    bucket_allocations_address, read_u64, BucketId, HEADER_RESERVED_BYTES, MAX_NUM_BUCKETS,
-    MAX_NUM_MEMORIES, UNALLOCATED_BUCKET_MARKER,
+    bucket_allocations_address, read_u64, BucketId, BUCKETS_OFFSET_IN_PAGES, HEADER_RESERVED_BYTES,
+    MAX_NUM_BUCKETS, MAX_NUM_MEMORIES, UNALLOCATED_BUCKET_MARKER,
 };
 use crate::stable::raw_memory::Memory;
 
@@ -37,6 +37,7 @@ pub(super) fn load_validated_layout<M: Memory>(memory: &M, header: &[u8]) -> Loa
         &memory_sizes_in_pages,
         &memory_buckets,
     );
+    validate_backing_memory_size(memory, allocated_buckets, bucket_size_in_pages);
 
     LoadedMemoryManager {
         allocated_buckets,
@@ -44,6 +45,23 @@ pub(super) fn load_validated_layout<M: Memory>(memory: &M, header: &[u8]) -> Loa
         memory_sizes_in_pages,
         memory_buckets,
     }
+}
+
+fn validate_backing_memory_size<M: Memory>(
+    memory: &M,
+    allocated_buckets: u16,
+    bucket_size_in_pages: u16,
+) {
+    let required_data_pages = u64::from(bucket_size_in_pages)
+        .checked_mul(u64::from(allocated_buckets))
+        .expect("invalid memory manager header: bucket range overflows");
+    let required_pages = BUCKETS_OFFSET_IN_PAGES
+        .checked_add(required_data_pages)
+        .expect("invalid memory manager header: bucket range overflows");
+    assert!(
+        memory.size() >= required_pages,
+        "invalid memory manager layout: backing memory truncated"
+    );
 }
 
 fn read_memory_sizes(header: &[u8]) -> [u64; MAX_NUM_MEMORIES as usize] {

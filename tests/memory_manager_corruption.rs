@@ -66,6 +66,14 @@ fn rejects_memory_size_that_overflows_byte_capacity() {
 }
 
 #[test]
+#[should_panic(expected = "backing memory truncated")]
+fn rejects_valid_table_with_truncated_bucket_storage() {
+    let backing = corrupt_backing(1, 1, &[(0, 1)], Some(vec![(0, 0)]));
+
+    let _manager = MemoryManager::init(backing);
+}
+
+#[test]
 fn reloads_valid_layout_after_hardening() {
     let backing = DefaultMemoryImpl::default();
     let manager = MemoryManager::init_with_bucket_size(backing.clone(), 1);

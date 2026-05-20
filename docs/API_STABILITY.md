@@ -44,6 +44,12 @@ The bundled MemoryManager-compatible `MemoryId` is `u8`-backed. Values
 database designs must treat that as a hard capacity bound, including any
 catalog, index, metadata, and reserved memories chosen by the application. This
 crate keeps the `ic-stable-structures` 0.7 MemoryManager stable-memory layout.
+If an existing MemoryManager-compatible image is corrupt, internally
+inconsistent, or physically truncated, initialization rejects it by panic/trap
+rather than returning a recoverable error.
+
+`stable::memory::read()` does not grow stable memory. Reads beyond the current
+capacity return `StableMemoryError::ReadOutOfBounds`.
 
 The multi-database API is still covered by the `0.x` compatibility rules.
 Production deployments should pin exact versions.
