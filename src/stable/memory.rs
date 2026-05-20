@@ -30,6 +30,14 @@ pub enum StableMemoryError {
         current_pages: u64,
         required_pages: u64,
     },
+    #[error(
+        "stable memory read out of bounds: offset={offset}, len={len}, size_bytes={size_bytes}"
+    )]
+    ReadOutOfBounds {
+        offset: u64,
+        len: u64,
+        size_bytes: u64,
+    },
     #[error("offset overflow")]
     OffsetOverflow,
     #[error("import session already started")]
@@ -88,8 +96,9 @@ pub fn init(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
 
 pub fn init_context(memory: DbMemory) -> ContextId {
     let context = NEXT_CONTEXT_ID.with(|next| {
-        let context = ContextId(next.get());
-        next.set(next.get().saturating_add(1));
+        let current = next.get();
+        let context = ContextId(current);
+        next.set(current.checked_add(1).expect("context id overflow"));
         context
     });
     DB_MEMORY.with(|slot| {
@@ -158,9 +167,22 @@ pub fn read(offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
     if dst.is_empty() {
         return Ok(());
     }
-    let end = checked_end(offset, dst.len())?;
+    let len = u64::try_from(dst.len()).map_err(|_| StableMemoryError::OffsetOverflow)?;
+    let end = offset
+        .checked_add(len)
+        .ok_or(StableMemoryError::OffsetOverflow)?;
     with_memory(|memory| {
-        ensure_memory_capacity(memory, end)?;
+        let size_bytes = memory
+            .size()
+            .checked_mul(STABLE_PAGE_SIZE)
+            .ok_or(StableMemoryError::OffsetOverflow)?;
+        if end > size_bytes {
+            return Err(StableMemoryError::ReadOutOfBounds {
+                offset,
+                len,
+                size_bytes,
+            });
+        }
         memory.read(offset, dst);
         Ok(())
     })?
@@ -297,6 +319,11 @@ pub fn reset_for_tests() {
     clear_initialization();
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
     clear_failpoint();
+}
+
+#[cfg(any(test, debug_assertions))]
+pub fn set_next_context_id_for_tests(value: u64) {
+    NEXT_CONTEXT_ID.with(|next| next.set(value));
 }
 
 #[cfg(any(test, debug_assertions))]

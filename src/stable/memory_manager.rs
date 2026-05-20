@@ -6,11 +6,12 @@
 use crate::config::STABLE_PAGE_SIZE;
 pub use crate::stable::memory_layout::MemoryId;
 use crate::stable::memory_layout::{
-    bucket_allocations_address, read_u64, write_growing, BucketCache, BucketId, VirtualSegment,
+    bucket_allocations_address, write_growing, BucketCache, BucketId, VirtualSegment,
     BUCKETS_OFFSET_IN_BYTES, BUCKETS_OFFSET_IN_PAGES, BUCKET_SIZE_IN_PAGES, HEADER_RESERVED_BYTES,
     HEADER_SIZE, LAYOUT_VERSION, MAGIC, MAX_NUM_BUCKETS, MAX_NUM_MEMORIES,
     UNALLOCATED_BUCKET_MARKER,
 };
+use crate::stable::memory_manager_validation::load_validated_layout;
 use crate::stable::raw_memory::Memory;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -109,12 +110,12 @@ impl<M: Memory> MemoryManagerInner<M> {
             memory_sizes_in_pages: [0; MAX_NUM_MEMORIES as usize],
             memory_buckets: vec![Vec::new(); MAX_NUM_MEMORIES as usize],
         };
-        manager.save_header();
         write_growing(
             &manager.memory,
             bucket_allocations_address(BucketId(0)),
             &[UNALLOCATED_BUCKET_MARKER; MAX_NUM_BUCKETS as usize],
         );
+        manager.save_header();
         manager
     }
     fn load(memory: M) -> Self {
@@ -122,31 +123,14 @@ impl<M: Memory> MemoryManagerInner<M> {
         memory.read(0, &mut header);
         assert_eq!(&header[0..3], MAGIC, "Bad magic.");
         assert_eq!(header[3], LAYOUT_VERSION, "Unsupported version.");
-
-        let allocated_buckets = u16::from_le_bytes([header[4], header[5]]);
-        let bucket_size_in_pages = u16::from_le_bytes([header[6], header[7]]);
-        let mut memory_sizes_in_pages = [0_u64; MAX_NUM_MEMORIES as usize];
-        let mut offset = 3 + 1 + 2 + 2 + HEADER_RESERVED_BYTES;
-        for size in &mut memory_sizes_in_pages {
-            *size = read_u64(&header[offset..offset + 8]);
-            offset += 8;
-        }
-
-        let mut buckets = vec![0_u8; MAX_NUM_BUCKETS as usize];
-        memory.read(bucket_allocations_address(BucketId(0)), &mut buckets);
-        let mut memory_buckets = vec![Vec::new(); MAX_NUM_MEMORIES as usize];
-        for (bucket, owner) in buckets.into_iter().enumerate() {
-            if owner != UNALLOCATED_BUCKET_MARKER {
-                memory_buckets[owner as usize].push(BucketId(bucket as u16));
-            }
-        }
+        let layout = load_validated_layout(&memory, &header);
 
         Self {
             memory,
-            allocated_buckets,
-            bucket_size_in_pages,
-            memory_sizes_in_pages,
-            memory_buckets,
+            allocated_buckets: layout.allocated_buckets,
+            bucket_size_in_pages: layout.bucket_size_in_pages,
+            memory_sizes_in_pages: layout.memory_sizes_in_pages,
+            memory_buckets: layout.memory_buckets,
         }
     }
     fn save_header(&self) {
@@ -175,13 +159,23 @@ impl<M: Memory> MemoryManagerInner<M> {
         let current_buckets = self.num_buckets_needed(old_size);
         let required_buckets = self.num_buckets_needed(new_size);
         let new_buckets = required_buckets - current_buckets;
-        let target_allocated_buckets = new_buckets + u64::from(self.allocated_buckets);
+        let Some(target_allocated_buckets) =
+            new_buckets.checked_add(u64::from(self.allocated_buckets))
+        else {
+            return -1;
+        };
         if target_allocated_buckets > MAX_NUM_BUCKETS {
             return -1;
         }
 
-        let pages_needed = BUCKETS_OFFSET_IN_PAGES
-            + u64::from(self.bucket_size_in_pages) * target_allocated_buckets;
+        let Some(data_pages) =
+            u64::from(self.bucket_size_in_pages).checked_mul(target_allocated_buckets)
+        else {
+            return -1;
+        };
+        let Some(pages_needed) = BUCKETS_OFFSET_IN_PAGES.checked_add(data_pages) else {
+            return -1;
+        };
         let current_pages = self.memory.size();
         if pages_needed > current_pages {
             let previous = self.memory.grow(pages_needed - current_pages);
@@ -196,7 +190,10 @@ impl<M: Memory> MemoryManagerInner<M> {
             let bucket = BucketId(self.allocated_buckets);
             memory_bucket.push(bucket);
             write_growing(&self.memory, bucket_allocations_address(bucket), &[id.0]);
-            self.allocated_buckets += 1;
+            self.allocated_buckets = self
+                .allocated_buckets
+                .checked_add(1)
+                .expect("allocated bucket count overflow");
         }
 
         self.memory_sizes_in_pages[id.0 as usize] = new_size;
@@ -280,10 +277,11 @@ impl<M: Memory> MemoryManagerInner<M> {
         let end = offset
             .checked_add(len)
             .unwrap_or_else(|| panic!("{id:?}: {operation} out of bounds"));
-        assert!(
-            end <= self.memory_size(id) * STABLE_PAGE_SIZE,
-            "{id:?}: {operation} out of bounds"
-        );
+        let capacity = self
+            .memory_size(id)
+            .checked_mul(STABLE_PAGE_SIZE)
+            .unwrap_or_else(|| panic!("{id:?}: {operation} out of bounds"));
+        assert!(end <= capacity, "{id:?}: {operation} out of bounds");
     }
 
     fn bucket_size_in_bytes(&self) -> u64 {
