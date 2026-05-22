@@ -288,7 +288,6 @@ dependencies = [
  "candid",
  "cc",
  "ic-cdk",
- "ic-stable-structures",
  "serde",
  "thiserror 2.0.18",
 ]
@@ -300,17 +299,7 @@ dependencies = [
  "candid",
  "ic-cdk",
  "ic-sqlite-vfs",
- "ic-stable-structures",
  "serde",
-]
-
-[[package]]
-name = "ic-stable-structures"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee3372ddc0cf2a747fc26ce2d075a240ed6bfab151e63bc70109e8967f7ce6f"
-dependencies = [
- "ic_principal",
 ]
 
 [[package]]

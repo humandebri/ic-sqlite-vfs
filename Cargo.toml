@@ -32,7 +32,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 candid = "0.10"
 ic-cdk = "0.20.1"
-ic-stable-structures = "0.7"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
@@ -40,4 +39,6 @@ thiserror = "2"
 cc = "1.2"
 
 [dev-dependencies]
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 serial_test = "3"
+upstream-ic-stable-structures = { package = "ic-stable-structures", version = "=0.7.0" }

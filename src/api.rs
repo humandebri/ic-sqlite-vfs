@@ -6,13 +6,11 @@
 use crate::db::migrate::Migration;
 use crate::db::value::{to_sql_ref, ToSql};
 use crate::stable::memory;
+use crate::stable::memory_manager::{MemoryId, MemoryManager};
 use crate::stable::meta::Superblock;
+use crate::stable::raw_memory::DefaultMemoryImpl;
 use crate::Db;
 use candid::CandidType;
-use ic_stable_structures::{
-    memory_manager::{MemoryId, MemoryManager},
-    DefaultMemoryImpl,
-};
 use serde::Deserialize;
 use std::cell::RefCell;
 
@@ -93,10 +91,11 @@ fn init_db() {
 #[ic_cdk::update]
 fn kv_put(key: String, value: String) -> Result<(), String> {
     Db::update(|connection| {
-        connection.execute(
+        connection.execute_text_text(
             "INSERT INTO kv(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            crate::params![key, value],
+            &key,
+            &value,
         )
     })
     .map_err(error_text)
@@ -134,10 +133,7 @@ fn kv_get_many(keys: Vec<String>) -> Result<Vec<Option<String>>, String> {
 #[ic_cdk::update]
 fn kv_set_note(key: String, note: String) -> Result<(), String> {
     Db::update(|connection| {
-        connection.execute(
-            "UPDATE kv SET note = ?1 WHERE key = ?2",
-            crate::params![note, key],
-        )
+        connection.execute_text_text("UPDATE kv SET note = ?1 WHERE key = ?2", &note, &key)
     })
     .map_err(error_text)
 }

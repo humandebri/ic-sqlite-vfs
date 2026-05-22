@@ -3,7 +3,7 @@
 //! The VFS recognizes `/main.db` as stable memory and treats every other opened
 //! file as volatile heap storage. WAL and mmap callbacks are intentionally absent.
 
-use crate::config::MAIN_DB_PATH;
+use crate::config::{MAIN_DB_PATH, VFS_NAME_NUL};
 use crate::sqlite_vfs::ffi;
 use crate::sqlite_vfs::file::{self, FileKind};
 use crate::sqlite_vfs::temp::TempFile;
@@ -40,7 +40,6 @@ pub static mut VFS: ffi::sqlite3_vfs = ffi::sqlite3_vfs {
     xNextSystemCall: None,
 };
 
-static VFS_NAME_NUL: &[u8] = b"icstable\0";
 static PREPARE_ONCE: Once = Once::new();
 
 thread_local! {
@@ -99,7 +98,7 @@ unsafe extern "C" fn x_open(
     flags: c_int,
     out_flags: *mut c_int,
 ) -> c_int {
-    let path = path_from_sqlite(name);
+    let opens_main_db = is_main_db_path(name);
     let options = classify_open_flags(flags);
     let context = match memory::active_context_id() {
         Ok(context) => context,
@@ -115,7 +114,7 @@ unsafe extern "C" fn x_open(
         *out_flags = flags;
     }
 
-    if is_main_db(path.as_deref()) {
+    if opens_main_db {
         let Ok(block) = Superblock::load() else {
             record_last_error(ffi::SQLITE_CANTOPEN, "failed to load SQLite superblock");
             return ffi::SQLITE_CANTOPEN;
@@ -148,8 +147,7 @@ unsafe extern "C" fn x_delete(
     name: *const c_char,
     _sync_dir: c_int,
 ) -> c_int {
-    let path = path_from_sqlite(name);
-    if is_main_db(path.as_deref()) {
+    if is_main_db_path(name) {
         return ffi::SQLITE_IOERR_DELETE;
     }
     ffi::SQLITE_OK
@@ -161,8 +159,7 @@ unsafe extern "C" fn x_access(
     _flags: c_int,
     out: *mut c_int,
 ) -> c_int {
-    let path = path_from_sqlite(name);
-    *out = if is_main_db(path.as_deref()) { 1 } else { 0 };
+    *out = if is_main_db_path(name) { 1 } else { 0 };
     ffi::SQLITE_OK
 }
 
@@ -178,13 +175,16 @@ unsafe extern "C" fn x_full_pathname(
     if max_len == 0 {
         return ffi::SQLITE_CANTOPEN;
     }
-    let input = path_from_sqlite(name).unwrap_or_else(|| MAIN_DB_PATH.to_string());
-    let path = if is_main_db(Some(&input)) {
-        MAIN_DB_PATH
+    let bytes = if name.is_null() {
+        MAIN_DB_PATH.as_bytes()
     } else {
-        input.as_str()
+        let input = CStr::from_ptr(name).to_bytes();
+        if normalized_main_path_bytes(input) == MAIN_DB_PATH.as_bytes() {
+            MAIN_DB_PATH.as_bytes()
+        } else {
+            input
+        }
     };
-    let bytes = path.as_bytes();
     if bytes.len() >= max_len {
         return ffi::SQLITE_CANTOPEN;
     }
@@ -225,11 +225,7 @@ unsafe extern "C" fn x_current_time(vfs: *mut ffi::sqlite3_vfs, out: *mut f64) -
     if rc != ffi::SQLITE_OK {
         return rc;
     }
-    let parsed = int_time
-        .to_string()
-        .parse::<f64>()
-        .unwrap_or(210_866_760_000_000.0);
-    *out = parsed / 86_400_000.0;
+    *out = (int_time as f64) / 86_400_000.0;
     ffi::SQLITE_OK
 }
 
@@ -334,25 +330,21 @@ pub(crate) fn classify_open_flags(flags: c_int) -> OpenOptions {
     }
 }
 
-fn is_main_db(path: Option<&str>) -> bool {
-    match path {
-        Some(value) => normalized_main_path(value) == MAIN_DB_PATH,
-        None => false,
-    }
-}
-
-fn normalized_main_path(path: &str) -> &str {
-    let without_scheme = path.strip_prefix("file:").unwrap_or(path);
-    without_scheme
-        .split_once('?')
-        .map_or(without_scheme, |(path, _)| path)
-}
-
-unsafe fn path_from_sqlite(name: *const c_char) -> Option<String> {
+unsafe fn is_main_db_path(name: *const c_char) -> bool {
     if name.is_null() {
-        return None;
+        return false;
     }
-    Some(CStr::from_ptr(name).to_string_lossy().into_owned())
+    normalized_main_path_bytes(CStr::from_ptr(name).to_bytes()) == MAIN_DB_PATH.as_bytes()
+}
+
+fn normalized_main_path_bytes(path: &[u8]) -> &[u8] {
+    let without_scheme = path.strip_prefix(b"file:").unwrap_or(path);
+    for (index, byte) in without_scheme.iter().enumerate() {
+        if *byte == b'?' {
+            return &without_scheme[..index];
+        }
+    }
+    without_scheme
 }
 
 fn current_time_nanos() -> u64 {
@@ -373,7 +365,9 @@ fn current_time_nanos() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_open_flags, x_get_last_error, x_open, OpenAccess, OpenKind};
+    use super::{
+        classify_open_flags, x_full_pathname, x_get_last_error, x_open, OpenAccess, OpenKind,
+    };
     use crate::sqlite_vfs::{ffi, lock};
     use crate::stable::memory;
     use std::ffi::{CStr, CString};
@@ -506,6 +500,41 @@ mod tests {
             )
         };
         assert_eq!(rc, ffi::SQLITE_CANTOPEN);
+    }
+
+    #[test]
+    fn x_full_pathname_normalizes_main_db_without_touching_other_paths() {
+        let main = CString::new("file:/main.db?mode=ro").unwrap();
+        let temp = CString::new("/tmp/sqlite-temp").unwrap();
+        let mut out = [0_i8; 64];
+
+        let rc = unsafe {
+            x_full_pathname(
+                ptr::null_mut(),
+                main.as_ptr(),
+                i32::try_from(out.len()).unwrap(),
+                out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        assert_eq!(
+            unsafe { CStr::from_ptr(out.as_ptr()) }.to_str().unwrap(),
+            "/main.db"
+        );
+
+        let rc = unsafe {
+            x_full_pathname(
+                ptr::null_mut(),
+                temp.as_ptr(),
+                i32::try_from(out.len()).unwrap(),
+                out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        assert_eq!(
+            unsafe { CStr::from_ptr(out.as_ptr()) }.to_str().unwrap(),
+            "/tmp/sqlite-temp"
+        );
     }
 
     #[test]

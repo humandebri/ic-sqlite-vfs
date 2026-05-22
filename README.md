@@ -5,12 +5,12 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 SQLite VFS for the Internet Computer that stores the SQLite database image
-inside a dedicated `ic-stable-structures` virtual memory.
+inside a dedicated MemoryManager-compatible virtual memory.
 
 ```text
 SQLite pager
   -> custom sqlite3_vfs: icstable
-  -> ic-stable-structures VirtualMemory
+  -> ic-sqlite-vfs VirtualMemory
   -> selected MemoryId pages
 ```
 
@@ -26,9 +26,9 @@ The core VFS, transaction facade, import/export flow, and upgrade persistence
 tests are in place. This project has not promised compatibility for deployed
 canisters yet. `0.x` releases may introduce breaking changes.
 
-`0.2.0` is the first public MemoryManager-backed release. Applications must pass
-a dedicated `VirtualMemory<DefaultMemoryImpl>` from their own `MemoryManager`
-to `Db::init(memory)`.
+`0.2.0` is the first public MemoryManager-backed release. The current crate
+ships a minimal MemoryManager-compatible fork, so consumers no longer need a
+direct `ic-stable-structures` dependency for SQLite storage.
 
 See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `0.x` compatibility
 contract.
@@ -52,8 +52,8 @@ This crate uses the shorter path:
 SQLite -> sqlite3_io_methods xRead/xWrite -> selected VirtualMemory
 ```
 
-Why not wasi2ic? In the local KV benchmark, the direct VFS path uses 5.4x fewer
-instructions for reset + insert and 4.6x fewer for insert/update.
+Why not wasi2ic? In the local KV benchmark, the direct VFS path uses 7.7x fewer
+instructions for reset + insert and 6.5x fewer for insert/update.
 
 ## Stable Memory Ownership
 
@@ -70,7 +70,8 @@ virtual offset 64KiB..       immutable SQLite pages, segment tables, and root ta
 ```
 
 The crate does not own the canister's raw stable memory. Raw stable memory is
-managed by the application's single `MemoryManager<DefaultMemoryImpl>`.
+managed by a `MemoryManager<DefaultMemoryImpl>` with the same stable layout as
+the `ic-stable-structures` 0.7 MemoryManager.
 
 `Db::init(memory)` is a single global initialization point for one SQLite
 database facade in the current Wasm instance. Calling it twice returns
@@ -80,8 +81,8 @@ handle. Each handle owns one independent SQLite image. This is not a mount-id
 or filename namespace inside one image; SQLite still opens `/main.db` for each
 handle, and the active context selects the backing `VirtualMemory`.
 
-The underlying `ic-stable-structures` `MemoryManager` supports `MemoryId`
-values `0..=254`; `255` is reserved internally as the unallocated marker.
+The bundled MemoryManager-compatible layout supports `MemoryId` values
+`0..=254`; `255` is reserved internally as the unallocated marker.
 Per-archive or per-slot databases are therefore a bounded design: one slot uses
 one `MemoryId`, one `DbHandle`, and one SQLite image. The slot catalog
 (`archive_id -> slot_id -> MemoryId`) belongs to the consuming canister and
@@ -134,24 +135,26 @@ run `db_refresh_checksum` to recompute the checksum, store it, and clear
 Update connections use:
 
 ```sql
-PRAGMA page_size = 16384;
 PRAGMA journal_mode = MEMORY;
 PRAGMA synchronous = OFF;
 PRAGMA temp_store = MEMORY;
 PRAGMA locking_mode = EXCLUSIVE;
 PRAGMA foreign_keys = ON;
 PRAGMA cache_size = -32768;
-PRAGMA busy_timeout = 0;
 ```
+
+The first write against an empty image also applies `PRAGMA page_size = 16384`
+before schema creation. Existing database images already carry their page size
+in the SQLite header.
 
 Read-only query connections use:
 
 ```sql
 PRAGMA cache_size = -32768;
 PRAGMA query_only = ON;
+PRAGMA locking_mode = EXCLUSIVE;
 PRAGMA foreign_keys = ON;
 PRAGMA temp_store = MEMORY;
-PRAGMA busy_timeout = 0;
 ```
 
 Durability is based on IC message atomicity and a heap write overlay, not
@@ -224,7 +227,6 @@ only for this repository's reference canister.
 ```toml
 [dependencies]
 ic-sqlite-vfs = { version = "0.2.2", default-features = false, features = ["sqlite-precompiled"] }
-ic-stable-structures = "0.7"
 ```
 
 `sqlite-precompiled` links the vendored `wasm32-unknown-unknown` SQLite archive
@@ -244,11 +246,7 @@ functions.
 
 ```rust
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::{params, Db};
-use ic_stable_structures::{
-    memory_manager::{MemoryId, MemoryManager},
-    DefaultMemoryImpl,
-};
+use ic_sqlite_vfs::{params, Db, DefaultMemoryImpl, MemoryId, MemoryManager};
 use std::cell::RefCell;
 
 const SQLITE_MEMORY_ID: MemoryId = MemoryId::new(120);
@@ -437,7 +435,7 @@ crate provides `sqlite3_os_init()` and registers only the `icstable` VFS.
 
 ## Benchmarks
 
-Measured locally on 2026-05-15 with PocketIC. The main metric is IC
+Measured locally on 2026-05-16 with PocketIC. The main metric is IC
 instructions from `ic_cdk::api::performance_counter(0)`.
 
 The benchmark harness lives in `benchmarks/kv-canister` and can be run with:
@@ -462,22 +460,40 @@ stops before `BenchReport` metadata collection.
 
 | Workload | ic-sqlite-vfs | wasi2ic + ic-rusqlite | Result |
 |---|---:|---:|---:|
-| reset + insert, 1000 rows | 16.01M | 86.50M | 5.4x fewer instructions |
-| insert only into empty table, 1000 rows | 15.50M | 85.89M | 5.5x fewer instructions |
-| insert only into empty table, 5000 rows | 83.81M | 440.57M | 5.3x fewer instructions |
-| append insert, 5000 existing + 1000 new | 19.10M | 88.96M | 4.7x fewer instructions |
-| insert/update upsert, 1000 rows | 19.20M | 89.48M | 4.7x fewer instructions |
-| update only by primary key, 1000 rows | 22.33M | 83.57M | 3.7x fewer instructions |
-| update only by primary key, 5000 rows | 115.33M | 425.24M | 3.7x fewer instructions |
-| point read, 1 key | 0.058M | 0.015M | wasi2ic lower on this harness |
-| point read, 10 keys | 0.187M | 0.109M | wasi2ic lower on this harness |
-| point read, 100 keys | 1.49M | 1.06M | wasi2ic lower on this harness |
-| point read, 1000 keys | 14.83M | 10.70M | wasi2ic lower on this harness |
-| bulk read ordered scan, 100 rows | 0.264M | 0.233M | wasi2ic lower on this harness |
-| bulk read ordered scan, 1000 rows | 1.60M | 1.66M | ic-sqlite-vfs slightly lower |
-| bulk read ordered scan, 5000 rows | 7.59M | 7.99M | ic-sqlite-vfs slightly lower |
-| `WHERE key IN (...)`, 100 keys | 1.77M | 1.67M | wasi2ic lower on this harness |
-| `WHERE key IN (...)`, 1000 keys | 19.80M | 18.52M | wasi2ic lower on this harness |
+| reset + insert, 1000 rows | 10.69M | 86.50M | 8.1x fewer instructions |
+| insert only into empty table, 1000 rows | 10.18M | 85.89M | 8.4x fewer instructions |
+| insert only into empty table, 5000 rows | 60.44M | 440.57M | 7.3x fewer instructions |
+| append insert, 5000 existing + 1000 new | 13.46M | 88.96M | 6.6x fewer instructions |
+| insert/update upsert, 1000 rows | 13.23M | 89.48M | 6.8x fewer instructions |
+| update only by primary key, 1000 rows | 16.67M | 83.57M | 5.0x fewer instructions |
+| update only by primary key, 5000 rows | 90.64M | 425.24M | 4.7x fewer instructions |
+| point read, 1 key | 0.048M | 0.015M | wasi2ic lower on this harness |
+| point read, 10 keys | 0.134M | 0.109M | wasi2ic lower on this harness |
+| point read, 100 keys | 1.01M | 1.06M | ic-sqlite-vfs lower |
+| point read, 1000 keys | 10.03M | 10.70M | ic-sqlite-vfs lower |
+| bulk read ordered scan, 100 rows | 0.238M | 0.233M | wasi2ic lower on this harness |
+| bulk read ordered scan, 1000 rows | 1.38M | 1.66M | ic-sqlite-vfs lower |
+| bulk read ordered scan, 5000 rows | 6.51M | 7.99M | ic-sqlite-vfs lower |
+| `WHERE key IN (...)`, 100 keys | 1.36M | 1.67M | ic-sqlite-vfs lower |
+| `WHERE key IN (...)`, 1000 keys | 14.74M | 18.52M | ic-sqlite-vfs lower |
+
+Additional read-helper checks from the same 1000-row PocketIC run:
+
+| Workload | ic-sqlite-vfs |
+|---|---:|
+| repeated public helper point read, 1000 keys | 12.53M |
+| repeated prepare-each point read, 1000 keys | 40.01M |
+
+Additional limit-case checks from the same PocketIC run:
+
+| Workload | ic-sqlite-vfs |
+|---|---:|
+| large blob insert/readback, 64 KiB | 0.94M |
+| large blob insert/readback, 256 KiB | 2.21M |
+| unbounded `ORDER BY`, 5000 rows | 66.16M |
+| join, 2000 rows | 16.71M |
+| repeated single-row update, 1000-row DB, 20 writes | 3.15M |
+| repeated single-row update, 5000-row DB, 20 writes | 3.20M |
 
 Repeated point reads execute one SQLite statement per key inside the canister.
 They mostly measure bind/reset/step wrapper overhead, not stable-memory I/O.
@@ -490,7 +506,20 @@ structures under the application's memory layout.
 
 `npm run test:pocketic:perf` also logs `bench_read_profile`, which breaks the
 point-read path into open, prepare, key formatting, bind/reset, step, column
-read, and VFS read metrics.
+read, and VFS read metrics. `bench_get_many_in_profile` breaks the 1000-key
+`WHERE key IN (...)` query into SQL build, key build, prepare, bind, row scan,
+and VFS read metrics. It also logs `bench_write_profile`, which breaks the write
+path into open, prepare, formatting, execute, VFS read/write, stable write,
+stable grow, and commit phase metrics. `bench_growth_profile` breaks repeated
+single-row updates into update open, formatting, prepare, execute, changes,
+VFS/stable writes, stable grow, and commit metrics.
+In the 1000-key `WHERE key IN (...)` profile, row scan is about 10.32M
+instructions and SQLite prepare is about 3.57M instructions.
+In the 1000-row upsert profile, SQLite statement execution dominates; update
+open work is about 0.007M instructions after the write connection is warm.
+In the 20-write growth profile, cached UPDATE statements reduce prepare work to
+about 0.06M instructions total, and full-page overwrites avoid stable-memory
+reads.
 The wasi2ic numbers are measured with `ic-rusqlite 0.5.0`, `precompiled`,
 `wasm32-wasip1`, and `wasi2ic 0.2.16`.
 
@@ -498,14 +527,14 @@ Stable memory after the 1000-row clean reset:
 
 | Implementation | Stable memory |
 |---|---:|
-| ic-sqlite-vfs | 0.50 MB |
+| ic-sqlite-vfs | 0.25 MB |
 | wasi2ic + ic-rusqlite | 80.06 MB |
 
 Clean 5000-row DB stats:
 
 | Implementation | DB size | SQLite page size | SQLite pages | Stable pages |
 |---|---:|---:|---:|---:|
-| ic-sqlite-vfs | 278,528 bytes | 16,384 bytes | 17 | 10 |
+| ic-sqlite-vfs | 278,528 bytes | 16,384 bytes | 17 | 7 |
 | wasi2ic + ic-rusqlite | 233,472 bytes | 4,096 bytes | 57 | 1281 |
 
 Wasm size:
@@ -518,23 +547,23 @@ Wasm size:
 The instruction gap comes from removing WASI fd emulation and mapping SQLite
 pager I/O directly to stable memory offsets.
 
-Native performance probe, measured locally on 2026-05-15 with
+Native performance probe, measured locally on 2026-05-19 with
 `cargo test --test sqlite_perf_probe -- --ignored --nocapture`:
 
 | Rows | batch insert | single update after insert | refresh checksum | db_size |
 |---:|---:|---:|---:|---:|
 | 100 | 0 ms | 0 ms | 0 ms | 64 KiB |
-| 1,000 | 1 ms | 0 ms | 0 ms | 144 KiB |
+| 1,000 | 0 ms | 0 ms | 0 ms | 144 KiB |
 | 10,000 | 12 ms | 0 ms | 2 ms | 672 KiB |
-| 20,000 | 27 ms | 0 ms | 5 ms | 1.25 MiB |
-| 100,000 | 133 ms | 0 ms | 25 ms | 6.09 MiB |
+| 20,000 | 25 ms | 0 ms | 5 ms | 1.25 MiB |
+| 100,000 | 129 ms | 0 ms | 25 ms | 6.09 MiB |
 
 For 20,000 rows in the same native probe:
 
 | Workload | elapsed | xRead calls | stable data reads | root hit/miss | segment hit/miss | superblock loads |
 |---|---:|---:|---:|---:|---:|---:|
-| indexed point reads | 52 ms | 20,080 | 20,080 | 79 / 1 | 79 / 1 | 0 |
-| `LIKE '%stable%'` scan | 2 ms | 1 | 1 | 0 / 0 | 0 / 0 | 0 |
+| indexed point reads | 25 ms | 81 | 80 | 78 / 1 | 78 / 1 | 0 |
+| `LIKE '%stable%'` scan | 2 ms | 0 | 0 | 0 / 0 | 0 / 0 | 0 |
 | full logical export | 0 ms | 0 | 80 | 80 / 0 | 80 / 0 | 0 |
 
 The write workload numbers exclude a full DB checksum scan from the commit
@@ -548,6 +577,7 @@ cargo fmt --check
 bash scripts/check-no-await.sh
 cargo test
 cargo test --features canister-api
+cargo +nightly fuzz run state_ops -- -max_total_time=30
 cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled
 cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api
 icp build
@@ -561,6 +591,7 @@ Current coverage:
 - VFS read/write/truncate/filesize behavior
 - rollback on SQL error
 - read-only query mode
+- read and write connection cache invalidation around updates, import, and compact
 - reusable statements and 32-entry LRU cached prepared statements
 - chunked export/import with checksum verification
 - failed import preserving the existing database
@@ -569,6 +600,7 @@ Current coverage:
 - segmented page-map commit and truncate behavior
 - stable write trap, grow failure, SQLite step error, and panic during update
 - fuzz-style deterministic operation sequences
+- property-based and libFuzzer state-machine operation sequences
 - long-running transaction endurance
 - PocketIC upgrade persistence
 - wasm import audit: only `ic0.*`

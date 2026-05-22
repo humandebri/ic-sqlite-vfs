@@ -227,6 +227,29 @@ fn stable_write_trap_ordinals_preserve_active_image_after_restart() {
 
 #[test]
 #[serial]
+fn compact_write_failure_keeps_active_image_after_restart() {
+    for ordinal in [1_u64, 2, 3] {
+        reset();
+        seed();
+        let before = snapshot();
+        let memory_before = memory::snapshot_for_tests();
+
+        memory::set_failpoint(MemoryFailpoint::TrapAfterWrite { ordinal });
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = Db::compact();
+        }));
+
+        assert!(
+            result.is_err(),
+            "compact write ordinal {ordinal} did not trap"
+        );
+        restart_after_failed_message(memory_before);
+        assert_database_unchanged(&before);
+    }
+}
+
+#[test]
+#[serial]
 fn stable_grow_failure_keeps_active_image_unchanged() {
     reset();
     seed();

@@ -83,7 +83,7 @@ fn batch_insert_update_and_checksum_scale() {
             for index in 0..rows {
                 let key = format!("k{index:08}");
                 let value = format!("value-{index:08}-stable-vfs");
-                statement.execute(params![key, value])?;
+                statement.execute_text_text(&key, &value)?;
             }
             Ok(())
         })
@@ -140,7 +140,7 @@ fn indexed_read_scan_and_export_scale() {
         for index in 0..rows {
             let key = format!("k{index:08}");
             let value = format!("value-{index:08}-stable-vfs");
-            statement.execute(params![key, value])?;
+            statement.execute_text_text(&key, &value)?;
         }
         Ok(())
     })

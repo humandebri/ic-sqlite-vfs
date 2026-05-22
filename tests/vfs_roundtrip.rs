@@ -1,13 +1,11 @@
-use ic_sqlite_vfs::config::SQLITE_CACHE_SIZE_KIB;
+use ic_sqlite_vfs::config::{SQLITE_CACHE_SIZE_KIB, SQLITE_PAGE_SIZE};
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::sqlite_vfs::{self, ffi, lock, stable_blob};
 use ic_sqlite_vfs::stable::memory;
+use ic_sqlite_vfs::stable::memory_manager::{MemoryId, MemoryManager};
 use ic_sqlite_vfs::stable::meta::Superblock;
+use ic_sqlite_vfs::stable::raw_memory::DefaultMemoryImpl;
 use ic_sqlite_vfs::{params, Db, DbError, DbHandle};
-use ic_stable_structures::{
-    memory_manager::{MemoryId, MemoryManager},
-    DefaultMemoryImpl,
-};
 use serial_test::serial;
 use std::ffi::{c_void, CStr, CString};
 use std::ptr;
@@ -371,6 +369,32 @@ fn reusable_statement_handles_repeated_binds() {
 
 #[test]
 #[serial]
+fn text_text_execute_reuses_borrowed_bindings() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE borrowed_text(k TEXT PRIMARY KEY, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+
+    Db::update(|connection| {
+        let mut statement =
+            connection.prepare("INSERT INTO borrowed_text(k, v) VALUES (?1, ?2)")?;
+        statement.execute_text_text("a", "one")?;
+        statement.execute_text_text("b", "two")
+    })
+    .unwrap();
+
+    let values = Db::query(|connection| {
+        connection.query_column::<String>("SELECT v FROM borrowed_text ORDER BY k", params![])
+    })
+    .unwrap();
+
+    assert_eq!(values, vec!["one", "two"]);
+}
+
+#[test]
+#[serial]
 fn prepared_statement_cache_reuses_sql_with_repeated_binds() {
     reset();
     Db::migrate(&[Migration {
@@ -399,6 +423,63 @@ fn prepared_statement_cache_reuses_sql_with_repeated_binds() {
     })
     .unwrap();
     assert_eq!(values, vec!["one".to_string(), "two".to_string()]);
+}
+
+#[test]
+#[serial]
+fn blob_boundaries_survive_compact_export_and_import() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE boundary_blob(id INTEGER PRIMARY KEY, body BLOB NOT NULL);",
+    }])
+    .unwrap();
+
+    let page = usize::try_from(SQLITE_PAGE_SIZE).unwrap();
+    let blobs = vec![
+        deterministic_blob(1, 1),
+        deterministic_blob(2, page - 1),
+        deterministic_blob(3, page),
+        deterministic_blob(4, page + 1),
+        deterministic_blob(5, page * 2 + 17),
+    ];
+
+    Db::update(|connection| {
+        let mut statement =
+            connection.prepare("INSERT INTO boundary_blob(id, body) VALUES (?1, ?2)")?;
+        for (index, blob) in blobs.iter().enumerate() {
+            statement.execute(params![i64::try_from(index + 1).unwrap(), blob.clone()])?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_boundary_blobs(&blobs);
+
+    Db::compact().unwrap();
+    assert_boundary_blobs(&blobs);
+
+    let db_size = Superblock::load().unwrap().db_size;
+    let checksum = Db::refresh_checksum().unwrap();
+    let image = Db::export_chunk(0, db_size).unwrap();
+    Db::begin_import(db_size, checksum).unwrap();
+    Db::import_chunk(0, &image).unwrap();
+    Db::finish_import().unwrap();
+    assert_boundary_blobs(&blobs);
+}
+
+fn assert_boundary_blobs(expected: &[Vec<u8>]) {
+    let rows = Db::query(|connection| {
+        connection.query_column::<Vec<u8>>("SELECT body FROM boundary_blob ORDER BY id", params![])
+    })
+    .unwrap();
+    assert_eq!(rows, expected);
+    assert_eq!(Db::integrity_check().unwrap(), "ok");
+}
+
+fn deterministic_blob(seed: u8, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|index| seed.wrapping_add(index as u8).wrapping_mul(17))
+        .collect()
 }
 
 #[test]
@@ -523,20 +604,38 @@ fn compact_preserves_logical_database_contents() {
     }])
     .unwrap();
     Db::update(|connection| {
-        connection.execute_batch("INSERT INTO compacted(k, v) VALUES ('key', 'value')")
+        let mut statement = connection.prepare("INSERT INTO compacted(k, v) VALUES (?1, ?2)")?;
+        for index in 0..600 {
+            let key = format!("key-{index:04}");
+            let value = format!("value-{index:04}");
+            statement.execute(params![key, value])?;
+        }
+        Ok(())
     })
     .unwrap();
 
     let checksum_before = Db::db_checksum().unwrap();
+    let page_count_before = Superblock::load().unwrap().page_count;
     Db::compact().unwrap();
+    let block = Superblock::load().unwrap();
+    assert_ne!(
+        block.page_table_offset % ic_sqlite_vfs::config::STABLE_PAGE_SIZE,
+        0
+    );
     let checksum_after = Db::db_checksum().unwrap();
     let value = Db::query(|connection| {
-        connection.query_scalar::<String>("SELECT v FROM compacted WHERE k = 'key'", params![])
+        connection.query_scalar::<String>("SELECT v FROM compacted WHERE k = 'key-0042'", params![])
+    })
+    .unwrap();
+    let count = Db::query(|connection| {
+        connection.query_scalar::<i64>("SELECT COUNT(*) FROM compacted", params![])
     })
     .unwrap();
 
     assert_eq!(checksum_after, checksum_before);
-    assert_eq!(value, "value");
+    assert_eq!(block.page_count, page_count_before);
+    assert_eq!(value, "value-0042");
+    assert_eq!(count, 600);
     assert_eq!(Db::integrity_check().unwrap(), "ok");
 }
 
@@ -821,6 +920,11 @@ fn import_replaces_cached_read_connection() {
     Db::begin_import(db_size, checksum).unwrap();
     Db::import_chunk(0, &old_image).unwrap();
     Db::finish_import().unwrap();
+    let block = Superblock::load().unwrap();
+    assert_ne!(
+        block.page_table_offset % ic_sqlite_vfs::config::STABLE_PAGE_SIZE,
+        0
+    );
     let imported = Db::query(|connection| {
         connection.query_scalar::<String>(
             "SELECT v FROM import_cache_guard WHERE k = 'key'",
@@ -830,6 +934,61 @@ fn import_replaces_cached_read_connection() {
     .unwrap();
 
     assert_eq!(imported, "old");
+
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE import_cache_guard SET v = ?1 WHERE k = 'key'",
+            params!["after-import"],
+        )
+    })
+    .unwrap();
+    let after_import_update = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM import_cache_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(after_import_update, "after-import");
+}
+
+#[test]
+#[serial]
+fn update_is_rejected_during_import_after_write_connection_cache_exists() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE import_update_guard(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO import_update_guard(k, v) VALUES ('key', 'before')")
+    })
+    .unwrap();
+
+    Db::begin_import(1, 0).unwrap();
+    let result = Db::update(|connection| {
+        connection.execute(
+            "UPDATE import_update_guard SET v = ?1 WHERE k = 'key'",
+            params!["after"],
+        )
+    });
+    assert!(matches!(
+        result,
+        Err(DbError::Stable(
+            memory::StableMemoryError::ImportAlreadyStarted
+        ))
+    ));
+    Db::cancel_import().unwrap();
+
+    let value = Db::query(|connection| {
+        connection.query_scalar::<String>(
+            "SELECT v FROM import_update_guard WHERE k = 'key'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(value, "before");
 }
 
 #[test]

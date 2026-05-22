@@ -1,0 +1,10 @@
+[[targets]]
+display_name = "virtual_segment_contains"
+function = "virtual_segment_contains"
+function_path = "virtual_segment_contains"
+file = "src/stable/memory_layout.rs"
+target_id = "ce18b0fedc81f0136422479b66e0e20dc18354d272670aef58a1154157d94fbe"
+slug = "virtual_segment_contains-b6aa9c30"
+source_hash = "b6aa9c30b67da7652d506ea7135e1b82f9490ac7bed2126ddf90c6c5053980d5"
+semantic_hash = "372aa7809ccf86da760b91b83ffa414f0f104b1c6ef3a219dd408ad88ba69dc9"
+created_at = "2026-05-19T01:18:36Z"

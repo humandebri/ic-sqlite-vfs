@@ -1,8 +1,8 @@
 # Migrating from ic-sqlite or ic-rusqlite
 
 `ic-sqlite-vfs` is not a drop-in `rusqlite` wrapper. It stores SQLite directly
-inside a caller-provided `MemoryManager` virtual memory, then exposes database
-access through synchronous `Db::update` and `Db::query` closures.
+inside a MemoryManager-compatible virtual memory, then exposes database access
+through synchronous `Db::update` and `Db::query` closures.
 
 ## Initialization
 
@@ -10,11 +10,7 @@ Choose one stable `MemoryId` for SQLite and keep it unchanged across upgrades.
 Do not reuse that `MemoryId` for another stable structure.
 
 ```rust
-use ic_sqlite_vfs::Db;
-use ic_stable_structures::{
-    memory_manager::{MemoryId, MemoryManager},
-    DefaultMemoryImpl,
-};
+use ic_sqlite_vfs::{Db, DefaultMemoryImpl, MemoryId, MemoryManager};
 use std::cell::RefCell;
 
 const SQLITE_MEMORY_ID: MemoryId = MemoryId::new(120);
@@ -48,8 +44,9 @@ stored slot catalog.
 The consuming canister owns that slot catalog. Store
 `archive_id -> slot_id -> MemoryId` in stable state, choose the usable
 `MemoryId` range before launch, and never move an existing slot to another
-`MemoryId`. The supported `ic-stable-structures` line allows `MemoryId` values
-`0..=254`; `255` is reserved internally and `MemoryId::new(255)` is invalid.
+`MemoryId`. The bundled MemoryManager-compatible layout allows `MemoryId`
+values `0..=254`; `255` is reserved internally and `MemoryId::new(255)` is
+invalid.
 Index DBs, catalog DBs, metadata stores, and reserved ranges consume the same
 finite ID space.
 
@@ -126,6 +123,7 @@ let value = Db::query(|connection| {
 | `with_connection(|conn| ...)` for reads | `Db::query(|conn| ...)` |
 | `conn.execute(sql, params)` | `conn.execute(sql, params)` |
 | `conn.execute_batch(sql)` | `conn.execute_batch(sql)` |
+| `conn.changes()` | `conn.changes()` |
 | `conn.query_row(sql, params, f)` | `conn.query_row(sql, params, f)` |
 | `conn.query_map(sql, params, f)` | `conn.query_map(sql, params, f)` returning `Vec<T>` |
 | `conn.query_all(sql, params, f)` | Same collected `Vec<T>` behavior as `query_map` |
