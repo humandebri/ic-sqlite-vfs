@@ -26,7 +26,8 @@ pub use value::{Null, ToSql, Value, NULL};
 
 thread_local! {
     static READ_CONNECTIONS: RefCell<BTreeMap<ContextId, Rc<Connection>>> = const { RefCell::new(BTreeMap::new()) };
-    static ACTIVE_READ_CONNECTIONS: RefCell<BTreeMap<ContextId, usize>> = const { RefCell::new(BTreeMap::new()) };
+    static WRITE_CONNECTIONS: RefCell<BTreeMap<ContextId, Rc<Connection>>> = const { RefCell::new(BTreeMap::new()) };
+    static ACTIVE_READ_CONNECTIONS: RefCell<Vec<(ContextId, usize)>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -96,10 +97,12 @@ impl Db {
             error => DbError::Stable(error),
         })?;
         clear_read_connection(context);
+        clear_write_connection(context);
         let handle = DbHandle::from_context(context);
         let result = handle.initialize();
         if result.is_err() {
             clear_read_connection(context);
+            clear_write_connection(context);
             memory::clear_failed_initialization(context);
         }
         result
@@ -174,8 +177,10 @@ impl DbHandle {
     pub fn init(memory: DbMemory) -> Result<Self, DbError> {
         let handle = Self::from_context(memory::init_context(memory));
         clear_read_connection(handle.context);
+        clear_write_connection(handle.context);
         if let Err(error) = handle.initialize() {
             clear_read_connection(handle.context);
+            clear_write_connection(handle.context);
             memory::clear_failed_initialization(handle.context);
             return Err(error);
         }
@@ -206,11 +211,14 @@ impl DbHandle {
         self.with_context(|| {
             reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
-            stable_blob::begin_update()?;
+            let db_size = stable_blob::begin_update()?;
             let _overlay_guard = OverlayGuard;
-            let connection = connection::open_read_write()?;
+            let connection = write_connection(self.context, db_size)?;
             let result = transaction::run_immediate(&connection, f);
             clear_read_connection(self.context);
+            if result.is_err() {
+                clear_write_connection(self.context);
+            }
             result
         })
     }
@@ -274,6 +282,7 @@ impl DbHandle {
         self.with_context(|| {
             reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
+            clear_write_connection(self.context);
             stable_blob::begin_import(total_size, expected_checksum).map_err(DbError::from)
         })
     }
@@ -290,6 +299,7 @@ impl DbHandle {
         self.with_context(|| {
             reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
+            clear_write_connection(self.context);
             stable_blob::finish_import().map_err(DbError::from)
         })
     }
@@ -298,6 +308,7 @@ impl DbHandle {
         self.with_context(|| {
             reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
+            clear_write_connection(self.context);
             stable_blob::cancel_import().map_err(DbError::from)
         })
     }
@@ -306,9 +317,27 @@ impl DbHandle {
         self.with_context(|| {
             reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
+            clear_write_connection(self.context);
             stable_blob::compact().map_err(DbError::from)
         })
     }
+}
+
+fn write_connection(context: ContextId, db_size: u64) -> Result<Rc<Connection>, DbError> {
+    WRITE_CONNECTIONS.with(|slot| {
+        let cached = { slot.borrow().get(&context).cloned() };
+        if let Some(connection) = cached {
+            return Ok(connection);
+        }
+        let connection = if db_size == 0 {
+            connection::open_read_write()?
+        } else {
+            connection::open_read_write_existing()?
+        };
+        let connection = Rc::new(connection);
+        slot.borrow_mut().insert(context, Rc::clone(&connection));
+        Ok(connection)
+    })
 }
 
 fn with_read_connection<T>(
@@ -331,7 +360,11 @@ fn with_read_connection<T>(
 
 fn reject_active_read_connection(context: ContextId) -> Result<(), DbError> {
     ACTIVE_READ_CONNECTIONS.with(|slot| {
-        if slot.borrow().get(&context).copied().unwrap_or(0) == 0 {
+        let slot = slot.borrow();
+        let active = active_read_index(&slot, context)
+            .map(|index| slot[index].1)
+            .unwrap_or(0);
+        if active == 0 {
             Ok(())
         } else {
             Err(DbError::ReadConnectionInUse)
@@ -345,6 +378,12 @@ fn clear_read_connection(context: ContextId) {
     });
 }
 
+fn clear_write_connection(context: ContextId) {
+    WRITE_CONNECTIONS.with(|slot| {
+        slot.borrow_mut().remove(&context);
+    });
+}
+
 struct ReadGuard {
     context: ContextId,
 }
@@ -353,7 +392,15 @@ impl ReadGuard {
     fn enter(context: ContextId) -> Self {
         ACTIVE_READ_CONNECTIONS.with(|slot| {
             let mut slot = slot.borrow_mut();
-            *slot.entry(context).or_insert(0) += 1;
+            if slot.is_empty() {
+                slot.push((context, 1));
+                return;
+            }
+            if let Some(index) = active_read_index(&slot, context) {
+                slot[index].1 += 1;
+            } else {
+                slot.push((context, 1));
+            }
         });
         Self { context }
     }
@@ -363,15 +410,30 @@ impl Drop for ReadGuard {
     fn drop(&mut self) {
         ACTIVE_READ_CONNECTIONS.with(|slot| {
             let mut slot = slot.borrow_mut();
-            let Some(depth) = slot.get_mut(&self.context) else {
+            if slot.len() == 1 && slot[0].0 == self.context {
+                let depth = &mut slot[0].1;
+                *depth = depth.saturating_sub(1);
+                if *depth == 0 {
+                    slot.clear();
+                }
+                return;
+            }
+            let Some(index) = active_read_index(&slot, self.context) else {
                 return;
             };
+            let depth = &mut slot[index].1;
             *depth = depth.saturating_sub(1);
             if *depth == 0 {
-                slot.remove(&self.context);
+                slot.swap_remove(index);
             }
         });
     }
+}
+
+fn active_read_index(entries: &[(ContextId, usize)], context: ContextId) -> Option<usize> {
+    entries
+        .iter()
+        .position(|(stored_context, _)| *stored_context == context)
 }
 
 struct OverlayGuard;

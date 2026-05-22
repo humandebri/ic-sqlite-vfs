@@ -3,6 +3,8 @@ use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
 use ic_sqlite_vfs::stable::memory;
 use ic_sqlite_vfs::stable::meta::Superblock;
 use ic_sqlite_vfs::{params, Db};
+use proptest::prelude::*;
+use proptest::test_runner::{Config, TestRunner};
 use serial_test::serial;
 use std::collections::BTreeMap;
 
@@ -134,6 +136,114 @@ fn deterministic_fuzz_matches_model() {
     let expected = model.values().sum::<u64>();
     assert_eq!(u64::try_from(sum).unwrap(), expected);
     assert_eq!(Db::integrity_check().unwrap(), "ok");
+}
+
+#[test]
+#[serial]
+fn pbt_operation_sequences_match_model_after_compact_and_import() {
+    let strategy = prop::collection::vec((0_u8..5, 0_i64..48, -50_000_i64..50_000), 1..96);
+    let mut runner = TestRunner::new(Config {
+        cases: 96,
+        max_shrink_iters: 2_048,
+        failure_persistence: None,
+        ..Config::default()
+    });
+
+    runner
+        .run(&strategy, |operations| {
+            reset();
+            Db::migrate(&[Migration {
+                version: 1,
+                sql: "CREATE TABLE pbt(k INTEGER PRIMARY KEY, v INTEGER NOT NULL);",
+            }])
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+
+            let mut model = BTreeMap::<i64, i64>::new();
+            for (kind, key, value) in operations {
+                match kind {
+                    0 => {
+                        model.insert(key, value);
+                        Db::update(|connection| {
+                            connection.execute(
+                                "INSERT INTO pbt(k, v) VALUES (?1, ?2)
+                                 ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                                params![key, value],
+                            )
+                        })
+                    }
+                    1 => {
+                        model.remove(&key);
+                        Db::update(|connection| {
+                            connection.execute("DELETE FROM pbt WHERE k = ?1", params![key])
+                        })
+                    }
+                    2 => {
+                        if let Some(stored) = model.get_mut(&key) {
+                            *stored = stored.saturating_add(value);
+                        }
+                        Db::update(|connection| {
+                            connection.execute(
+                                "UPDATE pbt SET v = v + ?1 WHERE k = ?2",
+                                params![value, key],
+                            )
+                        })
+                    }
+                    3 => {
+                        let before = read_pbt_rows()?;
+                        Db::update(|connection| {
+                            connection.execute(
+                                "INSERT INTO pbt(k, v) VALUES (?1, ?2)",
+                                params![key, value],
+                            )?;
+                            connection.execute(
+                                "INSERT INTO pbt(k, v) VALUES (?1, ?2)",
+                                params![key, value.saturating_add(1)],
+                            )
+                        })
+                        .expect_err("duplicate insert must rollback");
+                        prop_assert_eq!(read_pbt_rows()?, before);
+                        Ok(())
+                    }
+                    _ => {
+                        let before = read_pbt_rows()?;
+                        Db::refresh_checksum()
+                            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+                        prop_assert_eq!(read_pbt_rows()?, before);
+                        Ok(())
+                    }
+                }
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+                prop_assert_eq!(read_pbt_rows()?, model.clone());
+                prop_assert_eq!(Db::integrity_check().unwrap(), "ok");
+            }
+
+            Db::compact().map_err(|error| TestCaseError::fail(error.to_string()))?;
+            prop_assert_eq!(read_pbt_rows()?, model.clone());
+
+            let db_size = Superblock::load().unwrap().db_size;
+            let checksum =
+                Db::refresh_checksum().map_err(|error| TestCaseError::fail(error.to_string()))?;
+            let image = Db::export_chunk(0, db_size)
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            Db::begin_import(db_size, checksum)
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            Db::import_chunk(0, &image).map_err(|error| TestCaseError::fail(error.to_string()))?;
+            Db::finish_import().map_err(|error| TestCaseError::fail(error.to_string()))?;
+            prop_assert_eq!(read_pbt_rows()?, model.clone());
+            prop_assert_eq!(Db::integrity_check().unwrap(), "ok");
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn read_pbt_rows() -> Result<BTreeMap<i64, i64>, TestCaseError> {
+    let rows = Db::query(|connection| {
+        connection.query_map::<(i64, i64), _>("SELECT k, v FROM pbt ORDER BY k", params![], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+    })
+    .map_err(|error| TestCaseError::fail(error.to_string()))?;
+    Ok(rows.into_iter().collect())
 }
 
 #[test]

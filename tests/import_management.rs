@@ -73,3 +73,33 @@ fn cancel_import_restores_access_after_incomplete_import() {
     .unwrap();
     assert_eq!(value, "value");
 }
+
+#[test]
+#[serial]
+fn import_state_machine_rejects_invalid_transitions() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE import_state(k TEXT PRIMARY KEY, v TEXT NOT NULL);",
+    }])
+    .unwrap();
+
+    Db::begin_import(8, 0).unwrap();
+    assert!(Db::import_chunk(1, b"bad").is_err());
+    assert_eq!(Superblock::load().unwrap().import_written_until, 0);
+
+    Db::import_chunk(0, b"abcd").unwrap();
+    let partial = Superblock::load().unwrap();
+    assert!(partial.is_importing());
+    assert_eq!(partial.import_written_until, 4);
+    assert!(Db::finish_import().is_err());
+    assert!(Superblock::load().unwrap().is_importing());
+
+    let update = Db::update(|connection| {
+        connection.execute_batch("INSERT INTO import_state(k, v) VALUES ('k', 'v')")
+    });
+    assert!(update.is_err());
+
+    Db::cancel_import().unwrap();
+    assert!(!Superblock::load().unwrap().is_importing());
+}

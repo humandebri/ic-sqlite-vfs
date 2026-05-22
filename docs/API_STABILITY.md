@@ -21,7 +21,7 @@ may still break API or layout. Production users should pin exact versions.
 
 ## Release Notes
 
-Applications must initialize their own `MemoryManager<DefaultMemoryImpl>`,
+Applications initialize a `MemoryManager<DefaultMemoryImpl>` from this crate,
 choose a dedicated `MemoryId`, and pass the resulting
 `VirtualMemory<DefaultMemoryImpl>` to `Db::init(memory)`.
 The crate does not reserve a `MemoryId`; the application must choose one,
@@ -38,12 +38,35 @@ SQLite images in one Wasm instance. Each handle must use a dedicated
 `MemoryId`; `DbHandle` does not provide a mount-id namespace inside a single
 SQLite image.
 
-`ic-stable-structures` `MemoryId` is `u8`-backed in the supported 0.7 line.
-Values `0..=254` are usable by applications. `MemoryId::new(255)` is invalid
-because `255` is the internal unallocated-bucket marker. Per-archive and
-per-slot database designs must treat that as a hard capacity bound, including
-any catalog, index, metadata, and reserved memories chosen by the application.
-This crate does not widen `MemoryId` or fork the `MemoryManager` layout.
+The bundled MemoryManager-compatible `MemoryId` is `u8`-backed. Values
+`0..=254` are usable by applications. `MemoryId::new(255)` is invalid because
+`255` is the internal unallocated-bucket marker. Per-archive and per-slot
+database designs must treat that as a hard capacity bound, including any
+catalog, index, metadata, and reserved memories chosen by the application. This
+crate keeps the `ic-stable-structures` 0.7 MemoryManager stable-memory layout.
+If an existing MemoryManager-compatible image is corrupt, internally
+inconsistent, or physically truncated, initialization rejects it by panic/trap
+rather than returning a recoverable error.
+
+`MemoryManager::grow()` writes allocation-table owner bytes before committing
+the header that records the new allocated bucket count and virtual memory size.
+On the Internet Computer, successful message execution commits Wasm and stable
+memory together, while a trap rolls back changes made during that message
+execution. Under that execution model, a grow state with the allocation table
+updated but the old header still committed is not persistently observable.
+Images imported, restored, or manually constructed with that mismatch are
+treated as corrupt MemoryManager-compatible images and rejected during
+initialization.
+
+`MemoryManager::init_strict(memory)` is the additive safe initializer for
+callers that want non-empty / non-MemoryManager memory and invalid layouts as
+typed errors instead of implicit new-layout initialization or panic.
+MemoryManager metadata writes use stable memory grow internally; metadata grow
+failure during initialization or header/allocation-table writes is still a
+panic/trap boundary.
+
+`stable::memory::read()` does not grow stable memory. Reads beyond the current
+capacity return `StableMemoryError::ReadOutOfBounds`.
 
 The multi-database API is still covered by the `0.x` compatibility rules.
 Production deployments should pin exact versions.

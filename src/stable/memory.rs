@@ -4,10 +4,12 @@
 //! coexist with other stable structures managed by the same MemoryManager.
 
 use crate::config::STABLE_PAGE_SIZE;
+use crate::stable::memory_manager::VirtualMemory;
 #[cfg(any(test, debug_assertions))]
-use ic_stable_structures::memory_manager::{MemoryId, MemoryManager};
-use ic_stable_structures::{memory_manager::VirtualMemory, DefaultMemoryImpl, Memory};
+use crate::stable::memory_manager::{MemoryId, MemoryManager};
+use crate::stable::raw_memory::{DefaultMemoryImpl, Memory};
 use std::cell::{Cell, RefCell};
+#[cfg(any(test, feature = "canister-api-test-failpoints"))]
 use std::collections::BTreeMap;
 
 pub type DbMemory = VirtualMemory<DefaultMemoryImpl>;
@@ -27,6 +29,14 @@ pub enum StableMemoryError {
     GrowFailed {
         current_pages: u64,
         required_pages: u64,
+    },
+    #[error(
+        "stable memory read out of bounds: offset={offset}, len={len}, size_bytes={size_bytes}"
+    )]
+    ReadOutOfBounds {
+        offset: u64,
+        len: u64,
+        size_bytes: u64,
     },
     #[error("offset overflow")]
     OffsetOverflow,
@@ -70,7 +80,7 @@ thread_local! {
     static NEXT_CONTEXT_ID: Cell<u64> = const { Cell::new(1) };
     static DEFAULT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
     static CURRENT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
-    static DB_MEMORY: RefCell<BTreeMap<ContextId, DbMemory>> = const { RefCell::new(BTreeMap::new()) };
+    static DB_MEMORY: RefCell<Vec<(ContextId, DbMemory)>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn init(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
@@ -86,12 +96,13 @@ pub fn init(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
 
 pub fn init_context(memory: DbMemory) -> ContextId {
     let context = NEXT_CONTEXT_ID.with(|next| {
-        let context = ContextId(next.get());
-        next.set(next.get().saturating_add(1));
+        let current = next.get();
+        let context = ContextId(current);
+        next.set(current.checked_add(1).expect("context id overflow"));
         context
     });
     DB_MEMORY.with(|slot| {
-        slot.borrow_mut().insert(context, memory);
+        slot.borrow_mut().push((context, memory));
     });
     context
 }
@@ -104,6 +115,7 @@ pub fn default_context() -> Option<ContextId> {
     DEFAULT_CONTEXT.with(Cell::get)
 }
 
+#[inline(always)]
 pub fn active_context_id() -> Result<ContextId, StableMemoryError> {
     if let Some(context) = CURRENT_CONTEXT.with(Cell::get) {
         return Ok(context);
@@ -111,6 +123,7 @@ pub fn active_context_id() -> Result<ContextId, StableMemoryError> {
     default_context().ok_or(StableMemoryError::NotInitialized)
 }
 
+#[inline(always)]
 pub fn with_context<T>(context: ContextId, f: impl FnOnce() -> T) -> T {
     let previous = CURRENT_CONTEXT.with(|current| {
         let previous = current.get();
@@ -147,7 +160,128 @@ pub fn size_pages() -> u64 {
 }
 
 pub fn ensure_capacity(end_offset: u64) -> Result<(), StableMemoryError> {
-    let current_bytes = size_pages()
+    with_memory(|memory| ensure_memory_capacity(memory, end_offset))?
+}
+
+pub fn read(offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
+    if dst.is_empty() {
+        return Ok(());
+    }
+    let len = u64::try_from(dst.len()).map_err(|_| StableMemoryError::OffsetOverflow)?;
+    let end = offset
+        .checked_add(len)
+        .ok_or(StableMemoryError::OffsetOverflow)?;
+    with_memory(|memory| {
+        let size_bytes = memory
+            .size()
+            .checked_mul(STABLE_PAGE_SIZE)
+            .ok_or(StableMemoryError::OffsetOverflow)?;
+        if end > size_bytes {
+            return Err(StableMemoryError::ReadOutOfBounds {
+                offset,
+                len,
+                size_bytes,
+            });
+        }
+        memory.read(offset, dst);
+        Ok(())
+    })?
+}
+
+#[inline(always)]
+pub(crate) fn read_preallocated(offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
+    checked_end(offset, dst.len())?;
+    with_memory(|memory| {
+        debug_assert_capacity(memory, offset, dst.len(), "read_preallocated");
+        memory.read(offset, dst);
+    })?;
+    Ok(())
+}
+
+pub fn write(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let end = checked_end(offset, bytes.len())?;
+    with_memory(|memory| {
+        ensure_memory_capacity(memory, end)?;
+        memory.write(offset, bytes);
+        Ok(())
+    })??;
+
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_stable_data_write(bytes.len());
+
+    #[cfg(any(test, feature = "canister-api-test-failpoints"))]
+    if hit_write_trap_failpoint() {
+        fail_after_stable_write();
+    }
+
+    Ok(())
+}
+
+pub(crate) fn write_preallocated(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    checked_end(offset, bytes.len())?;
+    with_memory(|memory| {
+        debug_assert_capacity(memory, offset, bytes.len(), "write_preallocated");
+        memory.write(offset, bytes);
+    })?;
+
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_stable_data_write(bytes.len());
+
+    #[cfg(any(test, feature = "canister-api-test-failpoints"))]
+    if hit_write_trap_failpoint() {
+        fail_after_stable_write();
+    }
+
+    Ok(())
+}
+
+#[inline(always)]
+pub(crate) fn write_prechecked(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
+    debug_assert!(checked_end(offset, bytes.len()).is_ok());
+    with_memory(|memory| {
+        debug_assert_capacity(memory, offset, bytes.len(), "write_prechecked");
+        memory.write(offset, bytes);
+    })?;
+
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_stable_data_write(bytes.len());
+
+    #[cfg(any(test, feature = "canister-api-test-failpoints"))]
+    if hit_write_trap_failpoint() {
+        fail_after_stable_write();
+    }
+
+    Ok(())
+}
+
+#[inline(always)]
+pub(crate) fn write_prechecked_unmetered(
+    offset: u64,
+    bytes: &[u8],
+) -> Result<(), StableMemoryError> {
+    debug_assert!(checked_end(offset, bytes.len()).is_ok());
+    with_memory(|memory| {
+        debug_assert_capacity(memory, offset, bytes.len(), "write_prechecked_unmetered");
+        memory.write(offset, bytes);
+    })?;
+
+    #[cfg(any(test, feature = "canister-api-test-failpoints"))]
+    if hit_write_trap_failpoint() {
+        fail_after_stable_write();
+    }
+
+    Ok(())
+}
+
+fn ensure_memory_capacity(memory: &DbMemory, end_offset: u64) -> Result<(), StableMemoryError> {
+    let current_pages = memory.size();
+    let current_bytes = current_pages
         .checked_mul(STABLE_PAGE_SIZE)
         .ok_or(StableMemoryError::OffsetOverflow)?;
     if end_offset <= current_bytes {
@@ -161,53 +295,52 @@ pub fn ensure_capacity(end_offset: u64) -> Result<(), StableMemoryError> {
 
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
     if hit_grow_failpoint() {
-        return Err(StableMemoryError::GrowFailed {
-            current_pages: current_bytes / STABLE_PAGE_SIZE,
-            required_pages: current_bytes / STABLE_PAGE_SIZE + pages,
-        });
-    }
-
-    let previous = with_memory(|memory| memory.grow(pages))?;
-    if previous < 0 {
-        let required_pages = size_pages()
+        let required_pages = current_pages
             .checked_add(pages)
             .ok_or(StableMemoryError::OffsetOverflow)?;
         return Err(StableMemoryError::GrowFailed {
-            current_pages: size_pages(),
+            current_pages,
             required_pages,
         });
     }
 
+    let previous = memory.grow(pages);
+    if previous < 0 {
+        let required_pages = current_pages
+            .checked_add(pages)
+            .ok_or(StableMemoryError::OffsetOverflow)?;
+        return Err(StableMemoryError::GrowFailed {
+            current_pages,
+            required_pages,
+        });
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    crate::read_metrics::record_stable_grow(pages);
     Ok(())
 }
 
-pub fn read(offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
-    if dst.is_empty() {
-        return Ok(());
+#[inline(always)]
+fn debug_assert_capacity(memory: &DbMemory, offset: u64, len: usize, operation: &str) {
+    #[cfg(debug_assertions)]
+    {
+        let Ok(end) = checked_end(offset, len) else {
+            debug_assert!(false, "{operation} offset overflow");
+            return;
+        };
+        let Some(capacity) = memory.size().checked_mul(STABLE_PAGE_SIZE) else {
+            debug_assert!(false, "{operation} capacity overflow");
+            return;
+        };
+        debug_assert!(
+            end <= capacity,
+            "{operation} requires preallocated capacity: offset={offset}, len={len}, capacity={capacity}"
+        );
     }
-    let end = checked_end(offset, dst.len())?;
-    ensure_capacity(end)?;
-
-    with_memory(|memory| memory.read(offset, dst))?;
-
-    Ok(())
-}
-
-pub fn write(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
-    if bytes.is_empty() {
-        return Ok(());
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (memory, offset, len, operation);
     }
-    let end = checked_end(offset, bytes.len())?;
-    ensure_capacity(end)?;
-
-    with_memory(|memory| memory.write(offset, bytes))?;
-
-    #[cfg(any(test, feature = "canister-api-test-failpoints"))]
-    if hit_write_trap_failpoint() {
-        fail_after_stable_write();
-    }
-
-    Ok(())
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -215,6 +348,11 @@ pub fn reset_for_tests() {
     clear_initialization();
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
     clear_failpoint();
+}
+
+#[cfg(any(test, debug_assertions))]
+pub fn set_next_context_id_for_tests(value: u64) {
+    NEXT_CONTEXT_ID.with(|next| next.set(value));
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -231,7 +369,9 @@ pub(crate) fn clear_initialization() {
 
 pub(crate) fn clear_failed_initialization(context: ContextId) {
     DB_MEMORY.with(|memory| {
-        memory.borrow_mut().remove(&context);
+        memory
+            .borrow_mut()
+            .retain(|(stored_context, _)| *stored_context != context);
     });
     DEFAULT_CONTEXT.with(|default| {
         if default.get() == Some(context) {
@@ -280,14 +420,22 @@ pub fn memory_for_tests() -> DbMemory {
     MemoryManager::init(DefaultMemoryImpl::default()).get(MemoryId::new(42))
 }
 
+#[inline(always)]
 fn with_memory<T>(f: impl FnOnce(&DbMemory) -> T) -> Result<T, StableMemoryError> {
     let context = active_context_id()?;
     DB_MEMORY.with(|slot| {
         let slot = slot.borrow();
-        let memory = slot
-            .get(&context)
-            .ok_or(StableMemoryError::NotInitialized)?;
-        Ok(f(memory))
+        if let Some((stored_context, memory)) = slot.first() {
+            if *stored_context == context {
+                return Ok(f(memory));
+            }
+        }
+        for (stored_context, memory) in slot.iter().skip(1) {
+            if *stored_context == context {
+                return Ok(f(memory));
+            }
+        }
+        Err(StableMemoryError::NotInitialized)
     })
 }
 

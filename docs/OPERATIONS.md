@@ -57,7 +57,7 @@ constraints, or ad-hoc queries are worth the extra storage complexity.
 In a per-archive or per-slot layout, one slot maps to one dedicated `MemoryId`,
 one `DbHandle`, and one SQLite image. The consuming canister reserves
 `MemoryId` values in the `0..=254` range. `255` is the internal
-`ic-stable-structures` marker and must not be used.
+unallocated-bucket marker and must not be used.
 
 `MemoryId::new(120)` is the default slot anchor that matches the
 `ic-rusqlite` default mounted DB. A single-DB canister can use `120` directly.

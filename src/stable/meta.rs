@@ -81,7 +81,7 @@ impl Superblock {
         crate::read_metrics::record_superblock_load();
         memory::ensure_capacity(SUPERBLOCK_OFFSET + SUPERBLOCK_SIZE)?;
         let mut bytes = [0_u8; ENCODED_LEN];
-        memory::read(SUPERBLOCK_OFFSET, &mut bytes)?;
+        memory::read_preallocated(SUPERBLOCK_OFFSET, &mut bytes)?;
         let block = Self::decode(&bytes);
         if block.magic != MAGIC {
             let fresh = Self::fresh();
@@ -96,18 +96,40 @@ impl Superblock {
     }
 
     pub fn store(&self) -> Result<(), StableMemoryError> {
+        self.store_with_capacity_check()
+    }
+
+    fn store_with_capacity_check(&self) -> Result<(), StableMemoryError> {
         let mut block = self.clone();
         block.version = VERSION;
         block.meta_checksum = block.compute_meta_checksum();
         memory::write(SUPERBLOCK_OFFSET, &block.encode())?;
-        cache_superblock(&block);
+        cache_superblock_owned(block);
+        Ok(())
+    }
+
+    fn store_preallocated(&self) -> Result<(), StableMemoryError> {
+        let mut block = self.clone();
+        block.version = VERSION;
+        block.meta_checksum = block.compute_meta_checksum();
+        memory::write_prechecked(SUPERBLOCK_OFFSET, &block.encode())?;
+        cache_superblock_owned(block);
+        Ok(())
+    }
+
+    fn store_preallocated_unmetered(&self) -> Result<(), StableMemoryError> {
+        let mut block = self.clone();
+        block.version = VERSION;
+        block.meta_checksum = block.compute_meta_checksum();
+        memory::write_prechecked_unmetered(SUPERBLOCK_OFFSET, &block.encode())?;
+        cache_superblock_owned(block);
         Ok(())
     }
 
     pub fn set_db_size(size: u64) -> Result<(), StableMemoryError> {
         let mut block = Self::load()?;
         block.db_size = size;
-        block.store()
+        block.store_preallocated()
     }
 
     pub fn record_committed_tx() -> Result<(), StableMemoryError> {
@@ -115,7 +137,7 @@ impl Superblock {
         block.last_tx_id = block.last_tx_id.saturating_add(1);
         block.flags |= FLAG_CHECKSUM_STALE;
         block.clear_checksum_refresh();
-        block.store()
+        block.store_preallocated()
     }
 
     pub fn commit_db_image(db_base_offset: u64, db_size: u64) -> Result<(), StableMemoryError> {
@@ -125,7 +147,7 @@ impl Superblock {
         block.last_tx_id = block.last_tx_id.saturating_add(1);
         block.flags |= FLAG_CHECKSUM_STALE;
         block.clear_checksum_refresh();
-        block.store()
+        block.store_preallocated()
     }
 
     pub fn commit_page_map(
@@ -141,7 +163,23 @@ impl Superblock {
         block.last_tx_id = block.last_tx_id.saturating_add(1);
         block.flags |= FLAG_CHECKSUM_STALE;
         block.clear_checksum_refresh();
-        block.store()
+        block.store_preallocated()
+    }
+
+    pub fn commit_page_map_unmetered(
+        page_table_offset: u64,
+        page_count: u64,
+        db_size: u64,
+    ) -> Result<(), StableMemoryError> {
+        let mut block = Self::load()?;
+        block.page_table_offset = page_table_offset;
+        block.page_count = page_count;
+        block.db_size = db_size;
+        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
+        block.last_tx_id = block.last_tx_id.saturating_add(1);
+        block.flags |= FLAG_CHECKSUM_STALE;
+        block.clear_checksum_refresh();
+        block.store_preallocated_unmetered()
     }
 
     pub fn store_page_map_without_tx(
@@ -154,7 +192,20 @@ impl Superblock {
         block.page_count = page_count;
         block.db_size = db_size;
         block.layout_version = PAGE_MAP_LAYOUT_VERSION;
-        block.store()
+        block.store_preallocated()
+    }
+
+    pub fn store_page_map_without_tx_unmetered(
+        page_table_offset: u64,
+        page_count: u64,
+        db_size: u64,
+    ) -> Result<(), StableMemoryError> {
+        let mut block = Self::load()?;
+        block.page_table_offset = page_table_offset;
+        block.page_count = page_count;
+        block.db_size = db_size;
+        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
+        block.store_preallocated_unmetered()
     }
 
     pub fn verify_checksum(&self) -> bool {
@@ -243,9 +294,13 @@ pub fn clear_superblock_cache() {
 }
 
 fn cache_superblock(block: &Superblock) {
+    cache_superblock_owned(block.clone());
+}
+
+fn cache_superblock_owned(block: Superblock) {
     if let Ok(context) = memory::active_context_id() {
         SUPERBLOCK_CACHE.with(|cache| {
-            cache.borrow_mut().insert(context, block.clone());
+            cache.borrow_mut().insert(context, block);
         });
     }
 }
@@ -269,4 +324,158 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+
+    fn sample_block() -> Superblock {
+        let mut block = Superblock::fresh();
+        block.db_size = 0x0102_0304_0506_0708;
+        block.schema_version = 0x1112_1314_1516_1718;
+        block.last_tx_id = 0x2122_2324_2526_2728;
+        block.flags = FLAG_IMPORTING | FLAG_CHECKSUM_STALE | FLAG_CHECKSUM_REFRESHING;
+        block.checksum = 0x3132_3334_3536_3738;
+        block.import_expected_checksum = 0x4142_4344_4546_4748;
+        block.import_written_until = 0x5152_5354_5556_5758;
+        block.import_total_size = 0x6162_6364_6566_6768;
+        block.import_base_offset = 0x7172_7374_7576_7778;
+        block.checksum_refresh_offset = 0x8182_8384_8586_8788;
+        block.checksum_refresh_hash = 0x9192_9394_9596_9798;
+        block.checksum_refresh_tx_id = 0xa1a2_a3a4_a5a6_a7a8;
+        block.db_base_offset = 0xb1b2_b3b4_b5b6_b7b8;
+        block.page_table_offset = 0xc1c2_c3c4_c5c6_c7c8;
+        block.page_count = 0xd1d2_d3d4_d5d6_d7d8;
+        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
+        block.meta_checksum = block.compute_meta_checksum();
+        block
+    }
+
+    #[test]
+    fn superblock_encode_decode_uses_fixed_little_endian_offsets() {
+        let block = sample_block();
+        let encoded = block.encode();
+
+        assert_eq!(&encoded[0..8], b"ICSQLITE");
+        assert_eq!(&encoded[8..12], &VERSION.to_le_bytes());
+        assert_eq!(&encoded[12..16], &SQLITE_PAGE_SIZE.to_le_bytes());
+        assert_eq!(&encoded[16..24], &block.db_size.to_le_bytes());
+        assert_eq!(&encoded[80..88], &block.import_base_offset.to_le_bytes());
+        assert_eq!(&encoded[120..128], &block.page_table_offset.to_le_bytes());
+        assert_eq!(&encoded[144..152], &block.meta_checksum.to_le_bytes());
+        assert_eq!(Superblock::decode(&encoded), block);
+    }
+
+    #[test]
+    fn superblock_meta_digest_zeroes_only_meta_field() {
+        let block = sample_block();
+        let mut checksum_input = block.encode();
+        checksum_input[144..152].copy_from_slice(&0_u64.to_le_bytes());
+
+        let mut changed_checksum = block.clone();
+        changed_checksum.meta_checksum ^= u64::MAX;
+
+        let mut changed_field = block.clone();
+        changed_field.last_tx_id = changed_field.last_tx_id.wrapping_add(1);
+
+        assert_eq!(block.compute_meta_checksum(), fnv1a64(&checksum_input));
+        assert_eq!(
+            changed_checksum.compute_meta_checksum(),
+            block.compute_meta_checksum()
+        );
+        assert_ne!(
+            changed_field.compute_meta_checksum(),
+            block.compute_meta_checksum()
+        );
+    }
+
+    #[test]
+    fn pbt_superblock_encoding_matches_fixed_field_model() {
+        let mut runner = TestRunner::new(Config {
+            cases: 256,
+            ..Config::default()
+        });
+
+        runner
+            .run(&any::<[u64; 16]>(), |fields| {
+                let block = block_from_fields(fields);
+                let encoded = block.encode();
+
+                prop_assert_eq!(encoded.len(), ENCODED_LEN);
+                prop_assert_eq!(&encoded[0..8], b"ICSQLITE");
+                prop_assert_eq!(&encoded[8..12], &VERSION.to_le_bytes());
+                prop_assert_eq!(&encoded[12..16], &SQLITE_PAGE_SIZE.to_le_bytes());
+                assert_u64_field_offsets(&encoded, &block)?;
+                prop_assert_eq!(Superblock::decode(&encoded), block.clone());
+
+                let mut changed_meta = block.clone();
+                changed_meta.meta_checksum ^= u64::MAX;
+                prop_assert_eq!(
+                    changed_meta.compute_meta_checksum(),
+                    block.compute_meta_checksum()
+                );
+
+                let mut checksum_input = encoded;
+                checksum_input[144..152].copy_from_slice(&0_u64.to_le_bytes());
+                prop_assert_eq!(block.compute_meta_checksum(), fnv1a64(&checksum_input));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn assert_u64_field_offsets(
+        encoded: &[u8; ENCODED_LEN],
+        block: &Superblock,
+    ) -> Result<(), TestCaseError> {
+        let fields = [
+            (16, block.db_size),
+            (24, block.schema_version),
+            (32, block.last_tx_id),
+            (40, block.flags),
+            (48, block.checksum),
+            (56, block.import_expected_checksum),
+            (64, block.import_written_until),
+            (72, block.import_total_size),
+            (80, block.import_base_offset),
+            (88, block.checksum_refresh_offset),
+            (96, block.checksum_refresh_hash),
+            (104, block.checksum_refresh_tx_id),
+            (112, block.db_base_offset),
+            (120, block.page_table_offset),
+            (128, block.page_count),
+            (136, block.layout_version),
+            (144, block.meta_checksum),
+        ];
+
+        for (offset, expected) in fields {
+            let actual = u64::from_le_bytes(eight(encoded, offset));
+            prop_assert_eq!(actual, expected);
+        }
+        Ok(())
+    }
+
+    fn block_from_fields(fields: [u64; 16]) -> Superblock {
+        let mut block = Superblock::fresh();
+        block.db_size = fields[0];
+        block.schema_version = fields[1];
+        block.last_tx_id = fields[2];
+        block.flags = fields[3];
+        block.checksum = fields[4];
+        block.import_expected_checksum = fields[5];
+        block.import_written_until = fields[6];
+        block.import_total_size = fields[7];
+        block.import_base_offset = fields[8];
+        block.checksum_refresh_offset = fields[9];
+        block.checksum_refresh_hash = fields[10];
+        block.checksum_refresh_tx_id = fields[11];
+        block.db_base_offset = fields[12];
+        block.page_table_offset = fields[13];
+        block.page_count = fields[14];
+        block.layout_version = fields[15];
+        block.meta_checksum = block.compute_meta_checksum();
+        block
+    }
 }

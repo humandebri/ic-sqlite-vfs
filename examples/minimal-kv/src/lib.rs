@@ -1,11 +1,7 @@
 //! Minimal KV canister backed by SQLite inside one MemoryManager virtual memory.
 
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::{params, Db};
-use ic_stable_structures::{
-    memory_manager::{MemoryId, MemoryManager},
-    DefaultMemoryImpl,
-};
+use ic_sqlite_vfs::{params, Db, DefaultMemoryImpl, MemoryId, MemoryManager};
 use std::cell::RefCell;
 
 const SQLITE_MEMORY_ID: MemoryId = MemoryId::new(120);

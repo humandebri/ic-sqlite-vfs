@@ -6,21 +6,20 @@
 use candid::CandidType;
 use ic_cdk::{api::performance_counter, init, post_upgrade, query, update};
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::db::statement::QueryOptionalStringTextProfile;
-use ic_sqlite_vfs::db::{TextLen, ToSql};
+use ic_sqlite_vfs::db::statement::{ExecuteTextTextProfile, QueryOptionalStringTextProfile};
 use ic_sqlite_vfs::read_metrics;
 use ic_sqlite_vfs::stable::{memory, meta::Superblock};
-use ic_sqlite_vfs::Db;
-use ic_stable_structures::{
-    memory_manager::{MemoryId, MemoryManager},
-    DefaultMemoryImpl,
-};
+use ic_sqlite_vfs::{Db, DefaultMemoryImpl, MemoryId, MemoryManager};
 use serde::Deserialize;
 use std::cell::RefCell;
 
 mod key;
 
-use key::{bench_key, validate_fixed_bench_key_rows};
+use key::{
+    bench_key, bench_value, body_value, group_label, growth_value, order_value, prefixed_key,
+    updated_value, validate_fixed_bench_key_index, validate_fixed_bench_key_range,
+    validate_fixed_bench_key_rows, write_value,
+};
 
 const MIGRATIONS: &[Migration] = &[Migration {
     version: 1,
@@ -30,6 +29,8 @@ const MIGRATIONS: &[Migration] = &[Migration {
     ) WITHOUT ROWID;",
 }];
 const POINT_READ_SQL: &str = "SELECT value FROM bench WHERE key = ?1";
+const MULTI_GET_SQL_PREFIX: &[u8] = b"SELECT value FROM bench WHERE key IN (";
+const MULTI_GET_SQL_SUFFIX: &[u8] = b") ORDER BY key";
 const SQLITE_MEMORY_ID: MemoryId = MemoryId::new(120);
 
 thread_local! {
@@ -84,6 +85,120 @@ pub struct BenchReadProfileReport {
     pub superblock_loads: u64,
 }
 
+#[derive(CandidType, Deserialize)]
+pub struct BenchGetManyProfileReport {
+    pub rows: u64,
+    pub instructions: u64,
+    pub checksum: u64,
+    pub db_size: u64,
+    pub stable_pages: u64,
+    pub stable_bytes: u64,
+    pub open_query: u64,
+    pub sql_build: u64,
+    pub key_build: u64,
+    pub prepare: u64,
+    pub bind: u64,
+    pub row_scan: u64,
+    pub report: u64,
+    pub x_read_calls: u64,
+    pub x_read_bytes: u64,
+    pub stable_data_read_calls: u64,
+    pub stable_data_read_bytes: u64,
+    pub page_table_root_hits: u64,
+    pub page_table_root_misses: u64,
+    pub page_table_segment_hits: u64,
+    pub page_table_segment_misses: u64,
+    pub superblock_loads: u64,
+}
+
+#[derive(CandidType, Deserialize)]
+pub struct BenchWriteProfileReport {
+    pub rows: u64,
+    pub instructions: u64,
+    pub checksum: u64,
+    pub db_size: u64,
+    pub stable_pages: u64,
+    pub stable_bytes: u64,
+    pub open_update: u64,
+    pub prepare: u64,
+    pub key_value_format: u64,
+    pub execute_total: u64,
+    pub reset_bind: u64,
+    pub step: u64,
+    pub report: u64,
+    pub x_read_calls: u64,
+    pub x_read_bytes: u64,
+    pub x_write_calls: u64,
+    pub x_write_bytes: u64,
+    pub x_file_size_calls: u64,
+    pub x_lock_calls: u64,
+    pub x_unlock_calls: u64,
+    pub x_check_reserved_lock_calls: u64,
+    pub x_file_control_calls: u64,
+    pub x_device_characteristics_calls: u64,
+    pub stable_data_read_calls: u64,
+    pub stable_data_read_bytes: u64,
+    pub stable_data_write_calls: u64,
+    pub stable_data_write_bytes: u64,
+    pub stable_grow_calls: u64,
+    pub stable_grow_pages: u64,
+    pub page_table_root_hits: u64,
+    pub page_table_root_misses: u64,
+    pub page_table_segment_hits: u64,
+    pub page_table_segment_misses: u64,
+    pub superblock_loads: u64,
+    pub commit_load: u64,
+    pub commit_build_segments: u64,
+    pub commit_capacity: u64,
+    pub commit_page_write: u64,
+    pub commit_table_write: u64,
+    pub commit_superblock_store: u64,
+}
+
+#[derive(CandidType, Deserialize)]
+pub struct BenchGrowthProfileReport {
+    pub rows: u64,
+    pub writes: u64,
+    pub instructions: u64,
+    pub checksum: u64,
+    pub db_size: u64,
+    pub stable_pages: u64,
+    pub stable_bytes: u64,
+    pub open_update: u64,
+    pub key_value_format: u64,
+    pub prepare: u64,
+    pub execute_total: u64,
+    pub changes: u64,
+    pub report: u64,
+    pub x_read_calls: u64,
+    pub x_read_bytes: u64,
+    pub x_write_calls: u64,
+    pub x_write_bytes: u64,
+    pub x_file_size_calls: u64,
+    pub x_lock_calls: u64,
+    pub x_unlock_calls: u64,
+    pub x_check_reserved_lock_calls: u64,
+    pub x_file_control_calls: u64,
+    pub x_device_characteristics_calls: u64,
+    pub stable_data_read_calls: u64,
+    pub stable_data_read_bytes: u64,
+    pub stable_data_write_calls: u64,
+    pub stable_data_write_bytes: u64,
+    pub stable_grow_calls: u64,
+    pub stable_grow_pages: u64,
+    pub page_table_root_hits: u64,
+    pub page_table_root_misses: u64,
+    pub page_table_segment_hits: u64,
+    pub page_table_segment_misses: u64,
+    pub superblock_loads: u64,
+    pub commit_load: u64,
+    pub commit_build_segments: u64,
+    pub commit_capacity: u64,
+    pub commit_page_write: u64,
+    pub commit_table_write: u64,
+    pub commit_superblock_store: u64,
+}
+
 #[init]
 fn init() {
     init_db();
@@ -104,14 +219,17 @@ fn init_db() {
 
 #[update]
 fn bench_reset(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     let start = performance_counter(0);
     Db::update(|connection| {
         reset_bench_table(connection)?;
         let mut statement = connection.prepare("INSERT INTO bench(key, value) VALUES (?1, ?2)")?;
         for index in 0..rows {
-            let key = format!("k{index:08}");
-            let value = format!("value-{index:08}-stable-vfs");
-            statement.execute(ic_sqlite_vfs::params![key, value])?;
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 25];
+            let key = bench_key(index, &mut key);
+            let value = bench_value(index, &mut value);
+            statement.execute_text_text(&key, &value)?;
         }
         Ok(())
     })
@@ -121,14 +239,17 @@ fn bench_reset(rows: u32) -> Result<BenchReport, String> {
 
 #[update]
 fn bench_insert_only(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     Db::update(|connection| reset_bench_table(connection)).map_err(error_text)?;
     let start = performance_counter(0);
     Db::update(|connection| {
         let mut statement = connection.prepare("INSERT INTO bench(key, value) VALUES (?1, ?2)")?;
         for index in 0..rows {
-            let key = format!("k{index:08}");
-            let value = format!("value-{index:08}-stable-vfs");
-            statement.execute(ic_sqlite_vfs::params![key, value])?;
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 25];
+            let key = bench_key(index, &mut key);
+            let value = bench_value(index, &mut value);
+            statement.execute_text_text(&key, &value)?;
         }
         Ok(())
     })
@@ -138,6 +259,8 @@ fn bench_insert_only(rows: u32) -> Result<BenchReport, String> {
 
 #[update]
 fn bench_append_insert(base_rows: u32, append_rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(base_rows)?;
+    validate_fixed_bench_key_range(base_rows, append_rows)?;
     seed_bench_rows(base_rows).map_err(error_text)?;
     let start = performance_counter(0);
     Db::update(|connection| {
@@ -146,9 +269,11 @@ fn bench_append_insert(base_rows: u32, append_rows: u32) -> Result<BenchReport, 
             let row = base_rows
                 .checked_add(index)
                 .ok_or(ic_sqlite_vfs::DbError::TooManyParameters)?;
-            let key = format!("k{row:08}");
-            let value = format!("value-{row:08}-stable-vfs");
-            statement.execute(ic_sqlite_vfs::params![key, value])?;
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 25];
+            let key = bench_key(row, &mut key);
+            let value = bench_value(row, &mut value);
+            statement.execute_text_text(&key, &value)?;
         }
         Ok(())
     })
@@ -158,14 +283,17 @@ fn bench_append_insert(base_rows: u32, append_rows: u32) -> Result<BenchReport, 
 
 #[update]
 fn bench_update_only(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     seed_bench_rows(rows).map_err(error_text)?;
     let start = performance_counter(0);
     Db::update(|connection| {
         let mut statement = connection.prepare("UPDATE bench SET value = ?1 WHERE key = ?2")?;
         for index in 0..rows {
-            let key = format!("k{index:08}");
-            let value = format!("updated-{index:08}-stable-vfs");
-            statement.execute(ic_sqlite_vfs::params![value, key])?;
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 27];
+            let key = bench_key(index, &mut key);
+            let value = updated_value(index, &mut value);
+            statement.execute_text_text(&value, &key)?;
         }
         Ok(())
     })
@@ -195,33 +323,130 @@ fn bench_read(rows: u32) -> Result<BenchReport, String> {
 }
 
 #[query]
-fn bench_get_many_in(rows: u32) -> Result<BenchReport, String> {
-    if rows == 0 {
-        return Err("rows must be positive".to_string());
-    }
+fn bench_read_public_helper(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     warm_read_connection()?;
     let start = performance_counter(0);
     let checksum = Db::query(|connection| {
-        let sql = format!(
-            "SELECT value FROM bench WHERE key IN ({}) ORDER BY key",
-            placeholders(rows)?
-        );
-        let keys = bench_keys(rows);
-        let values = keys
-            .iter()
-            .map(|key| key as &dyn ToSql)
-            .collect::<Vec<_>>();
-        let mut statement = connection.prepare(&sql)?;
-        let mut rows = statement.query(&values)?;
         let mut total = 0_u64;
-        while let Some(row) = rows.next_row()? {
-            let len = row.get::<TextLen>(0)?.0;
-            total = total.wrapping_add(len as u64);
+        for index in 0..rows {
+            let mut key = [0_u8; 9];
+            let key = bench_key(index, &mut key);
+            if let Some(value) = connection.query_optional_string_text(POINT_READ_SQL, key)? {
+                total = total.wrapping_add(value.len() as u64);
+            }
         }
         Ok(total)
     })
     .map_err(error_text)?;
     report(rows, start, checksum)
+}
+
+#[query]
+fn bench_read_prepare_each(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
+    warm_read_connection()?;
+    let start = performance_counter(0);
+    let checksum = Db::query(|connection| {
+        let mut total = 0_u64;
+        for index in 0..rows {
+            let mut key = [0_u8; 9];
+            let key = bench_key(index, &mut key);
+            let mut statement = connection.prepare(POINT_READ_SQL)?;
+            if let Some(value) = statement.query_optional_string_text(key)? {
+                total = total.wrapping_add(value.len() as u64);
+            }
+        }
+        Ok(total)
+    })
+    .map_err(error_text)?;
+    report(rows, start, checksum)
+}
+
+#[query]
+fn bench_get_many_in(rows: u32) -> Result<BenchReport, String> {
+    if rows == 0 {
+        return Err("rows must be positive".to_string());
+    }
+    validate_fixed_bench_key_rows(rows)?;
+    warm_read_connection()?;
+    let start = performance_counter(0);
+    let checksum = Db::query(|connection| {
+        let sql = multi_get_sql(rows)?;
+        let keys = bench_key_buffers(rows);
+        connection.query_text_iter_text_len_sum(&sql, keys.iter().map(bench_key_buffer_str))
+    })
+    .map_err(error_text)?;
+    report(rows, start, checksum)
+}
+
+#[query]
+fn bench_get_many_in_profile(rows: u32) -> Result<BenchGetManyProfileReport, String> {
+    if rows == 0 {
+        return Err("rows must be positive".to_string());
+    }
+    validate_fixed_bench_key_rows(rows)?;
+    warm_read_connection()?;
+    read_metrics::reset_read_metrics();
+    let start = performance_counter(0);
+    let mut profile = BenchGetManyProfile::default();
+    let checksum = Db::query(|connection| {
+        profile.open_query = performance_counter(0).saturating_sub(start);
+
+        let sql_start = performance_counter(0);
+        let sql = multi_get_sql(rows)?;
+        profile.sql_build = performance_counter(0).saturating_sub(sql_start);
+
+        let key_start = performance_counter(0);
+        let keys = bench_key_buffers(rows);
+        profile.key_build = performance_counter(0).saturating_sub(key_start);
+
+        let prepare_start = performance_counter(0);
+        let mut statement = connection.prepare_cached(&sql)?;
+        profile.prepare = performance_counter(0).saturating_sub(prepare_start);
+
+        let (total, statement_profile) =
+            statement.query_text_iter_text_len_sum_profiled(keys.iter().map(bench_key_buffer_str))?;
+        profile.bind = statement_profile.reset_bind;
+        profile.row_scan = statement_profile.row_scan;
+        Ok(total)
+    })
+    .map_err(error_text)?;
+
+    let report_start = performance_counter(0);
+    let block = Superblock::load().map_err(|error| error.to_string())?;
+    let stable_pages = memory::size_pages();
+    let stable_bytes = stable_pages
+        .checked_mul(ic_sqlite_vfs::config::STABLE_PAGE_SIZE)
+        .ok_or_else(|| "stable byte size overflow".to_string())?;
+    profile.report = performance_counter(0).saturating_sub(report_start);
+    let metrics = read_metrics::read_metrics_snapshot();
+    read_metrics::disable_read_metrics();
+
+    Ok(BenchGetManyProfileReport {
+        rows: u64::from(rows),
+        instructions: performance_counter(0).saturating_sub(start),
+        checksum,
+        db_size: block.db_size,
+        stable_pages,
+        stable_bytes,
+        open_query: profile.open_query,
+        sql_build: profile.sql_build,
+        key_build: profile.key_build,
+        prepare: profile.prepare,
+        bind: profile.bind,
+        row_scan: profile.row_scan,
+        report: profile.report,
+        x_read_calls: metrics.x_read_calls,
+        x_read_bytes: metrics.x_read_bytes,
+        stable_data_read_calls: metrics.stable_data_read_calls,
+        stable_data_read_bytes: metrics.stable_data_read_bytes,
+        page_table_root_hits: metrics.page_table_root_hits,
+        page_table_root_misses: metrics.page_table_root_misses,
+        page_table_segment_hits: metrics.page_table_segment_hits,
+        page_table_segment_misses: metrics.page_table_segment_misses,
+        superblock_loads: metrics.superblock_loads,
+    })
 }
 
 #[query]
@@ -298,6 +523,7 @@ fn bench_read_profile(rows: u32) -> Result<BenchReadProfileReport, String> {
         .ok_or_else(|| "stable byte size overflow".to_string())?;
     profile.report = performance_counter(0).saturating_sub(report_start);
     let metrics = read_metrics::read_metrics_snapshot();
+    read_metrics::disable_read_metrics();
 
     Ok(BenchReadProfileReport {
         rows: u64::from(rows),
@@ -328,6 +554,7 @@ fn bench_read_profile(rows: u32) -> Result<BenchReadProfileReport, String> {
 
 #[update]
 fn bench_write(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     let start = performance_counter(0);
     Db::update(|connection| {
         let mut statement = connection.prepare(
@@ -335,14 +562,107 @@ fn bench_write(rows: u32) -> Result<BenchReport, String> {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         )?;
         for index in 0..rows {
-            let key = format!("w{index:08}");
-            let value = format!("updated-{index:08}-stable-vfs");
-            statement.execute(ic_sqlite_vfs::params![key, value])?;
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 27];
+            let key = prefixed_key(b'w', index, &mut key);
+            let value = updated_value(index, &mut value);
+            statement.execute_text_text(&key, &value)?;
         }
         Ok(())
     })
     .map_err(error_text)?;
     report(rows, start, u64::from(rows))
+}
+
+#[update]
+fn bench_write_profile(rows: u32) -> Result<BenchWriteProfileReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
+    read_metrics::reset_read_metrics();
+    let start = performance_counter(0);
+    let mut profile = BenchWriteProfile::default();
+    Db::update(|connection| {
+        profile.open_update = performance_counter(0).saturating_sub(start);
+
+        let prepare_start = performance_counter(0);
+        let mut statement = connection.prepare(
+            "INSERT INTO bench(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )?;
+        profile.prepare = performance_counter(0).saturating_sub(prepare_start);
+
+        for index in 0..rows {
+            let format_start = performance_counter(0);
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 27];
+            let key = prefixed_key(b'w', index, &mut key);
+            let value = updated_value(index, &mut value);
+            profile.key_value_format = profile
+                .key_value_format
+                .saturating_add(performance_counter(0).saturating_sub(format_start));
+
+            let execute_start = performance_counter(0);
+            let statement_profile = statement.execute_text_text_profiled(&key, &value)?;
+            profile.execute_total = profile
+                .execute_total
+                .saturating_add(performance_counter(0).saturating_sub(execute_start));
+            profile.add_statement(statement_profile);
+        }
+        Ok(())
+    })
+    .map_err(error_text)?;
+
+    let report_start = performance_counter(0);
+    let block = Superblock::load().map_err(|error| error.to_string())?;
+    let stable_pages = memory::size_pages();
+    let stable_bytes = stable_pages
+        .checked_mul(ic_sqlite_vfs::config::STABLE_PAGE_SIZE)
+        .ok_or_else(|| "stable byte size overflow".to_string())?;
+    profile.report = performance_counter(0).saturating_sub(report_start);
+    let metrics = read_metrics::read_metrics_snapshot();
+    read_metrics::disable_read_metrics();
+
+    Ok(BenchWriteProfileReport {
+        rows: u64::from(rows),
+        instructions: performance_counter(0).saturating_sub(start),
+        checksum: u64::from(rows),
+        db_size: block.db_size,
+        stable_pages,
+        stable_bytes,
+        open_update: profile.open_update,
+        prepare: profile.prepare,
+        key_value_format: profile.key_value_format,
+        execute_total: profile.execute_total,
+        reset_bind: profile.reset_bind,
+        step: profile.step,
+        report: profile.report,
+        x_read_calls: metrics.x_read_calls,
+        x_read_bytes: metrics.x_read_bytes,
+        x_write_calls: metrics.x_write_calls,
+        x_write_bytes: metrics.x_write_bytes,
+        x_file_size_calls: metrics.x_file_size_calls,
+        x_lock_calls: metrics.x_lock_calls,
+        x_unlock_calls: metrics.x_unlock_calls,
+        x_check_reserved_lock_calls: metrics.x_check_reserved_lock_calls,
+        x_file_control_calls: metrics.x_file_control_calls,
+        x_device_characteristics_calls: metrics.x_device_characteristics_calls,
+        stable_data_read_calls: metrics.stable_data_read_calls,
+        stable_data_read_bytes: metrics.stable_data_read_bytes,
+        stable_data_write_calls: metrics.stable_data_write_calls,
+        stable_data_write_bytes: metrics.stable_data_write_bytes,
+        stable_grow_calls: metrics.stable_grow_calls,
+        stable_grow_pages: metrics.stable_grow_pages,
+        page_table_root_hits: metrics.page_table_root_hits,
+        page_table_root_misses: metrics.page_table_root_misses,
+        page_table_segment_hits: metrics.page_table_segment_hits,
+        page_table_segment_misses: metrics.page_table_segment_misses,
+        superblock_loads: metrics.superblock_loads,
+        commit_load: metrics.commit_load,
+        commit_build_segments: metrics.commit_build_segments,
+        commit_capacity: metrics.commit_capacity,
+        commit_page_write: metrics.commit_page_write,
+        commit_table_write: metrics.commit_table_write,
+        commit_superblock_store: metrics.commit_superblock_store,
+    })
 }
 
 #[update]
@@ -357,10 +677,8 @@ fn bench_large_blob(bytes: u32) -> Result<BenchReport, String> {
                 body BLOB NOT NULL
              );",
         )?;
-        connection.execute(
-            "INSERT INTO blob_bench(id, body) VALUES (?1, ?2)",
-            ic_sqlite_vfs::params![1_i64, payload],
-        )?;
+        let mut insert = connection.prepare("INSERT INTO blob_bench(id, body) VALUES (?1, ?2)")?;
+        insert.execute_i64_blob(1, &payload)?;
         connection.query_scalar::<i64>(
             "SELECT length(body) FROM blob_bench WHERE id = 1",
             ic_sqlite_vfs::params![],
@@ -380,10 +698,9 @@ fn bench_many_rows(rows: u32) -> Result<BenchReport, String> {
     let start = performance_counter(0);
     let checksum = Db::query(|connection| {
         let mut statement = connection.prepare("SELECT value FROM bench ORDER BY key LIMIT ?1")?;
-        let mut rows = statement.query(ic_sqlite_vfs::params![i64::from(rows)])?;
+        let mut rows = statement.query_i64(i64::from(rows))?;
         let mut total = 0_u64;
-        while let Some(row) = rows.next_row()? {
-            let len = row.get::<TextLen>(0)?.0;
+        while let Some(len) = rows.next_text_len_zero()? {
             total = total.wrapping_add(len as u64);
         }
         Ok(total)
@@ -394,6 +711,7 @@ fn bench_many_rows(rows: u32) -> Result<BenchReport, String> {
 
 #[update]
 fn bench_unbounded_order_by(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_index(rows)?;
     let start = performance_counter(0);
     let checksum = Db::update(|connection| {
         connection.execute_batch(
@@ -407,14 +725,17 @@ fn bench_unbounded_order_by(rows: u32) -> Result<BenchReport, String> {
             connection.prepare("INSERT INTO order_bench(id, value) VALUES (?1, ?2)")?;
         for index in 0..rows {
             let id = i64::from(index);
-            let value = format!("value-{:08}", rows - index);
-            insert.execute(ic_sqlite_vfs::params![id, value])?;
+            let mut value = [0_u8; 14];
+            let value = order_value(rows - index, &mut value);
+            insert.execute_i64_text(id, &value)?;
         }
-        let values = connection.query_column::<String>(
-            "SELECT value FROM order_bench ORDER BY value",
-            ic_sqlite_vfs::params![],
-        )?;
-        Ok(values.iter().map(|value| value.len() as u64).sum::<u64>())
+        let mut query = connection.prepare("SELECT value FROM order_bench ORDER BY value")?;
+        let mut rows = query.query(ic_sqlite_vfs::params![])?;
+        let mut total = 0_u64;
+        while let Some(len) = rows.next_text_len_zero()? {
+            total = total.wrapping_add(len as u64);
+        }
+        Ok(total)
     })
     .map_err(error_text)?;
     report(rows, start, checksum)
@@ -422,6 +743,7 @@ fn bench_unbounded_order_by(rows: u32) -> Result<BenchReport, String> {
 
 #[update]
 fn bench_join(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     let start = performance_counter(0);
     let checksum = Db::update(|connection| {
         connection.execute_batch(
@@ -442,14 +764,16 @@ fn bench_join(rows: u32) -> Result<BenchReport, String> {
         let mut right =
             connection.prepare("INSERT INTO join_right(group_id, label) VALUES (?1, ?2)")?;
         for group in 0..100_i64 {
-            let label = format!("group-{group:03}");
-            right.execute(ic_sqlite_vfs::params![group, label])?;
+            let mut label = [0_u8; 9];
+            let label = group_label(group, &mut label);
+            right.execute_i64_text(group, &label)?;
         }
         for index in 0..rows {
             let id = i64::from(index);
             let group = id % 100;
-            let body = format!("body-{index:08}");
-            left.execute(ic_sqlite_vfs::params![id, group, body])?;
+            let mut body = [0_u8; 13];
+            let body = body_value(index, &mut body);
+            left.execute_i64_i64_text(id, group, &body)?;
         }
         connection.query_scalar::<i64>(
             "SELECT COUNT(*)
@@ -471,37 +795,21 @@ fn bench_growth(rows: u32, writes: u32) -> Result<BenchReport, String> {
     if rows == 0 {
         return Err("rows must be positive".to_string());
     }
-    Db::update(|connection| {
-        connection.execute_batch(
-            "DROP TABLE IF EXISTS growth_bench;
-             CREATE TABLE growth_bench (
-                key TEXT PRIMARY KEY NOT NULL,
-                value TEXT NOT NULL
-             );",
-        )?;
-        let mut insert =
-            connection.prepare("INSERT INTO growth_bench(key, value) VALUES (?1, ?2)")?;
-        for index in 0..rows {
-            let key = format!("g{index:08}");
-            let value = format!("growth-{index:08}-stable-vfs");
-            insert.execute(ic_sqlite_vfs::params![key, value])?;
-        }
-        Ok(())
-    })
-    .map_err(error_text)?;
+    validate_fixed_bench_key_rows(rows)?;
+    validate_fixed_bench_key_rows(writes)?;
+    seed_growth_rows(rows).map_err(error_text)?;
 
     let start = performance_counter(0);
     for index in 0..writes {
         Db::update(|connection| {
-            let key = format!("g{:08}", index % rows);
-            let value = format!("write-{index:08}");
-            connection.execute(
-                "UPDATE growth_bench SET value = ?1 WHERE key = ?2",
-                ic_sqlite_vfs::params![value, key],
-            )?;
-            let changed =
-                connection.query_scalar::<i64>("SELECT changes()", ic_sqlite_vfs::params![])?;
-            if changed != 1 {
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 14];
+            let key = prefixed_key(b'g', index % rows, &mut key);
+            let value = write_value(index, &mut value);
+            let mut statement =
+                connection.prepare_cached("UPDATE growth_bench SET value = ?1 WHERE key = ?2")?;
+            statement.execute_text_text(&value, &key)?;
+            if connection.changes() != 1 {
                 return Err(ic_sqlite_vfs::DbError::NotFound);
             }
             Ok(())
@@ -510,6 +818,114 @@ fn bench_growth(rows: u32, writes: u32) -> Result<BenchReport, String> {
     }
 
     report(rows, start, u64::from(writes))
+}
+
+#[update]
+fn bench_growth_profile(rows: u32, writes: u32) -> Result<BenchGrowthProfileReport, String> {
+    if rows == 0 {
+        return Err("rows must be positive".to_string());
+    }
+    validate_fixed_bench_key_rows(rows)?;
+    validate_fixed_bench_key_rows(writes)?;
+    seed_growth_rows(rows).map_err(error_text)?;
+
+    read_metrics::reset_read_metrics();
+    let start = performance_counter(0);
+    let mut profile = BenchGrowthProfile::default();
+    for index in 0..writes {
+        let update_start = performance_counter(0);
+        Db::update(|connection| {
+            profile.open_update = profile
+                .open_update
+                .saturating_add(performance_counter(0).saturating_sub(update_start));
+
+            let format_start = performance_counter(0);
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 14];
+            let key = prefixed_key(b'g', index % rows, &mut key);
+            let value = write_value(index, &mut value);
+            profile.key_value_format = profile
+                .key_value_format
+                .saturating_add(performance_counter(0).saturating_sub(format_start));
+
+            let prepare_start = performance_counter(0);
+            let mut statement =
+                connection.prepare_cached("UPDATE growth_bench SET value = ?1 WHERE key = ?2")?;
+            profile.prepare = profile
+                .prepare
+                .saturating_add(performance_counter(0).saturating_sub(prepare_start));
+
+            let execute_start = performance_counter(0);
+            statement.execute_text_text(&value, &key)?;
+            profile.execute_total = profile
+                .execute_total
+                .saturating_add(performance_counter(0).saturating_sub(execute_start));
+
+            let changes_start = performance_counter(0);
+            let changed = connection.changes();
+            profile.changes = profile
+                .changes
+                .saturating_add(performance_counter(0).saturating_sub(changes_start));
+            if changed != 1 {
+                return Err(ic_sqlite_vfs::DbError::NotFound);
+            }
+            Ok(())
+        })
+        .map_err(error_text)?;
+    }
+
+    let report_start = performance_counter(0);
+    let block = Superblock::load().map_err(|error| error.to_string())?;
+    let stable_pages = memory::size_pages();
+    let stable_bytes = stable_pages
+        .checked_mul(ic_sqlite_vfs::config::STABLE_PAGE_SIZE)
+        .ok_or_else(|| "stable byte size overflow".to_string())?;
+    profile.report = performance_counter(0).saturating_sub(report_start);
+    let metrics = read_metrics::read_metrics_snapshot();
+    read_metrics::disable_read_metrics();
+
+    Ok(BenchGrowthProfileReport {
+        rows: u64::from(rows),
+        writes: u64::from(writes),
+        instructions: performance_counter(0).saturating_sub(start),
+        checksum: u64::from(writes),
+        db_size: block.db_size,
+        stable_pages,
+        stable_bytes,
+        open_update: profile.open_update,
+        key_value_format: profile.key_value_format,
+        prepare: profile.prepare,
+        execute_total: profile.execute_total,
+        changes: profile.changes,
+        report: profile.report,
+        x_read_calls: metrics.x_read_calls,
+        x_read_bytes: metrics.x_read_bytes,
+        x_write_calls: metrics.x_write_calls,
+        x_write_bytes: metrics.x_write_bytes,
+        x_file_size_calls: metrics.x_file_size_calls,
+        x_lock_calls: metrics.x_lock_calls,
+        x_unlock_calls: metrics.x_unlock_calls,
+        x_check_reserved_lock_calls: metrics.x_check_reserved_lock_calls,
+        x_file_control_calls: metrics.x_file_control_calls,
+        x_device_characteristics_calls: metrics.x_device_characteristics_calls,
+        stable_data_read_calls: metrics.stable_data_read_calls,
+        stable_data_read_bytes: metrics.stable_data_read_bytes,
+        stable_data_write_calls: metrics.stable_data_write_calls,
+        stable_data_write_bytes: metrics.stable_data_write_bytes,
+        stable_grow_calls: metrics.stable_grow_calls,
+        stable_grow_pages: metrics.stable_grow_pages,
+        page_table_root_hits: metrics.page_table_root_hits,
+        page_table_root_misses: metrics.page_table_root_misses,
+        page_table_segment_hits: metrics.page_table_segment_hits,
+        page_table_segment_misses: metrics.page_table_segment_misses,
+        superblock_loads: metrics.superblock_loads,
+        commit_load: metrics.commit_load,
+        commit_build_segments: metrics.commit_build_segments,
+        commit_capacity: metrics.commit_capacity,
+        commit_page_write: metrics.commit_page_write,
+        commit_table_write: metrics.commit_table_write,
+        commit_superblock_store: metrics.commit_superblock_store,
+    })
 }
 
 fn reset_bench_table(connection: &ic_sqlite_vfs::db::connection::Connection) -> Result<(), ic_sqlite_vfs::DbError> {
@@ -522,34 +938,81 @@ fn reset_bench_table(connection: &ic_sqlite_vfs::db::connection::Connection) -> 
     )
 }
 
-fn seed_bench_rows(rows: u32) -> Result<(), ic_sqlite_vfs::DbError> {
+fn seed_growth_rows(rows: u32) -> Result<(), ic_sqlite_vfs::DbError> {
     Db::update(|connection| {
-        reset_bench_table(connection)?;
-        let mut statement = connection.prepare("INSERT INTO bench(key, value) VALUES (?1, ?2)")?;
+        connection.execute_batch(
+            "DROP TABLE IF EXISTS growth_bench;
+             CREATE TABLE growth_bench (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+             );",
+        )?;
+        let mut insert =
+            connection.prepare("INSERT INTO growth_bench(key, value) VALUES (?1, ?2)")?;
         for index in 0..rows {
-            let key = format!("k{index:08}");
-            let value = format!("value-{index:08}-stable-vfs");
-            statement.execute(ic_sqlite_vfs::params![key, value])?;
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 26];
+            let key = prefixed_key(b'g', index, &mut key);
+            let value = growth_value(index, &mut value);
+            insert.execute_text_text(&key, &value)?;
         }
         Ok(())
     })
 }
 
-fn placeholders(count: u32) -> Result<String, ic_sqlite_vfs::DbError> {
-    let capacity = usize::try_from(count).map_err(|_| ic_sqlite_vfs::DbError::TooManyParameters)?;
-    let mut out = String::with_capacity(capacity.saturating_mul(3));
-    for index in 0..count {
-        if index > 0 {
-            out.push(',');
+fn seed_bench_rows(rows: u32) -> Result<(), ic_sqlite_vfs::DbError> {
+    Db::update(|connection| {
+        reset_bench_table(connection)?;
+        let mut statement = connection.prepare("INSERT INTO bench(key, value) VALUES (?1, ?2)")?;
+        for index in 0..rows {
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 25];
+            let key = bench_key(index, &mut key);
+            let value = bench_value(index, &mut value);
+            statement.execute_text_text(&key, &value)?;
         }
-        out.push('?');
-        out.push_str(&(index + 1).to_string());
-    }
-    Ok(out)
+        Ok(())
+    })
 }
 
-fn bench_keys(rows: u32) -> Vec<String> {
-    (0..rows).map(|index| format!("k{index:08}")).collect()
+fn multi_get_sql(count: u32) -> Result<String, ic_sqlite_vfs::DbError> {
+    let capacity = usize::try_from(count).map_err(|_| ic_sqlite_vfs::DbError::TooManyParameters)?;
+    let placeholder_len = capacity.saturating_mul(2).saturating_sub(1);
+    let mut bytes = Vec::with_capacity(
+        MULTI_GET_SQL_PREFIX
+            .len()
+            .saturating_add(placeholder_len)
+            .saturating_add(MULTI_GET_SQL_SUFFIX.len()),
+    );
+    bytes.extend_from_slice(MULTI_GET_SQL_PREFIX);
+    debug_assert!(capacity > 0);
+    let placeholder_start = bytes.len();
+    bytes.resize(placeholder_start + placeholder_len, b',');
+    let mut index = placeholder_start;
+    while index < bytes.len() {
+        bytes[index] = b'?';
+        index += 2;
+    }
+    bytes.extend_from_slice(MULTI_GET_SQL_SUFFIX);
+    // SAFETY: the SQL is assembled from fixed ASCII fragments and placeholders.
+    Ok(unsafe { String::from_utf8_unchecked(bytes) })
+}
+
+fn bench_key_buffers(rows: u32) -> Vec<[u8; 9]> {
+    let capacity = usize::try_from(rows).expect("row count fits usize");
+    let mut keys = vec![[0_u8; 9]; capacity];
+    for (index, key) in keys.iter_mut().enumerate() {
+        bench_key(
+            u32::try_from(index).expect("row count already came from u32"),
+            key,
+        );
+    }
+    keys
+}
+
+fn bench_key_buffer_str(key: &[u8; 9]) -> &str {
+    // SAFETY: `bench_key_buffers` fills each buffer with ASCII `k` plus digits.
+    unsafe { std::str::from_utf8_unchecked(key) }
 }
 
 #[derive(Default)]
@@ -569,6 +1032,45 @@ impl BenchReadProfile {
         self.reset_bind = self.reset_bind.saturating_add(profile.reset_bind);
         self.step = self.step.saturating_add(profile.step);
         self.column_read = self.column_read.saturating_add(profile.column_read);
+    }
+}
+
+#[derive(Default)]
+struct BenchGetManyProfile {
+    open_query: u64,
+    sql_build: u64,
+    key_build: u64,
+    prepare: u64,
+    bind: u64,
+    row_scan: u64,
+    report: u64,
+}
+
+#[derive(Default)]
+struct BenchWriteProfile {
+    open_update: u64,
+    prepare: u64,
+    key_value_format: u64,
+    execute_total: u64,
+    reset_bind: u64,
+    step: u64,
+    report: u64,
+}
+
+#[derive(Default)]
+struct BenchGrowthProfile {
+    open_update: u64,
+    key_value_format: u64,
+    prepare: u64,
+    execute_total: u64,
+    changes: u64,
+    report: u64,
+}
+
+impl BenchWriteProfile {
+    fn add_statement(&mut self, profile: ExecuteTextTextProfile) {
+        self.reset_bind = self.reset_bind.saturating_add(profile.reset_bind);
+        self.step = self.step.saturating_add(profile.step);
     }
 }
 

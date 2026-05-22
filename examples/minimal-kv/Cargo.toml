@@ -11,4 +11,3 @@ crate-type = ["cdylib"]
 candid = "0.10"
 ic-cdk = "0.20.1"
 ic-sqlite-vfs = { path = "../..", default-features = false, features = ["sqlite-precompiled"] }
-ic-stable-structures = "0.7"

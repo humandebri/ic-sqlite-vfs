@@ -1,0 +1,90 @@
+{
+  "target": "virtual_segment_contains",
+  "entry": {
+    "display_name": "virtual_segment_contains",
+    "function": "virtual_segment_contains",
+    "function_path": "virtual_segment_contains",
+    "file": "src/stable/memory_layout.rs",
+    "target_id": "ce18b0fedc81f0136422479b66e0e20dc18354d272670aef58a1154157d94fbe",
+    "slug": "virtual_segment_contains-b6aa9c30",
+    "source_hash": "b6aa9c30b67da7652d506ea7135e1b82f9490ac7bed2126ddf90c6c5053980d5",
+    "semantic_hash": "372aa7809ccf86da760b91b83ffa414f0f104b1c6ef3a219dd408ad88ba69dc9",
+    "created_at": "2026-05-19T01:18:36Z"
+  },
+  "signature": "pub(super) fn virtual_segment_contains(\n    address: u64,\n    length: u64,\n    other_address: u64,\n    other_length: u64,\n) -> bool",
+  "body": "{\n    if length > u64::MAX - address {\n        return false;\n    }\n    if other_length > u64::MAX - other_address {\n        return false;\n    }\n    let end = address + length;\n    let other_end = other_address + other_length;\n    address <= other_address && other_end <= end\n}",
+  "span": {
+    "start_line": 85,
+    "end_line": 100
+  },
+  "git_commit": "d529a48a1710fa8a5aa8396a4ed9e6006ab3a266",
+  "worktree_dirty": true,
+  "source_hash": "573c059dd4e72a975a12b6a2ab2d043607a10c70b80cfdd87c31f4b61c2a483e",
+  "semantic_hash": "c2d06bbe8f049259951b1cb9c4c577ee340bc0950bdcf823baca8ce94648c69e",
+  "dependency_hash_inputs": [
+    {
+      "kind": "use",
+      "name": "use",
+      "file": "src/stable/memory_layout.rs",
+      "hash": "ba78692b75a749f7f0be7caad2e5d843610ed72e7c007c7d88bad697b006a191"
+    },
+    {
+      "kind": "use",
+      "name": "use",
+      "file": "src/stable/memory_layout.rs",
+      "hash": "38323dffe8500c017ad6fc106bca87dd970e710d43bc930048261e7c094665e0"
+    },
+    {
+      "kind": "use",
+      "name": "use",
+      "file": "src/stable/memory_layout.rs",
+      "hash": "ef07b021a942a56647cd7d25a41a9c9d50aed87ff4b698157ff0cb3e6a9c610a"
+    },
+    {
+      "kind": "impl",
+      "name": "impl",
+      "file": "src/stable/memory_layout.rs",
+      "hash": "8c4c47d9e8a0532e337ab528fe3ed5539b3213cf8c09eabc28ce1aaf284066d7"
+    },
+    {
+      "kind": "impl",
+      "name": "impl",
+      "file": "src/stable/memory_layout.rs",
+      "hash": "22eb89c2e9e8faac261a7d4c14e2050a529e3e7fd6b1662bcb6e1e15f6d2f667"
+    },
+    {
+      "kind": "impl",
+      "name": "impl",
+      "file": "src/stable/memory_layout.rs",
+      "hash": "6e0879f44c5cb876800ad0ebd81a26fdc7fbf84bfa4d4894f85868c3357200e8"
+    },
+    {
+      "kind": "module",
+      "name": "cfg",
+      "file": "src/stable/memory_layout.rs",
+      "hash": "b0bd67f312131f2930ee8002a00673dfd5a608057b77338f813fc384e2896118"
+    },
+    {
+      "kind": "use",
+      "name": "use",
+      "file": "src/stable/memory_layout.rs",
+      "hash": "23395dd20e87e73e7fb5d262ec7379a4f5f12b310c6ce237113e0ae453a2a075"
+    }
+  ],
+  "unresolved_dependencies": [],
+  "tool_version": "0.1.0",
+  "cfg": [],
+  "features": [],
+  "types": [],
+  "called_functions": [],
+  "callers": [],
+  "tests": [],
+  "panic_sites": [],
+  "overflow_sites": [
+    "+",
+    "-"
+  ],
+  "casts": [],
+  "division_sites": [],
+  "llm_context_files": []
+}
