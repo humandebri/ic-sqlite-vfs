@@ -26,4 +26,4 @@ cargo publish --no-verify
 ## Artifact
 
 tag `v*` を push すると GitHub Actions が wasm を build し、GitHub Release artifact としてアップロードする。
-今回の tag は `v0.2.1`。
+今回の tag は `v0.2.2`。

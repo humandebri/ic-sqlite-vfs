@@ -6,3 +6,6 @@ benchmarks/kv-canister/.icp/cache/
 benchmarks/kv-canister/target/
 examples/minimal-kv/target/
 vendor/sqlite/wasm32-unknown-unknown/obj/
+fuzz/target/
+fuzz/artifacts/
+fuzz/corpus/
