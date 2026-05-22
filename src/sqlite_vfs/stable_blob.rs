@@ -1920,6 +1920,195 @@ mod tests {
     }
 
     #[test]
+    fn fnv_fold_matches_one_pass_for_multiple_partitions() {
+        let bytes: Vec<u8> = (0..97)
+            .map(|index| (index as u8).wrapping_mul(37).wrapping_add(11))
+            .collect();
+        let expected = fnv1a64(&bytes);
+
+        for split in [0_usize, 1, 2, 7, 31, 64, bytes.len()] {
+            let split = split.min(bytes.len());
+            let mut hash = fnv1a64(&[]);
+            hash = fold_fnv1a64(hash, &bytes[..split]);
+            hash = fold_fnv1a64(hash, &bytes[split..]);
+            assert_eq!(hash, expected);
+        }
+
+        let mut hash = fnv1a64(&[]);
+        for chunk in bytes.chunks(13) {
+            hash = fold_fnv1a64(hash, chunk);
+        }
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn page_map_commit_tracks_dirty_page_offsets() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+        invalidate_read_cache();
+
+        let page_zero = vec![1_u8; page_len()];
+        let page_later = vec![2_u8; page_len()];
+        let later_page_no = SEGMENT_PAGE_COUNT + 1;
+        write_at(0, &page_zero).unwrap();
+        write_at(later_page_no * page_size(), &page_later).unwrap();
+
+        let block = Superblock::load().unwrap();
+        let root = read_root_table(&block).unwrap();
+        let table = read_page_table(&block).unwrap();
+        let expected_pages = active_page_count(&block).unwrap();
+        let expected_segments = segment_count_for_pages(expected_pages).unwrap();
+
+        assert_eq!(root.len() as u64, expected_segments);
+        assert_eq!(table.len() as u64, expected_pages);
+        assert_ne!(table[0], 0);
+        assert_ne!(table[later_page_no as usize], 0);
+
+        let old_page_zero_offset = table[0];
+        let updated_page_zero = vec![3_u8; page_len()];
+        write_at(0, &updated_page_zero).unwrap();
+        let updated_table = read_page_table(&Superblock::load().unwrap()).unwrap();
+        let mut out = vec![0_u8; page_len()];
+        read_base_at(0, &mut out).unwrap();
+
+        assert_ne!(updated_table[0], old_page_zero_offset);
+        assert_eq!(out, updated_page_zero);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn page_map_commit_tracks_multi_segment_dirty_and_clean_pages() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+        invalidate_read_cache();
+
+        let clean_page_no = 1;
+        let later_page_no = SEGMENT_PAGE_COUNT + 1;
+        write_at(0, &vec![1_u8; page_len()]).unwrap();
+        write_at(clean_page_no * page_size(), &vec![2_u8; page_len()]).unwrap();
+        write_at(later_page_no * page_size(), &vec![3_u8; page_len()]).unwrap();
+
+        let before = Superblock::load().unwrap();
+        let before_root = read_root_table(&before).unwrap();
+        let before_table = read_page_table(&before).unwrap();
+
+        begin_update().unwrap();
+        write_at(0, &vec![4_u8; page_len()]).unwrap();
+        write_at(later_page_no * page_size(), &vec![5_u8; page_len()]).unwrap();
+        commit_update().unwrap();
+
+        let after = Superblock::load().unwrap();
+        let after_root = read_root_table(&after).unwrap();
+        let after_table = read_page_table(&after).unwrap();
+
+        assert_eq!(after_root.len(), after.page_count as usize);
+        assert_eq!(after_root.len(), before_root.len());
+        assert_ne!(after_table[0], before_table[0]);
+        assert_eq!(
+            after_table[clean_page_no as usize],
+            before_table[clean_page_no as usize]
+        );
+        assert_ne!(
+            after_table[later_page_no as usize],
+            before_table[later_page_no as usize]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn page_map_commit_zeroes_truncated_tail_slots() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+        invalidate_read_cache();
+
+        write_at(0, &vec![1_u8; page_len()]).unwrap();
+        write_at(page_size(), &vec![2_u8; page_len()]).unwrap();
+        write_at(2 * page_size(), &vec![3_u8; page_len()]).unwrap();
+        truncate(page_size()).unwrap();
+
+        let block = Superblock::load().unwrap();
+        let root = read_root_table(&block).unwrap();
+        let segment = read_segment_table(&block, &root, 0).unwrap();
+
+        assert_eq!(block.db_size, page_size());
+        assert_eq!(segment[0] != 0, true);
+        assert_eq!(segment[1], 0);
+        assert_eq!(segment[2], 0);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn compact_keeps_zero_pages_and_densifies_offsets_across_segments() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+        invalidate_read_cache();
+
+        let later_page_no = SEGMENT_PAGE_COUNT + 2;
+        let first_page = vec![7_u8; page_len()];
+        let later_page = vec![9_u8; page_len()];
+        write_at(0, &first_page).unwrap();
+        write_at(later_page_no * page_size(), &later_page).unwrap();
+
+        compact().unwrap();
+
+        let block = Superblock::load().unwrap();
+        let root = read_root_table(&block).unwrap();
+        let table = read_page_table(&block).unwrap();
+        let mut first_out = vec![0_u8; page_len()];
+        let mut later_out = vec![0_u8; page_len()];
+
+        read_base_at(0, &mut first_out).unwrap();
+        read_base_at(later_page_no * page_size(), &mut later_out).unwrap();
+
+        assert_eq!(root.len() as u64, block.page_count);
+        assert_eq!(table.len() as u64, active_page_count(&block).unwrap());
+        assert_ne!(table[0], 0);
+        assert_eq!(table[1], 0);
+        assert_eq!(table[later_page_no as usize], table[0] + page_size());
+        assert_eq!(first_out, first_page);
+        assert_eq!(later_out, later_page);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn page_table_u64_encoding_is_little_endian_and_round_trips() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+        invalidate_read_cache();
+
+        let entries = [
+            0_u64,
+            1,
+            0x0102_0304_0506_0708,
+            0xf1f2_f3f4_f5f6_f7f8,
+            u64::MAX,
+        ];
+        let mut cursor = 128_u64;
+        let expected_len = u64::try_from(entries.len() * 8).unwrap();
+        crate::stable::memory::ensure_capacity(cursor + expected_len).unwrap();
+
+        let offset = write_u64_table_at(&entries, &mut cursor).unwrap();
+        let decoded = read_u64_table_at(offset, entries.len()).unwrap();
+        let mut encoded = vec![0_u8; entries.len() * 8];
+        crate::stable::memory::read_preallocated(offset, &mut encoded).unwrap();
+        let expected = entries
+            .iter()
+            .flat_map(|entry| entry.to_le_bytes())
+            .collect::<Vec<_>>();
+
+        assert_eq!(offset, 128);
+        assert_eq!(cursor, 128 + expected_len);
+        assert_eq!(decoded, entries);
+        assert_eq!(encoded, expected);
+
+        let mut empty_cursor = cursor;
+        assert_eq!(write_u64_table_at(&[], &mut empty_cursor).unwrap(), 0);
+        assert_eq!(empty_cursor, cursor);
+        assert!(read_u64_table_at(cursor, 0).unwrap().is_empty());
+    }
+
+    #[test]
     #[serial_test::serial]
     fn read_metrics_separate_table_cache_from_data_reads() {
         crate::stable::memory::reset_for_tests();

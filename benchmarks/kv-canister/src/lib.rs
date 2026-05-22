@@ -17,7 +17,7 @@ mod key;
 
 use key::{
     bench_key, bench_value, body_value, group_label, growth_value, order_value, prefixed_key,
-    updated_value,
+    updated_value, validate_fixed_bench_key_index, validate_fixed_bench_key_range,
     validate_fixed_bench_key_rows, write_value,
 };
 
@@ -219,6 +219,7 @@ fn init_db() {
 
 #[update]
 fn bench_reset(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     let start = performance_counter(0);
     Db::update(|connection| {
         reset_bench_table(connection)?;
@@ -238,6 +239,7 @@ fn bench_reset(rows: u32) -> Result<BenchReport, String> {
 
 #[update]
 fn bench_insert_only(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     Db::update(|connection| reset_bench_table(connection)).map_err(error_text)?;
     let start = performance_counter(0);
     Db::update(|connection| {
@@ -257,6 +259,8 @@ fn bench_insert_only(rows: u32) -> Result<BenchReport, String> {
 
 #[update]
 fn bench_append_insert(base_rows: u32, append_rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(base_rows)?;
+    validate_fixed_bench_key_range(base_rows, append_rows)?;
     seed_bench_rows(base_rows).map_err(error_text)?;
     let start = performance_counter(0);
     Db::update(|connection| {
@@ -279,6 +283,7 @@ fn bench_append_insert(base_rows: u32, append_rows: u32) -> Result<BenchReport, 
 
 #[update]
 fn bench_update_only(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     seed_bench_rows(rows).map_err(error_text)?;
     let start = performance_counter(0);
     Db::update(|connection| {
@@ -363,6 +368,7 @@ fn bench_get_many_in(rows: u32) -> Result<BenchReport, String> {
     if rows == 0 {
         return Err("rows must be positive".to_string());
     }
+    validate_fixed_bench_key_rows(rows)?;
     warm_read_connection()?;
     let start = performance_counter(0);
     let checksum = Db::query(|connection| {
@@ -379,6 +385,7 @@ fn bench_get_many_in_profile(rows: u32) -> Result<BenchGetManyProfileReport, Str
     if rows == 0 {
         return Err("rows must be positive".to_string());
     }
+    validate_fixed_bench_key_rows(rows)?;
     warm_read_connection()?;
     read_metrics::reset_read_metrics();
     let start = performance_counter(0);
@@ -547,6 +554,7 @@ fn bench_read_profile(rows: u32) -> Result<BenchReadProfileReport, String> {
 
 #[update]
 fn bench_write(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     let start = performance_counter(0);
     Db::update(|connection| {
         let mut statement = connection.prepare(
@@ -568,6 +576,7 @@ fn bench_write(rows: u32) -> Result<BenchReport, String> {
 
 #[update]
 fn bench_write_profile(rows: u32) -> Result<BenchWriteProfileReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     read_metrics::reset_read_metrics();
     let start = performance_counter(0);
     let mut profile = BenchWriteProfile::default();
@@ -702,6 +711,7 @@ fn bench_many_rows(rows: u32) -> Result<BenchReport, String> {
 
 #[update]
 fn bench_unbounded_order_by(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_index(rows)?;
     let start = performance_counter(0);
     let checksum = Db::update(|connection| {
         connection.execute_batch(
@@ -733,6 +743,7 @@ fn bench_unbounded_order_by(rows: u32) -> Result<BenchReport, String> {
 
 #[update]
 fn bench_join(rows: u32) -> Result<BenchReport, String> {
+    validate_fixed_bench_key_rows(rows)?;
     let start = performance_counter(0);
     let checksum = Db::update(|connection| {
         connection.execute_batch(
@@ -784,6 +795,8 @@ fn bench_growth(rows: u32, writes: u32) -> Result<BenchReport, String> {
     if rows == 0 {
         return Err("rows must be positive".to_string());
     }
+    validate_fixed_bench_key_rows(rows)?;
+    validate_fixed_bench_key_rows(writes)?;
     seed_growth_rows(rows).map_err(error_text)?;
 
     let start = performance_counter(0);
@@ -812,6 +825,8 @@ fn bench_growth_profile(rows: u32, writes: u32) -> Result<BenchGrowthProfileRepo
     if rows == 0 {
         return Err("rows must be positive".to_string());
     }
+    validate_fixed_bench_key_rows(rows)?;
+    validate_fixed_bench_key_rows(writes)?;
     seed_growth_rows(rows).map_err(error_text)?;
 
     read_metrics::reset_read_metrics();

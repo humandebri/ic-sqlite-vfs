@@ -75,7 +75,32 @@ pub fn validate_fixed_bench_key_rows(rows: u32) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "rows must be at most {MAX_FIXED_BENCH_KEY_ROWS} for fixed-width point reads"
+            "rows must be at most {MAX_FIXED_BENCH_KEY_ROWS} for fixed-width benchmark keys"
+        ))
+    }
+}
+
+pub fn validate_fixed_bench_key_index(index: u32) -> Result<(), String> {
+    if index < MAX_FIXED_BENCH_KEY_ROWS {
+        Ok(())
+    } else {
+        Err(format!(
+            "benchmark key index must be less than {MAX_FIXED_BENCH_KEY_ROWS}"
+        ))
+    }
+}
+
+pub fn validate_fixed_bench_key_range(start: u32, count: u32) -> Result<(), String> {
+    let Some(end) = start.checked_add(count) else {
+        return Err(format!(
+            "benchmark key index must be less than {MAX_FIXED_BENCH_KEY_ROWS}"
+        ));
+    };
+    if end <= MAX_FIXED_BENCH_KEY_ROWS {
+        Ok(())
+    } else {
+        Err(format!(
+            "benchmark key index must be less than {MAX_FIXED_BENCH_KEY_ROWS}"
         ))
     }
 }
@@ -118,7 +143,8 @@ fn digit_pair(value: u32) -> &'static [u8] {
 mod tests {
     use super::{
         bench_key, bench_value, body_value, group_label, growth_value, order_value, prefixed_key,
-        updated_value, validate_fixed_bench_key_rows, write_value, MAX_FIXED_BENCH_KEY_ROWS,
+        updated_value, validate_fixed_bench_key_index, validate_fixed_bench_key_range,
+        validate_fixed_bench_key_rows, write_value, MAX_FIXED_BENCH_KEY_ROWS,
     };
 
     #[test]
@@ -160,5 +186,12 @@ mod tests {
     fn fixed_bench_key_rows_rejects_truncating_range() {
         assert!(validate_fixed_bench_key_rows(MAX_FIXED_BENCH_KEY_ROWS).is_ok());
         assert!(validate_fixed_bench_key_rows(MAX_FIXED_BENCH_KEY_ROWS + 1).is_err());
+        assert!(validate_fixed_bench_key_index(MAX_FIXED_BENCH_KEY_ROWS - 1).is_ok());
+        assert!(validate_fixed_bench_key_index(MAX_FIXED_BENCH_KEY_ROWS).is_err());
+        assert!(validate_fixed_bench_key_range(0, MAX_FIXED_BENCH_KEY_ROWS).is_ok());
+        assert!(validate_fixed_bench_key_range(MAX_FIXED_BENCH_KEY_ROWS, 0).is_ok());
+        assert!(validate_fixed_bench_key_range(MAX_FIXED_BENCH_KEY_ROWS - 1, 1).is_ok());
+        assert!(validate_fixed_bench_key_range(MAX_FIXED_BENCH_KEY_ROWS - 1, 2).is_err());
+        assert!(validate_fixed_bench_key_range(u32::MAX, 1).is_err());
     }
 }

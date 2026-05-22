@@ -36,6 +36,51 @@ spec fn max_managed_pages() -> nat {
     max_num_buckets() * bucket_size_in_pages()
 }
 
+spec fn num_buckets_needed(pages: nat, bucket_size: nat) -> nat {
+    if pages == 0 {
+        0
+    } else {
+        (((pages - 1) / (bucket_size as int)) + 1) as nat
+    }
+}
+
+spec fn grow_new_size(old_size: nat, pages: nat) -> Option<nat> {
+    if old_size + pages <= u64_max() {
+        Some(old_size + pages)
+    } else {
+        None
+    }
+}
+
+spec fn grow_target_allocated_buckets(
+    old_size: nat,
+    pages: nat,
+    allocated_buckets: nat,
+    bucket_size: nat,
+) -> Option<nat> {
+    match grow_new_size(old_size, pages) {
+        Some(new_size) => {
+            let current = num_buckets_needed(old_size, bucket_size);
+            let required = num_buckets_needed(new_size, bucket_size);
+            let new_buckets = if current <= required {
+                (required - current) as nat
+            } else {
+                0
+            };
+            if allocated_buckets + new_buckets <= max_num_buckets() {
+                Some(allocated_buckets + new_buckets)
+            } else {
+                None
+            }
+        },
+        None => None,
+    }
+}
+
+spec fn grow_pages_needed(target_allocated_buckets: nat, bucket_size: nat) -> nat {
+    buckets_offset_in_pages() + bucket_size * target_allocated_buckets
+}
+
 spec fn bucket_address(bucket_id: nat) -> nat {
     buckets_offset_in_pages() * wasm_page_size() + bucket_size_in_bytes() * bucket_id
 }
@@ -156,6 +201,47 @@ proof fn managed_pages_fit_in_u64()
     by (nonlinear_arith)
     ensures
         max_managed_pages() < u64_max(),
+{
+}
+
+proof fn default_bucket_count_covers_pages(pages: nat)
+    by (nonlinear_arith)
+    ensures
+        pages <= num_buckets_needed(pages, bucket_size_in_pages()) * bucket_size_in_pages(),
+{
+}
+
+proof fn grow_success_keeps_target_within_max(
+    old_size: nat,
+    pages: nat,
+    allocated_buckets: nat,
+    target: nat,
+)
+    requires
+        grow_target_allocated_buckets(old_size, pages, allocated_buckets, bucket_size_in_pages())
+            == Some(target),
+    ensures
+        target <= max_num_buckets(),
+{
+}
+
+proof fn grow_success_pages_needed_fit_u64(
+    target: nat,
+)
+    by (nonlinear_arith)
+    requires
+        target <= max_num_buckets(),
+    ensures
+        grow_pages_needed(target, bucket_size_in_pages()) < u64_max(),
+{
+}
+
+proof fn grow_success_backing_pages_cover_target(
+    target: nat,
+)
+    ensures
+        grow_pages_needed(target, bucket_size_in_pages())
+            == buckets_offset_in_pages() + bucket_size_in_pages() * target,
 {
 }
 

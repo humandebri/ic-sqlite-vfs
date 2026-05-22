@@ -604,11 +604,18 @@ fn compact_preserves_logical_database_contents() {
     }])
     .unwrap();
     Db::update(|connection| {
-        connection.execute_batch("INSERT INTO compacted(k, v) VALUES ('key', 'value')")
+        let mut statement = connection.prepare("INSERT INTO compacted(k, v) VALUES (?1, ?2)")?;
+        for index in 0..600 {
+            let key = format!("key-{index:04}");
+            let value = format!("value-{index:04}");
+            statement.execute(params![key, value])?;
+        }
+        Ok(())
     })
     .unwrap();
 
     let checksum_before = Db::db_checksum().unwrap();
+    let page_count_before = Superblock::load().unwrap().page_count;
     Db::compact().unwrap();
     let block = Superblock::load().unwrap();
     assert_ne!(
@@ -617,12 +624,18 @@ fn compact_preserves_logical_database_contents() {
     );
     let checksum_after = Db::db_checksum().unwrap();
     let value = Db::query(|connection| {
-        connection.query_scalar::<String>("SELECT v FROM compacted WHERE k = 'key'", params![])
+        connection.query_scalar::<String>("SELECT v FROM compacted WHERE k = 'key-0042'", params![])
+    })
+    .unwrap();
+    let count = Db::query(|connection| {
+        connection.query_scalar::<i64>("SELECT COUNT(*) FROM compacted", params![])
     })
     .unwrap();
 
     assert_eq!(checksum_after, checksum_before);
-    assert_eq!(value, "value");
+    assert_eq!(block.page_count, page_count_before);
+    assert_eq!(value, "value-0042");
+    assert_eq!(count, 600);
     assert_eq!(Db::integrity_check().unwrap(), "ok");
 }
 

@@ -325,3 +325,68 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
     }
     hash
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_block() -> Superblock {
+        let mut block = Superblock::fresh();
+        block.db_size = 0x0102_0304_0506_0708;
+        block.schema_version = 0x1112_1314_1516_1718;
+        block.last_tx_id = 0x2122_2324_2526_2728;
+        block.flags = FLAG_IMPORTING | FLAG_CHECKSUM_STALE | FLAG_CHECKSUM_REFRESHING;
+        block.checksum = 0x3132_3334_3536_3738;
+        block.import_expected_checksum = 0x4142_4344_4546_4748;
+        block.import_written_until = 0x5152_5354_5556_5758;
+        block.import_total_size = 0x6162_6364_6566_6768;
+        block.import_base_offset = 0x7172_7374_7576_7778;
+        block.checksum_refresh_offset = 0x8182_8384_8586_8788;
+        block.checksum_refresh_hash = 0x9192_9394_9596_9798;
+        block.checksum_refresh_tx_id = 0xa1a2_a3a4_a5a6_a7a8;
+        block.db_base_offset = 0xb1b2_b3b4_b5b6_b7b8;
+        block.page_table_offset = 0xc1c2_c3c4_c5c6_c7c8;
+        block.page_count = 0xd1d2_d3d4_d5d6_d7d8;
+        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
+        block.meta_checksum = block.compute_meta_checksum();
+        block
+    }
+
+    #[test]
+    fn superblock_encode_decode_uses_fixed_little_endian_offsets() {
+        let block = sample_block();
+        let encoded = block.encode();
+
+        assert_eq!(&encoded[0..8], b"ICSQLITE");
+        assert_eq!(&encoded[8..12], &VERSION.to_le_bytes());
+        assert_eq!(&encoded[12..16], &SQLITE_PAGE_SIZE.to_le_bytes());
+        assert_eq!(&encoded[16..24], &block.db_size.to_le_bytes());
+        assert_eq!(&encoded[80..88], &block.import_base_offset.to_le_bytes());
+        assert_eq!(&encoded[120..128], &block.page_table_offset.to_le_bytes());
+        assert_eq!(&encoded[144..152], &block.meta_checksum.to_le_bytes());
+        assert_eq!(Superblock::decode(&encoded), block);
+    }
+
+    #[test]
+    fn superblock_meta_digest_zeroes_only_meta_field() {
+        let block = sample_block();
+        let mut checksum_input = block.encode();
+        checksum_input[144..152].copy_from_slice(&0_u64.to_le_bytes());
+
+        let mut changed_checksum = block.clone();
+        changed_checksum.meta_checksum ^= u64::MAX;
+
+        let mut changed_field = block.clone();
+        changed_field.last_tx_id = changed_field.last_tx_id.wrapping_add(1);
+
+        assert_eq!(block.compute_meta_checksum(), fnv1a64(&checksum_input));
+        assert_eq!(
+            changed_checksum.compute_meta_checksum(),
+            block.compute_meta_checksum()
+        );
+        assert_ne!(
+            changed_field.compute_meta_checksum(),
+            block.compute_meta_checksum()
+        );
+    }
+}

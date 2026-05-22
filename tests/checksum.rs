@@ -88,6 +88,44 @@ fn chunked_checksum_refresh_updates_metadata_only_when_complete() {
 
 #[test]
 #[serial]
+fn chunked_checksum_refresh_matches_one_shot_for_varied_chunk_sizes() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE chunk_variants(k TEXT PRIMARY KEY, v BLOB NOT NULL);",
+    }])
+    .unwrap();
+    Db::update(|connection| {
+        let mut statement =
+            connection.prepare("INSERT INTO chunk_variants(k, v) VALUES (?1, ?2)")?;
+        for index in 0..96 {
+            let key = format!("k{index}");
+            let value: Vec<u8> = (0..257)
+                .map(|offset| (index as u8).wrapping_add(offset as u8).wrapping_mul(19))
+                .collect();
+            statement.execute(params![key, value])?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    let expected = Db::db_checksum().unwrap();
+    for chunk_size in [1_u64, 7, 64, 4096, 16 * 1024, 20 * 1024] {
+        let mut latest = Db::refresh_checksum_chunk(chunk_size).unwrap();
+        let mut guard = 0_u32;
+        while !latest.complete {
+            latest = Db::refresh_checksum_chunk(chunk_size).unwrap();
+            guard += 1;
+            assert!(guard < 100_000);
+        }
+        assert_eq!(latest.checksum, expected);
+        assert_eq!(latest.scanned_bytes, latest.db_size);
+        assert_eq!(Superblock::load().unwrap().checksum, expected);
+    }
+}
+
+#[test]
+#[serial]
 fn committed_update_clears_partial_checksum_refresh() {
     reset();
     Db::migrate(&[Migration {
