@@ -682,6 +682,77 @@ fn statement_row_iterator_steps_until_done() {
 
 #[test]
 #[serial]
+fn borrowed_text_rows_clear_bindings_after_early_errors_and_drop() {
+    reset();
+
+    Db::query(|connection| {
+        let mut statement = connection.prepare("SELECT ?1 WHERE ?1 IN (?1, ?2)")?;
+        {
+            let values = ["alpha".to_string(), "beta".to_string()];
+            let mut rows =
+                statement.query_text_iter_ephemeral(values.iter().map(String::as_str))?;
+            let row = rows.next_row()?.expect("first borrowed row exists");
+            let error = row.get::<i64>(0).unwrap_err();
+            assert!(matches!(error, DbError::TypeMismatch { .. }));
+        }
+
+        let values = ["gamma", "gamma"];
+        let mut rows = statement.query_text_iter_ephemeral(values.iter().copied())?;
+        let value = rows
+            .next_row()?
+            .map(|row| row.get::<String>(0))
+            .transpose()?;
+        assert_eq!(value, Some("gamma".to_string()));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[serial]
+fn borrowed_text_iter_bind_errors_clear_partial_bindings() {
+    reset();
+
+    Db::query(|connection| {
+        let mut statement = connection.prepare("SELECT ?1, ?2")?;
+        {
+            let mismatch = statement.query_text_iter_ephemeral(["only-one"].iter().copied());
+            assert!(matches!(
+                mismatch,
+                Err(DbError::ParameterCountMismatch {
+                    expected: 2,
+                    actual: 1
+                })
+            ));
+        }
+
+        let mut rows = statement.query_text_iter_ephemeral(["left", "right"].iter().copied())?;
+        let row = rows.next_row()?.expect("row exists after bind error");
+        assert_eq!(row.get::<String>(0)?, "left");
+        assert_eq!(row.get::<String>(1)?, "right");
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[serial]
+fn cached_borrowed_text_helpers_reuse_statement_after_type_error() {
+    reset();
+
+    Db::query(|connection| {
+        let error = connection.query_optional_string_text("SELECT 1 WHERE ?1 = ?1", "x");
+        assert!(matches!(error, Err(DbError::TypeMismatch { .. })));
+
+        let value = connection.query_optional_string_text("SELECT ?1 WHERE ?1 = ?1", "after")?;
+        assert_eq!(value, Some("after".to_string()));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[serial]
 fn typed_errors_preserve_constraint_and_type_information() {
     reset();
     Db::migrate(&[Migration {

@@ -21,7 +21,7 @@ pub mod stable;
 
 pub use db::{Db, DbError, DbHandle};
 pub use stable::memory::DbMemory;
-pub use stable::memory_manager::{MemoryId, MemoryManager};
+pub use stable::memory_manager::{MemoryId, MemoryManager, MemoryManagerInitError};
 pub use stable::raw_memory::DefaultMemoryImpl;
 
 #[macro_export]

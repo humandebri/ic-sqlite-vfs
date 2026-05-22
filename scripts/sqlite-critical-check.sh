@@ -134,11 +134,30 @@ trap cleanup_run_dir EXIT
 log "checking await-free canister API"
 bash scripts/check-no-await.sh
 
+log "checking bidi control characters"
+if rg -nP '[\x{061C}\x{200E}\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}]' \
+  Cargo.toml README.md compat-fixtures docs scripts src tests; then
+  echo "bidi control characters found"
+  exit 1
+fi
+
 log "running cargo test"
 cargo test
 
 log "running cargo test --features canister-api"
 cargo test --features canister-api
+
+log "running MemoryManager compatibility fixture for ic-stable-structures 0.7.0"
+cargo test --manifest-path compat-fixtures/ic-stable-structures-070/Cargo.toml --locked
+
+log "running MemoryManager compatibility fixture for ic-stable-structures 0.7.2"
+cargo test --manifest-path compat-fixtures/ic-stable-structures-072/Cargo.toml --locked
+
+log "updating MemoryManager compatibility fixture to latest ic-stable-structures 0.7.x"
+cargo update --manifest-path compat-fixtures/ic-stable-structures-latest-07/Cargo.toml -p ic-stable-structures
+
+log "running MemoryManager compatibility fixture for latest ic-stable-structures 0.7.x"
+cargo test --manifest-path compat-fixtures/ic-stable-structures-latest-07/Cargo.toml
 
 run_verus_proofs
 

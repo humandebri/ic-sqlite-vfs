@@ -34,6 +34,15 @@ fn rejects_owner_byte_after_allocated_bucket_range() {
 }
 
 #[test]
+#[should_panic(expected = "unallocated bucket has owner")]
+fn rejects_partial_grow_state_with_table_updated_before_header() {
+    // Header still commits one bucket, but grow already wrote the next owner.
+    let backing = corrupt_backing(1, 1, &[(0, 1)], Some(vec![(0, 0), (1, 0)]));
+
+    let _manager = MemoryManager::init(backing);
+}
+
+#[test]
 #[should_panic(expected = "bucket size is zero")]
 fn rejects_zero_bucket_size_in_header() {
     let backing = corrupt_backing(0, 0, &[], Some(Vec::new()));

@@ -329,6 +329,8 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
 
     fn sample_block() -> Superblock {
         let mut block = Superblock::fresh();
@@ -388,5 +390,92 @@ mod tests {
             changed_field.compute_meta_checksum(),
             block.compute_meta_checksum()
         );
+    }
+
+    #[test]
+    fn pbt_superblock_encoding_matches_fixed_field_model() {
+        let mut runner = TestRunner::new(Config {
+            cases: 256,
+            ..Config::default()
+        });
+
+        runner
+            .run(&any::<[u64; 16]>(), |fields| {
+                let block = block_from_fields(fields);
+                let encoded = block.encode();
+
+                prop_assert_eq!(encoded.len(), ENCODED_LEN);
+                prop_assert_eq!(&encoded[0..8], b"ICSQLITE");
+                prop_assert_eq!(&encoded[8..12], &VERSION.to_le_bytes());
+                prop_assert_eq!(&encoded[12..16], &SQLITE_PAGE_SIZE.to_le_bytes());
+                assert_u64_field_offsets(&encoded, &block)?;
+                prop_assert_eq!(Superblock::decode(&encoded), block.clone());
+
+                let mut changed_meta = block.clone();
+                changed_meta.meta_checksum ^= u64::MAX;
+                prop_assert_eq!(
+                    changed_meta.compute_meta_checksum(),
+                    block.compute_meta_checksum()
+                );
+
+                let mut checksum_input = encoded;
+                checksum_input[144..152].copy_from_slice(&0_u64.to_le_bytes());
+                prop_assert_eq!(block.compute_meta_checksum(), fnv1a64(&checksum_input));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn assert_u64_field_offsets(
+        encoded: &[u8; ENCODED_LEN],
+        block: &Superblock,
+    ) -> Result<(), TestCaseError> {
+        let fields = [
+            (16, block.db_size),
+            (24, block.schema_version),
+            (32, block.last_tx_id),
+            (40, block.flags),
+            (48, block.checksum),
+            (56, block.import_expected_checksum),
+            (64, block.import_written_until),
+            (72, block.import_total_size),
+            (80, block.import_base_offset),
+            (88, block.checksum_refresh_offset),
+            (96, block.checksum_refresh_hash),
+            (104, block.checksum_refresh_tx_id),
+            (112, block.db_base_offset),
+            (120, block.page_table_offset),
+            (128, block.page_count),
+            (136, block.layout_version),
+            (144, block.meta_checksum),
+        ];
+
+        for (offset, expected) in fields {
+            let actual = u64::from_le_bytes(eight(encoded, offset));
+            prop_assert_eq!(actual, expected);
+        }
+        Ok(())
+    }
+
+    fn block_from_fields(fields: [u64; 16]) -> Superblock {
+        let mut block = Superblock::fresh();
+        block.db_size = fields[0];
+        block.schema_version = fields[1];
+        block.last_tx_id = fields[2];
+        block.flags = fields[3];
+        block.checksum = fields[4];
+        block.import_expected_checksum = fields[5];
+        block.import_written_until = fields[6];
+        block.import_total_size = fields[7];
+        block.import_base_offset = fields[8];
+        block.checksum_refresh_offset = fields[9];
+        block.checksum_refresh_hash = fields[10];
+        block.checksum_refresh_tx_id = fields[11];
+        block.db_base_offset = fields[12];
+        block.page_table_offset = fields[13];
+        block.page_count = fields[14];
+        block.layout_version = fields[15];
+        block.meta_checksum = block.compute_meta_checksum();
+        block
     }
 }

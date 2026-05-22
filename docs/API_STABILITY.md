@@ -48,6 +48,23 @@ If an existing MemoryManager-compatible image is corrupt, internally
 inconsistent, or physically truncated, initialization rejects it by panic/trap
 rather than returning a recoverable error.
 
+`MemoryManager::grow()` writes allocation-table owner bytes before committing
+the header that records the new allocated bucket count and virtual memory size.
+On the Internet Computer, successful message execution commits Wasm and stable
+memory together, while a trap rolls back changes made during that message
+execution. Under that execution model, a grow state with the allocation table
+updated but the old header still committed is not persistently observable.
+Images imported, restored, or manually constructed with that mismatch are
+treated as corrupt MemoryManager-compatible images and rejected during
+initialization.
+
+`MemoryManager::init_strict(memory)` is the additive safe initializer for
+callers that want non-empty / non-MemoryManager memory and invalid layouts as
+typed errors instead of implicit new-layout initialization or panic.
+MemoryManager metadata writes use stable memory grow internally; metadata grow
+failure during initialization or header/allocation-table writes is still a
+panic/trap boundary.
+
 `stable::memory::read()` does not grow stable memory. Reads beyond the current
 capacity return `StableMemoryError::ReadOutOfBounds`.
 

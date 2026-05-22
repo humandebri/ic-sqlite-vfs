@@ -192,6 +192,7 @@ pub fn read(offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
 pub(crate) fn read_preallocated(offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
     checked_end(offset, dst.len())?;
     with_memory(|memory| {
+        debug_assert_capacity(memory, offset, dst.len(), "read_preallocated");
         memory.read(offset, dst);
     })?;
     Ok(())
@@ -225,6 +226,7 @@ pub(crate) fn write_preallocated(offset: u64, bytes: &[u8]) -> Result<(), Stable
     }
     checked_end(offset, bytes.len())?;
     with_memory(|memory| {
+        debug_assert_capacity(memory, offset, bytes.len(), "write_preallocated");
         memory.write(offset, bytes);
     })?;
 
@@ -241,7 +243,9 @@ pub(crate) fn write_preallocated(offset: u64, bytes: &[u8]) -> Result<(), Stable
 
 #[inline(always)]
 pub(crate) fn write_prechecked(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
+    debug_assert!(checked_end(offset, bytes.len()).is_ok());
     with_memory(|memory| {
+        debug_assert_capacity(memory, offset, bytes.len(), "write_prechecked");
         memory.write(offset, bytes);
     })?;
 
@@ -261,7 +265,9 @@ pub(crate) fn write_prechecked_unmetered(
     offset: u64,
     bytes: &[u8],
 ) -> Result<(), StableMemoryError> {
+    debug_assert!(checked_end(offset, bytes.len()).is_ok());
     with_memory(|memory| {
+        debug_assert_capacity(memory, offset, bytes.len(), "write_prechecked_unmetered");
         memory.write(offset, bytes);
     })?;
 
@@ -312,6 +318,29 @@ fn ensure_memory_capacity(memory: &DbMemory, end_offset: u64) -> Result<(), Stab
     #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
     crate::read_metrics::record_stable_grow(pages);
     Ok(())
+}
+
+#[inline(always)]
+fn debug_assert_capacity(memory: &DbMemory, offset: u64, len: usize, operation: &str) {
+    #[cfg(debug_assertions)]
+    {
+        let Ok(end) = checked_end(offset, len) else {
+            debug_assert!(false, "{operation} offset overflow");
+            return;
+        };
+        let Some(capacity) = memory.size().checked_mul(STABLE_PAGE_SIZE) else {
+            debug_assert!(false, "{operation} capacity overflow");
+            return;
+        };
+        debug_assert!(
+            end <= capacity,
+            "{operation} requires preallocated capacity: offset={offset}, len={len}, capacity={capacity}"
+        );
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (memory, offset, len, operation);
+    }
 }
 
 #[cfg(any(test, debug_assertions))]

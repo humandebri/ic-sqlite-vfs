@@ -684,7 +684,7 @@ fn commit_overlay(overlay: Overlay, advance_tx: bool) -> Result<(), StableMemory
 
     let final_segment_count = segment_count_for_pages(final_page_count)?;
     let profile_start = commit_profile_start(profile_enabled);
-    let mut root = read_commit_root_table(&block, final_segment_count)?;
+    let mut root = read_commit_root_table(&block)?;
     commit_profile_record_load(profile_start);
 
     let build_profile_start = commit_profile_start(profile_enabled);
@@ -850,15 +850,8 @@ fn commit_single_segment_page_overlay(
     options: SinglePageCommitOptions,
 ) -> Result<(), StableMemoryError> {
     let index = segment_index(page_no)?;
-    let segment_offset = if block.page_table_offset != 0 {
-        block
-            .page_table_offset
-            .checked_sub(SEGMENT_TABLE_BYTES)
-            .ok_or(StableMemoryError::OffsetOverflow)?
-    } else {
-        0
-    };
-    let mut table = read_single_commit_segment_table_at(segment_offset)?;
+    let root = read_commit_root_table(block)?;
+    let mut table = read_commit_segment_table(block, &root, 0)?;
     table[index] = options.data_cursor;
     let page_cursor = checked_add(options.data_cursor, page_size())?;
     commit_profile_record_build_segments(options.build_profile_start);
@@ -891,7 +884,7 @@ fn commit_single_segment_page_overlay(
     );
     commit_profile_record_superblock_store(profile_start);
     if result.is_ok() {
-        cache_single_commit_segment_table(offset, table);
+        cache_commit_segment_table(0, offset, table);
     }
     result
 }
@@ -1264,17 +1257,7 @@ fn read_root_table(block: &Superblock) -> Result<Vec<u64>, StableMemoryError> {
     read_u64_table_at(block.page_table_offset, entries_len)
 }
 
-fn read_commit_root_table(
-    block: &Superblock,
-    final_segment_count: u64,
-) -> Result<Vec<u64>, StableMemoryError> {
-    if final_segment_count == 1 && block.page_count == 1 && block.page_table_offset != 0 {
-        let segment_offset = block
-            .page_table_offset
-            .checked_sub(segment_table_bytes()?)
-            .ok_or(StableMemoryError::OffsetOverflow)?;
-        return Ok(vec![segment_offset]);
-    }
+fn read_commit_root_table(block: &Superblock) -> Result<Vec<u64>, StableMemoryError> {
     read_root_table(block)
 }
 
@@ -1321,17 +1304,6 @@ fn read_commit_segment_table_at(
     read_segment_table_at(offset)
 }
 
-#[inline(always)]
-fn read_single_commit_segment_table_at(offset: u64) -> Result<Vec<u64>, StableMemoryError> {
-    if offset == 0 {
-        return Ok(vec![0_u64; segment_page_count_usize()]);
-    }
-    if let Some(table) = take_single_commit_segment_table(offset) {
-        return Ok(table);
-    }
-    read_segment_table_at(offset)
-}
-
 fn take_commit_segment_table(segment_no: u64, segment_offset: u64) -> Option<Vec<u64>> {
     let Ok(context) = memory::active_context_id() else {
         return None;
@@ -1354,29 +1326,6 @@ fn take_commit_segment_table(segment_no: u64, segment_offset: u64) -> Option<Vec
                 *stored_context == context
                     && cached.segment_no == segment_no
                     && cached.segment_offset == segment_offset
-            })
-            .map(|position| cache.remove(position).1.table)
-    })
-}
-
-#[inline(always)]
-fn take_single_commit_segment_table(segment_offset: u64) -> Option<Vec<u64>> {
-    let Ok(context) = memory::active_context_id() else {
-        return None;
-    };
-    COMMIT_SEGMENT_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.len() == 1 {
-            let (stored_context, cached) = &cache[0];
-            if *stored_context == context && cached.segment_offset == segment_offset {
-                return cache.pop().map(|(_, cached)| cached.table);
-            }
-            return None;
-        }
-        cache
-            .iter()
-            .position(|(stored_context, cached)| {
-                *stored_context == context && cached.segment_offset == segment_offset
             })
             .map(|position| cache.remove(position).1.table)
     })
@@ -1420,52 +1369,6 @@ fn cache_commit_segment_table(segment_no: u64, segment_offset: u64, table: Vec<u
             context,
             CommitSegmentCache {
                 segment_no,
-                segment_offset,
-                table,
-            },
-        ));
-    });
-}
-
-#[inline(always)]
-fn cache_single_commit_segment_table(segment_offset: u64, table: Vec<u64>) {
-    let Ok(context) = memory::active_context_id() else {
-        return;
-    };
-    COMMIT_SEGMENT_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.is_empty() {
-            cache.push((
-                context,
-                CommitSegmentCache {
-                    segment_no: 0,
-                    segment_offset,
-                    table,
-                },
-            ));
-            return;
-        }
-        if cache.len() == 1 {
-            let (stored_context, cached) = &mut cache[0];
-            if *stored_context == context {
-                cached.segment_no = 0;
-                cached.segment_offset = segment_offset;
-                cached.table = table;
-                return;
-            }
-        } else if let Some((_, cached)) = cache
-            .iter_mut()
-            .find(|(stored_context, _)| *stored_context == context)
-        {
-            cached.segment_no = 0;
-            cached.segment_offset = segment_offset;
-            cached.table = table;
-            return;
-        }
-        cache.push((
-            context,
-            CommitSegmentCache {
-                segment_no: 0,
                 segment_offset,
                 table,
             },
@@ -1874,6 +1777,9 @@ impl StableBlobFailpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+    use std::collections::BTreeSet;
 
     #[test]
     fn layout_math_matches_expected_boundaries() {
@@ -1917,6 +1823,124 @@ mod tests {
             imported_page_table(&block),
             Err(StableMemoryError::OffsetOverflow)
         ));
+    }
+
+    #[test]
+    fn pbt_layout_math_matches_verus_model() {
+        let mut runner = TestRunner::new(Config {
+            cases: 512,
+            ..Config::default()
+        });
+
+        runner
+            .run(
+                &(
+                    boundary_size_strategy(),
+                    boundary_page_strategy(),
+                    boundary_entry_strategy(),
+                ),
+                |(size, page_no, entries)| {
+                    let page_count = page_count_for_size(size).unwrap();
+                    let page_size = u128::from(page_size());
+                    if size == 0 {
+                        prop_assert_eq!(page_count, 0);
+                    } else {
+                        prop_assert!(u128::from(page_count - 1) * page_size < u128::from(size));
+                        prop_assert!(u128::from(size) <= u128::from(page_count) * page_size);
+                    }
+
+                    let segment_count = segment_count_for_pages(page_count).unwrap();
+                    if page_count == 0 {
+                        prop_assert_eq!(segment_count, 0);
+                    } else {
+                        prop_assert!(
+                            u128::from(segment_count - 1) * u128::from(SEGMENT_PAGE_COUNT)
+                                < u128::from(page_count)
+                        );
+                        prop_assert!(
+                            u128::from(page_count)
+                                <= u128::from(segment_count) * u128::from(SEGMENT_PAGE_COUNT)
+                        );
+                    }
+
+                    let index = segment_index(page_no).unwrap();
+                    prop_assert!(index < segment_page_count_usize());
+                    prop_assert_eq!(
+                        u128::from(segment_no(page_no)) * u128::from(SEGMENT_PAGE_COUNT)
+                            + index as u128,
+                        u128::from(page_no)
+                    );
+
+                    match root_table_bytes(entries) {
+                        Ok(bytes) => prop_assert_eq!(bytes, entries * PAGE_TABLE_ENTRY_LEN),
+                        Err(StableMemoryError::OffsetOverflow) => {
+                            prop_assert!(entries.checked_mul(PAGE_TABLE_ENTRY_LEN).is_none());
+                        }
+                        Err(error) => return Err(TestCaseError::fail(error.to_string())),
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    fn boundary_size_strategy() -> impl Strategy<Value = u64> {
+        let page = page_size();
+        let segment_bytes = SEGMENT_PAGE_COUNT * page;
+        prop_oneof![
+            any::<u64>(),
+            prop::sample::select(boundary_values(&[
+                0,
+                1,
+                page - 1,
+                page,
+                page + 1,
+                segment_bytes - 1,
+                segment_bytes,
+                segment_bytes + 1,
+                u64::MAX,
+            ])),
+        ]
+    }
+
+    fn boundary_page_strategy() -> impl Strategy<Value = u64> {
+        prop_oneof![
+            any::<u64>(),
+            prop::sample::select(boundary_values(&[
+                0,
+                1,
+                SEGMENT_PAGE_COUNT - 1,
+                SEGMENT_PAGE_COUNT,
+                SEGMENT_PAGE_COUNT + 1,
+                u64::MAX,
+            ])),
+        ]
+    }
+
+    fn boundary_entry_strategy() -> impl Strategy<Value = u64> {
+        let max_without_overflow = u64::MAX / PAGE_TABLE_ENTRY_LEN;
+        prop_oneof![
+            any::<u64>(),
+            prop::sample::select(boundary_values(&[
+                0,
+                1,
+                SEGMENT_PAGE_COUNT - 1,
+                SEGMENT_PAGE_COUNT,
+                SEGMENT_PAGE_COUNT + 1,
+                max_without_overflow - 1,
+                max_without_overflow,
+                max_without_overflow + 1,
+                u64::MAX - 1,
+                u64::MAX,
+            ])),
+        ]
+    }
+
+    fn boundary_values(values: &[u64]) -> Vec<u64> {
+        values
+            .iter()
+            .flat_map(|value| [value.saturating_sub(1), *value, value.saturating_add(1)])
+            .collect()
     }
 
     #[test]
@@ -2072,6 +2096,33 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn single_segment_fast_path_preserves_table_after_expand_only_commit() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+        invalidate_read_cache();
+
+        write_at(0, &[0]).unwrap();
+        truncate(page_size() * 4).unwrap();
+        truncate(page_size() * 4 + 1).unwrap();
+
+        let block = Superblock::load().unwrap();
+        let table = read_page_table(&block).unwrap();
+        let mut first = [1_u8; 1];
+        let mut expanded_tail = [1_u8; 1];
+
+        read_base_at(0, &mut first).unwrap();
+        read_base_at(page_size() * 4, &mut expanded_tail).unwrap();
+
+        assert_eq!(block.db_size, page_size() * 4 + 1);
+        assert_ne!(table[0], 0);
+        assert_eq!(table[1], 0);
+        assert_ne!(table[4], 0);
+        assert_eq!(first, [0]);
+        assert_eq!(expanded_tail, [0]);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn page_table_u64_encoding_is_little_endian_and_round_trips() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
@@ -2106,6 +2157,288 @@ mod tests {
         assert_eq!(write_u64_table_at(&[], &mut empty_cursor).unwrap(), 0);
         assert_eq!(empty_cursor, cursor);
         assert!(read_u64_table_at(cursor, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pbt_page_table_u64_encoding_round_trips() {
+        let mut runner = TestRunner::new(Config {
+            cases: 128,
+            ..Config::default()
+        });
+
+        runner
+            .run(
+                &proptest::collection::vec(any::<u64>(), 0..=512),
+                |entries| {
+                    crate::stable::memory::reset_for_tests();
+                    crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+                    invalidate_read_cache();
+
+                    let mut cursor = 128_u64;
+                    let byte_len = entries.len().checked_mul(8).unwrap();
+                    let end = cursor + u64::try_from(byte_len).unwrap();
+                    crate::stable::memory::ensure_capacity(end).unwrap();
+
+                    let offset = write_u64_table_at(&entries, &mut cursor).unwrap();
+                    let decoded = read_u64_table_at(offset, entries.len()).unwrap();
+                    prop_assert_eq!(decoded, entries.clone());
+                    prop_assert_eq!(cursor, end);
+
+                    let mut encoded = vec![0_u8; byte_len];
+                    crate::stable::memory::read_preallocated(offset, &mut encoded).unwrap();
+                    let expected = entries
+                        .iter()
+                        .flat_map(|entry| entry.to_le_bytes())
+                        .collect::<Vec<_>>();
+                    prop_assert_eq!(encoded, expected);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pbt_compact_preserves_sparse_page_model() {
+        let mut runner = TestRunner::new(Config {
+            cases: 32,
+            ..Config::default()
+        });
+
+        runner
+            .run(
+                &proptest::collection::vec(prop::option::of(any::<u8>()), 0..=300),
+                |pages| {
+                    crate::stable::memory::reset_for_tests();
+                    crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+                    invalidate_read_cache();
+
+                    let active_len = pages
+                        .iter()
+                        .rposition(Option::is_some)
+                        .map(|index| index + 1)
+                        .unwrap_or(0);
+                    for (page_no, byte) in pages.iter().take(active_len).enumerate() {
+                        if let Some(byte) = byte {
+                            write_at(
+                                u64::try_from(page_no).unwrap() * page_size(),
+                                &vec![*byte; page_len()],
+                            )
+                            .unwrap();
+                        }
+                    }
+
+                    compact().unwrap();
+                    let block = Superblock::load().unwrap();
+                    prop_assert_eq!(
+                        block.db_size,
+                        u64::try_from(active_len).unwrap() * page_size()
+                    );
+                    let table = read_page_table(&block).unwrap();
+                    prop_assert_eq!(table.len(), active_len);
+
+                    let mut first_compacted_offset = None;
+                    let mut non_zero_seen = 0_u64;
+                    for (page_no, byte) in pages.iter().take(active_len).enumerate() {
+                        let entry = table[page_no];
+                        let mut page = vec![0_u8; page_len()];
+                        read_base_at(u64::try_from(page_no).unwrap() * page_size(), &mut page)
+                            .unwrap();
+
+                        if let Some(byte) = byte {
+                            let base = *first_compacted_offset.get_or_insert(entry);
+                            prop_assert_ne!(entry, 0);
+                            prop_assert_eq!(entry, base + non_zero_seen * page_size());
+                            prop_assert_eq!(page, vec![*byte; page_len()]);
+                            non_zero_seen += 1;
+                        } else {
+                            prop_assert_eq!(entry, 0);
+                            prop_assert_eq!(page, vec![0_u8; page_len()]);
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    #[derive(Clone, Debug)]
+    enum BlobOp {
+        Write { offset: u64, len: usize, byte: u8 },
+        Truncate { size: u64 },
+        Compact,
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pbt_blob_operations_match_logical_model_across_compact() {
+        let mut runner = TestRunner::new(Config {
+            cases: 48,
+            ..Config::default()
+        });
+
+        runner
+            .run(&blob_operation_sequence(), |operations| {
+                crate::stable::memory::reset_for_tests();
+                crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+                invalidate_read_cache();
+
+                let mut model = Vec::new();
+                let mut materialized = BTreeSet::new();
+                assert_blob_model(&model, &materialized, false)?;
+
+                for operation in operations {
+                    let compacted = apply_blob_op(operation, &mut model, &mut materialized)?;
+                    assert_blob_model(&model, &materialized, compacted)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn blob_operation_sequence() -> impl Strategy<Value = Vec<BlobOp>> {
+        let write = (blob_offset_strategy(), blob_len_strategy(), any::<u8>())
+            .prop_map(|(offset, len, byte)| BlobOp::Write { offset, len, byte });
+        let truncate = blob_offset_strategy().prop_map(|size| BlobOp::Truncate { size });
+        proptest::collection::vec(prop_oneof![write, truncate, Just(BlobOp::Compact)], 0..=48)
+    }
+
+    fn blob_offset_strategy() -> impl Strategy<Value = u64> {
+        let limit = blob_model_limit();
+        let page = page_size();
+        let segment = SEGMENT_PAGE_COUNT * page;
+        prop_oneof![
+            0_u64..=limit,
+            prop::sample::select(boundary_values(&[
+                0,
+                1,
+                page - 1,
+                page,
+                page + 1,
+                segment - 1,
+                segment,
+                segment + 1,
+                limit - 1,
+                limit,
+            ]))
+            .prop_map(move |value| value.min(limit)),
+        ]
+    }
+
+    fn blob_len_strategy() -> impl Strategy<Value = usize> {
+        prop_oneof![
+            0_usize..=(page_len() * 2 + 17),
+            prop::sample::select(vec![
+                0,
+                1,
+                page_len() - 1,
+                page_len(),
+                page_len() + 1,
+                page_len() * 2 + 1,
+            ]),
+        ]
+    }
+
+    fn blob_model_limit() -> u64 {
+        (SEGMENT_PAGE_COUNT + 3) * page_size()
+    }
+
+    fn apply_blob_op(
+        operation: BlobOp,
+        model: &mut Vec<u8>,
+        materialized: &mut BTreeSet<u64>,
+    ) -> Result<bool, TestCaseError> {
+        match operation {
+            BlobOp::Write { offset, len, byte } => {
+                let len = len.min(usize::try_from(blob_model_limit() - offset).unwrap());
+                let bytes = vec![byte; len];
+                write_at(offset, &bytes).map_err(|error| TestCaseError::fail(error.to_string()))?;
+                if len == 0 {
+                    return Ok(false);
+                }
+
+                let start = usize::try_from(offset).unwrap();
+                let end = start + len;
+                if model.len() < start {
+                    model.resize(start, 0);
+                }
+                if model.len() < end {
+                    model.resize(end, 0);
+                }
+                model[start..end].copy_from_slice(&bytes);
+                mark_materialized_range(offset, len, materialized);
+                Ok(false)
+            }
+            BlobOp::Truncate { size } => {
+                truncate(size).map_err(|error| TestCaseError::fail(error.to_string()))?;
+                let new_len = usize::try_from(size).unwrap();
+                model.resize(new_len, 0);
+                let active_pages = page_count_for_size(size)
+                    .map_err(|error| TestCaseError::fail(error.to_string()))?;
+                materialized.retain(|page_no| *page_no < active_pages);
+                if size > 0 && !size.is_multiple_of(page_size()) {
+                    materialized.insert(size / page_size());
+                }
+                Ok(false)
+            }
+            BlobOp::Compact => {
+                compact().map_err(|error| TestCaseError::fail(error.to_string()))?;
+                Ok(true)
+            }
+        }
+    }
+
+    fn mark_materialized_range(offset: u64, len: usize, materialized: &mut BTreeSet<u64>) {
+        let end = offset + u64::try_from(len).unwrap();
+        let first_page = offset / page_size();
+        let last_page = (end - 1) / page_size();
+        for page_no in first_page..=last_page {
+            materialized.insert(page_no);
+        }
+    }
+
+    fn assert_blob_model(
+        model: &[u8],
+        materialized: &BTreeSet<u64>,
+        expect_compacted: bool,
+    ) -> Result<(), TestCaseError> {
+        let block = Superblock::load().map_err(|error| TestCaseError::fail(error.to_string()))?;
+        prop_assert_eq!(block.db_size, u64::try_from(model.len()).unwrap());
+
+        if !model.is_empty() {
+            let mut out = vec![0_u8; model.len()];
+            read_base_at(0, &mut out).map_err(|error| TestCaseError::fail(error.to_string()))?;
+            prop_assert_eq!(out, model);
+        }
+
+        let mut tail = vec![1_u8; 32];
+        read_base_at(u64::try_from(model.len()).unwrap(), &mut tail)
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        prop_assert_eq!(tail, vec![0_u8; 32]);
+
+        let table =
+            read_page_table(&block).map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let active_pages = page_count_for_size(u64::try_from(model.len()).unwrap())
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        prop_assert_eq!(table.len(), usize::try_from(active_pages).unwrap());
+
+        let mut first_compacted_offset = None;
+        let mut non_zero_seen = 0_u64;
+        for (index, entry) in table.iter().enumerate() {
+            let page_no = u64::try_from(index).unwrap();
+            if materialized.contains(&page_no) {
+                prop_assert_ne!(*entry, 0);
+                if expect_compacted {
+                    let base = *first_compacted_offset.get_or_insert(*entry);
+                    prop_assert_eq!(*entry, base + non_zero_seen * page_size());
+                }
+                non_zero_seen += 1;
+            } else {
+                prop_assert_eq!(*entry, 0);
+            }
+        }
+        Ok(())
     }
 
     #[test]

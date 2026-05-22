@@ -12,7 +12,6 @@ use crate::db::{pragmas, DbError};
 use crate::sqlite_vfs::ffi;
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
 
@@ -54,20 +53,6 @@ impl StatementCache {
         let index = self.statements.iter().position(|entry| entry.sql == sql)?;
         let entry = self.statements.remove(index);
         Some((entry.sql, entry.statement, entry.parameter_count))
-    }
-
-    fn cached_raw(&mut self, sql: &str) -> Option<(NonNull<ffi::sqlite3_stmt>, usize)> {
-        if let Some(entry) = self.statements.last() {
-            if entry.sql == sql {
-                return Some((entry.statement, entry.parameter_count));
-            }
-        }
-        let index = self.statements.iter().position(|entry| entry.sql == sql)?;
-        let entry = self.statements.remove(index);
-        self.statements.push(entry);
-        self.statements
-            .last()
-            .map(|entry| (entry.statement, entry.parameter_count))
     }
 
     unsafe fn insert(
@@ -406,19 +391,6 @@ impl Connection {
         sql: &str,
         value: &str,
     ) -> Result<Option<String>, DbError> {
-        let mut cache = self.cached.borrow_mut();
-        if let Some((raw, parameter_count)) = cache.cached_raw(sql) {
-            // The cache keeps ownership of `raw`; this wrapper only borrows it
-            // long enough to reset, rebind, and step the hot helper query.
-            let mut statement = ManuallyDrop::new(Statement::from_cached_raw(
-                self.raw.as_ptr(),
-                raw,
-                parameter_count,
-            ));
-            return statement.query_optional_string_text_borrowed(value);
-        }
-        drop(cache);
-
         let mut statement = self.prepare_cached(sql)?;
         statement.query_optional_string_text_borrowed(value)
     }
@@ -435,17 +407,6 @@ impl Connection {
     where
         I: ExactSizeIterator<Item = &'value str>,
     {
-        let mut cache = self.cached.borrow_mut();
-        if let Some((raw, parameter_count)) = cache.cached_raw(sql) {
-            let mut statement = ManuallyDrop::new(Statement::from_cached_raw(
-                self.raw.as_ptr(),
-                raw,
-                parameter_count,
-            ));
-            return statement.query_text_iter_text_len_sum(values);
-        }
-        drop(cache);
-
         let mut statement = self.prepare_cached(sql)?;
         statement.query_text_iter_text_len_sum(values)
     }
@@ -479,7 +440,8 @@ impl Drop for Connection {
     fn drop(&mut self) {
         unsafe {
             self.cached.get_mut().finalize_all();
-            ffi::sqlite3_close(self.raw.as_ptr());
+            let rc = ffi::sqlite3_close(self.raw.as_ptr());
+            debug_assert_eq!(rc, ffi::SQLITE_OK, "sqlite3_close left resources open");
         }
     }
 }
@@ -678,5 +640,80 @@ mod tests {
             .query_column::<String>("SELECT v FROM cached_error ORDER BY k", crate::params![])
             .unwrap();
         assert_eq!(values, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    #[serial]
+    fn regular_statements_are_finalized_before_connection_close() {
+        reset();
+        let connection = open_read_write().unwrap();
+
+        {
+            let _statement = connection.prepare("SELECT 1").unwrap();
+            assert_eq!(open_statement_count(&connection), 1);
+        }
+        assert_eq!(open_statement_count(&connection), 0);
+
+        for _ in 0..512 {
+            let value = connection
+                .query_one("SELECT 42", crate::params![], |row| row.get::<i64>(0))
+                .unwrap();
+            assert_eq!(value, 42);
+        }
+        assert_eq!(open_statement_count(&connection), 0);
+    }
+
+    #[test]
+    #[serial]
+    fn cached_and_regular_statement_lifetimes_do_not_double_finalize() {
+        reset();
+        let connection = open_read_write().unwrap();
+
+        {
+            let mut cached = connection.prepare_cached("SELECT ?1").unwrap();
+            let value = cached.query_scalar::<i64>(crate::params![7_i64]).unwrap();
+            assert_eq!(value, 7);
+        }
+        assert_eq!(open_statement_count(&connection), 1);
+
+        {
+            let _regular = connection.prepare("SELECT 8").unwrap();
+            assert_eq!(open_statement_count(&connection), 2);
+        }
+        assert_eq!(open_statement_count(&connection), 1);
+
+        unsafe {
+            connection.cached.borrow_mut().finalize_all();
+        }
+        assert_eq!(open_statement_count(&connection), 0);
+    }
+
+    #[test]
+    #[serial]
+    fn prepare_error_paths_do_not_leave_statements_open() {
+        reset();
+        let connection = open_read_write().unwrap();
+
+        assert!(connection.prepare("").is_err());
+        assert_eq!(open_statement_count(&connection), 0);
+
+        assert!(connection.prepare("SELECT 1; SELECT 2").is_err());
+        assert_eq!(open_statement_count(&connection), 0);
+
+        assert!(connection.prepare("SELECT * FROM missing_table").is_err());
+        assert_eq!(open_statement_count(&connection), 0);
+    }
+
+    fn open_statement_count(connection: &super::Connection) -> usize {
+        let mut count = 0;
+        let mut statement = std::ptr::null_mut();
+        loop {
+            statement =
+                unsafe { crate::sqlite_vfs::ffi::sqlite3_next_stmt(connection.raw(), statement) };
+            if statement.is_null() {
+                return count;
+            }
+            count += 1;
+        }
     }
 }

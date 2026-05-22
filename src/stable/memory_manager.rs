@@ -11,7 +11,7 @@ use crate::stable::memory_layout::{
     HEADER_SIZE, LAYOUT_VERSION, MAGIC, MAX_NUM_BUCKETS, MAX_NUM_MEMORIES,
     UNALLOCATED_BUCKET_MARKER,
 };
-use crate::stable::memory_manager_validation::load_validated_layout;
+use crate::stable::memory_manager_validation::{load_validated_layout, try_load_validated_layout};
 use crate::stable::raw_memory::Memory;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -21,9 +21,23 @@ pub struct MemoryManager<M: Memory> {
     inner: Rc<RefCell<MemoryManagerInner<M>>>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum MemoryManagerInitError {
+    #[error("bucket size must be greater than zero")]
+    BucketSizeIsZero,
+    #[error("non-empty memory does not contain a MemoryManager layout")]
+    NonMemoryManagerLayout,
+    #[error("{0}")]
+    InvalidLayout(String),
+}
+
 impl<M: Memory> MemoryManager<M> {
     pub fn init(memory: M) -> Self {
         Self::init_with_bucket_size(memory, BUCKET_SIZE_IN_PAGES as u16)
+    }
+
+    pub fn init_strict(memory: M) -> Result<Self, MemoryManagerInitError> {
+        Self::init_strict_with_bucket_size(memory, BUCKET_SIZE_IN_PAGES as u16)
     }
 
     pub fn init_with_bucket_size(memory: M, bucket_size_in_pages: u16) -> Self {
@@ -37,6 +51,22 @@ impl<M: Memory> MemoryManager<M> {
             ))),
         }
     }
+
+    pub fn init_strict_with_bucket_size(
+        memory: M,
+        bucket_size_in_pages: u16,
+    ) -> Result<Self, MemoryManagerInitError> {
+        if bucket_size_in_pages == 0 {
+            return Err(MemoryManagerInitError::BucketSizeIsZero);
+        }
+        Ok(Self {
+            inner: Rc::new(RefCell::new(MemoryManagerInner::init_strict(
+                memory,
+                bucket_size_in_pages,
+            )?)),
+        })
+    }
+
     pub fn get(&self, id: MemoryId) -> VirtualMemory<M> {
         VirtualMemory {
             id,
@@ -102,6 +132,19 @@ impl<M: Memory> MemoryManagerInner<M> {
         }
     }
 
+    fn init_strict(memory: M, bucket_size_in_pages: u16) -> Result<Self, MemoryManagerInitError> {
+        if memory.size() == 0 {
+            return Ok(Self::new(memory, bucket_size_in_pages));
+        }
+
+        let mut magic = [0_u8; 3];
+        memory.read(0, &mut magic);
+        if &magic != MAGIC {
+            return Err(MemoryManagerInitError::NonMemoryManagerLayout);
+        }
+        Self::try_load(memory)
+    }
+
     fn new(memory: M, bucket_size_in_pages: u16) -> Self {
         let manager = Self {
             memory,
@@ -133,6 +176,30 @@ impl<M: Memory> MemoryManagerInner<M> {
             memory_buckets: layout.memory_buckets,
         }
     }
+
+    fn try_load(memory: M) -> Result<Self, MemoryManagerInitError> {
+        let mut header = vec![0_u8; HEADER_SIZE as usize];
+        memory.read(0, &mut header);
+        if &header[0..3] != MAGIC {
+            return Err(MemoryManagerInitError::NonMemoryManagerLayout);
+        }
+        if header[3] != LAYOUT_VERSION {
+            return Err(MemoryManagerInitError::InvalidLayout(
+                "Unsupported version.".to_string(),
+            ));
+        }
+        let layout = try_load_validated_layout(&memory, &header)
+            .map_err(|error| MemoryManagerInitError::InvalidLayout(error.to_string()))?;
+
+        Ok(Self {
+            memory,
+            allocated_buckets: layout.allocated_buckets,
+            bucket_size_in_pages: layout.bucket_size_in_pages,
+            memory_sizes_in_pages: layout.memory_sizes_in_pages,
+            memory_buckets: layout.memory_buckets,
+        })
+    }
+
     fn save_header(&self) {
         let mut header = [0_u8; HEADER_SIZE as usize];
         header[0..3].copy_from_slice(MAGIC);
@@ -167,6 +234,17 @@ impl<M: Memory> MemoryManagerInner<M> {
         if target_allocated_buckets > MAX_NUM_BUCKETS {
             return -1;
         }
+        let Ok(new_buckets_len) = usize::try_from(new_buckets) else {
+            return -1;
+        };
+        let memory_bucket = &mut self.memory_buckets[id.0 as usize];
+        if memory_bucket.try_reserve(new_buckets_len).is_err() {
+            return -1;
+        }
+        let mut rollback_buckets = Vec::new();
+        if rollback_buckets.try_reserve(new_buckets_len).is_err() {
+            return -1;
+        }
 
         let Some(data_pages) =
             u64::from(self.bucket_size_in_pages).checked_mul(target_allocated_buckets)
@@ -184,12 +262,17 @@ impl<M: Memory> MemoryManagerInner<M> {
             }
         }
 
-        let memory_bucket = &mut self.memory_buckets[id.0 as usize];
-        memory_bucket.reserve(new_buckets as usize);
+        let mut rollback = AllocationRollback {
+            memory: std::ptr::addr_of!(self.memory),
+            buckets: rollback_buckets,
+            committed: false,
+            _memory: std::marker::PhantomData,
+        };
         for _ in 0..new_buckets {
             let bucket = BucketId(self.allocated_buckets);
             memory_bucket.push(bucket);
             write_growing(&self.memory, bucket_allocations_address(bucket), &[id.0]);
+            rollback.buckets.push(bucket);
             self.allocated_buckets = self
                 .allocated_buckets
                 .checked_add(1)
@@ -198,6 +281,7 @@ impl<M: Memory> MemoryManagerInner<M> {
 
         self.memory_sizes_in_pages[id.0 as usize] = new_size;
         self.save_header();
+        rollback.committed = true;
         old_size as i64
     }
 
@@ -294,5 +378,28 @@ impl<M: Memory> MemoryManagerInner<M> {
 
     fn bucket_address(&self, id: BucketId) -> u64 {
         BUCKETS_OFFSET_IN_BYTES + self.bucket_size_in_bytes() * u64::from(id.0)
+    }
+}
+
+struct AllocationRollback<'memory, M: Memory> {
+    memory: *const M,
+    buckets: Vec<BucketId>,
+    committed: bool,
+    _memory: std::marker::PhantomData<&'memory M>,
+}
+
+impl<M: Memory> Drop for AllocationRollback<'_, M> {
+    fn drop(&mut self) {
+        if self.committed || !std::thread::panicking() {
+            return;
+        }
+        for bucket in self.buckets.iter().copied() {
+            let memory = unsafe { &*self.memory };
+            write_growing(
+                memory,
+                bucket_allocations_address(bucket),
+                &[UNALLOCATED_BUCKET_MARKER],
+            );
+        }
     }
 }

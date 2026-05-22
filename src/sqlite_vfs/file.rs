@@ -397,10 +397,10 @@ unsafe fn write_c_int(arg: *mut c_void, value: c_int) -> c_int {
 mod tests {
     use super::{
         install, x_check_reserved_lock, x_close, x_device_characteristics, x_file_control, x_lock,
-        x_unlock,
+        x_read, x_unlock,
     };
     use super::{FileKind, IcStableFile};
-    use crate::sqlite_vfs::{ffi, lock, vfs};
+    use crate::sqlite_vfs::{ffi, lock, stable_blob, vfs};
     use crate::stable::memory::{self, ContextId};
     use std::ffi::{c_char, c_void, CStr};
     use std::mem::MaybeUninit;
@@ -547,5 +547,24 @@ mod tests {
             assert_eq!(x_close(first_raw), ffi::SQLITE_OK);
             assert_eq!(x_close(second_raw), ffi::SQLITE_OK);
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn main_file_short_read_zero_fills_eof_tail() {
+        let context = reset();
+        stable_blob::write_at(0, b"abc").unwrap();
+        let mut storage = MaybeUninit::<IcStableFile>::uninit();
+        let raw = unsafe { install_main_file(&mut storage, context) };
+        let mut out = [9_u8; 8];
+
+        unsafe {
+            assert_eq!(
+                x_read(raw, out.as_mut_ptr().cast::<c_void>(), 8, 1),
+                ffi::SQLITE_IOERR_SHORT_READ
+            );
+            assert_eq!(x_close(raw), ffi::SQLITE_OK);
+        }
+        assert_eq!(out, [b'b', b'c', 0, 0, 0, 0, 0, 0]);
     }
 }

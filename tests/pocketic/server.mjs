@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync } from "node:fs";
 import { appendFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -43,15 +44,17 @@ export async function startPocketIcServer({ timeoutMs }) {
 async function startOnce(bin, deadline) {
   const dir = await mkdtemp(join(tmpdir(), "ic-sqlite-vfs-pocketic-"));
   const portFile = join(dir, "pocketic.port");
+  const port = configuredPocketIcPort() ?? (await reservePocketIcPort());
+  const args = ["--port", String(port), "--port-file", portFile];
   const output = [];
-  logServer(`spawn port=auto portFile=${portFile}`);
-  const child = spawn(bin, ["--port-file", portFile], {
+  logServer(`spawn port=${port} portFile=${portFile} args=${args.join(" ")}`);
+  const child = spawn(bin, args, {
     stdio: ["ignore", "pipe", "pipe"],
     env: pocketIcEnv(),
   });
-  logServer(`spawned pid=${child.pid ?? "undefined"} port=auto`);
+  logServer(`spawned pid=${child.pid ?? "undefined"} port=${port}`);
   await recordPocketIcPid(child.pid);
-  await recordPocketIcLifecycle(child.pid, "spawned port=auto");
+  await recordPocketIcLifecycle(child.pid, `spawned port=${port} args=${args.join(" ")}`);
   child.stdout.on("data", (chunk) => {
     appendOutput(output, chunk);
     recordPocketIcOutput(child.pid, chunk);
@@ -80,17 +83,19 @@ async function startOnce(bin, deadline) {
     if (child.exitCode !== null) {
       await stopChild(child, dir);
       throw new Error(
-        `PocketIC exited before writing port file: code=${child.exitCode}\n${output.join("")}`,
+        `PocketIC exited before writing port file: code=${child.exitCode} args=${args.join(
+          " ",
+        )}\n${output.join("")}`,
       );
     }
 
-    const port = await readPort(portFile);
-    if (port !== undefined) {
-      logServer(`ready pid=${child.pid ?? "undefined"} port=${port}`);
-      await recordPocketIcLifecycle(child.pid, `ready port=${port}`);
+    const readyPort = await readPort(portFile);
+    if (readyPort !== undefined) {
+      logServer(`ready pid=${child.pid ?? "undefined"} port=${readyPort}`);
+      await recordPocketIcLifecycle(child.pid, `ready port=${readyPort}`);
       return {
         getUrl() {
-          return `http://127.0.0.1:${port}`;
+          return `http://127.0.0.1:${readyPort}`;
         },
         async stop() {
           await stopChild(child, dir);
@@ -105,7 +110,43 @@ async function startOnce(bin, deadline) {
   }
 
   await stopChild(child, dir);
-  throw new Error(`PocketIC did not start before deadline\n${output.join("")}`);
+  throw new Error(
+    `PocketIC did not start before deadline args=${args.join(" ")}\n${output.join("")}`,
+  );
+}
+
+async function reservePocketIcPort() {
+  return await new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (typeof address !== "object" || address === null) {
+        server.close(() => reject(new Error("failed to reserve PocketIC port")));
+        return;
+      }
+      const { port } = address;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
+function configuredPocketIcPort() {
+  const value = process.env.IC_SQLITE_VFS_POCKETIC_PORT;
+  if (value === undefined || value === "") {
+    return undefined;
+  }
+  const port = Number.parseInt(value, 10);
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+    throw new Error(`invalid IC_SQLITE_VFS_POCKETIC_PORT: ${value}`);
+  }
+  return port;
 }
 
 async function readPort(portFile) {
