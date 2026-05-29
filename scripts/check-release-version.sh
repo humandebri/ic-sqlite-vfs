@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# scripts/check-release-version.sh
+# Checks release version/tag alignment before and after release.
+# This keeps crate metadata, package metadata, local tag, and origin tag
+# on the same release point before crates.io publish.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+require_pushed_tag=0
+
+usage() {
+  echo "usage: $0 [--require-pushed-tag]"
+}
+
+if [[ "${1:-}" == "--require-pushed-tag" ]]; then
+  require_pushed_tag=1
+  shift
+fi
+
+if [[ "$#" -ne 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+cargo_version="$(
+  cargo metadata --no-deps --format-version 1 \
+    | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+});
+process.stdin.on("end", () => {
+  const metadata = JSON.parse(input);
+  const pkg = metadata.packages.find((item) => item.name === "ic-sqlite-vfs");
+  if (!pkg || typeof pkg.version !== "string") {
+    process.exit(1);
+  }
+  process.stdout.write(pkg.version);
+});
+'
+)"
+
+package_version="$(
+  node -e '
+const fs = require("fs");
+const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+if (typeof pkg.version !== "string") {
+  process.exit(1);
+}
+process.stdout.write(pkg.version);
+'
+)"
+
+if [[ "$cargo_version" != "$package_version" ]]; then
+  echo "Cargo.toml version ($cargo_version) differs from package.json version ($package_version)" >&2
+  exit 1
+fi
+
+expected_tag="v${cargo_version}"
+exact_tags="$(git tag --points-at HEAD)"
+
+if [[ -n "$exact_tags" ]]; then
+  if ! grep -Fxq "$expected_tag" <<<"$exact_tags"; then
+    echo "HEAD has tag(s), but expected $expected_tag:" >&2
+    echo "$exact_tags" >&2
+    exit 1
+  fi
+
+  unexpected_release_tags="$(grep -E '^v[0-9]+[.][0-9]+[.][0-9]+' <<<"$exact_tags" | grep -Fxv "$expected_tag" || true)"
+  if [[ -n "$unexpected_release_tags" ]]; then
+    echo "HEAD has unexpected release tag(s):" >&2
+    echo "$unexpected_release_tags" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$require_pushed_tag" -eq 0 ]]; then
+  exit 0
+fi
+
+if ! grep -Fxq "$expected_tag" <<<"$exact_tags"; then
+  echo "HEAD is not tagged with $expected_tag" >&2
+  exit 1
+fi
+
+local_tag_object="$(git rev-parse "refs/tags/${expected_tag}")"
+remote_tag_object="$(
+  git ls-remote --tags origin "refs/tags/${expected_tag}" \
+    | awk -v ref="refs/tags/${expected_tag}" '$2 == ref { print $1 }'
+)"
+
+if [[ -z "$remote_tag_object" ]]; then
+  echo "origin is missing tag $expected_tag" >&2
+  exit 1
+fi
+
+if [[ "$local_tag_object" != "$remote_tag_object" ]]; then
+  echo "local tag $expected_tag ($local_tag_object) differs from origin ($remote_tag_object)" >&2
+  exit 1
+fi
