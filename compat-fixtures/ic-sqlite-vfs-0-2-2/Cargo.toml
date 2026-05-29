@@ -1,0 +1,14 @@
+[package]
+name = "ic-sqlite-vfs-compat-0-2-2"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+candid = "0.10"
+ic-cdk = "0.20.1"
+ic-sqlite-vfs = { version = "=0.2.2", default-features = false, features = ["bench-profile", "sqlite-precompiled"] }
+serde = { version = "1", features = ["derive"] }

@@ -23,14 +23,15 @@ memory pages through a segmented page table.
 Current public release: `0.2.2`.
 
 The core VFS, transaction facade, import/export flow, and upgrade persistence
-tests are in place. This project has not promised compatibility for deployed
-canisters yet. `0.x` releases may introduce breaking changes.
+tests are in place. The repository now carries the planned `1.0` compatibility
+contract and release gates; production deployments should still pin exact
+versions until `1.0.0` is published.
 
 `0.2.0` is the first public MemoryManager-backed release. The current crate
 ships a minimal MemoryManager-compatible fork, so consumers no longer need a
 direct `ic-stable-structures` dependency for SQLite storage.
 
-See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `0.x` compatibility
+See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `1.0` compatibility
 contract.
 
 ## Why
@@ -575,6 +576,7 @@ controller verification operations.
 ```sh
 cargo fmt --check
 bash scripts/check-no-await.sh
+scripts/check-public-api-snapshot.sh
 cargo test
 cargo test --features canister-api
 cargo +nightly fuzz run state_ops -- -max_total_time=30
@@ -582,7 +584,9 @@ cargo build --target wasm32-unknown-unknown --no-default-features --features sql
 cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api
 icp build
 npm run test:pocketic
+npm run test:pocketic:compat
 cargo package
+scripts/check-release-package.sh
 wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm
 ```
 
@@ -610,9 +614,11 @@ Current coverage:
 See [docs/OPERATIONS.md](docs/OPERATIONS.md) for transaction rules, import
 recovery, capacity handling, and integrity checks.
 
-See [docs/RELEASE.md](docs/RELEASE.md) for release gates.
+See [docs/RELEASE.md](docs/RELEASE.md) for release gates and publish-time
+version/tag checks.
 
-See [docs/API_STABILITY.md](docs/API_STABILITY.md) for `0.x` compatibility.
+See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `1.0` compatibility
+contract.
 
 See [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) for consumer build setup.
 
@@ -622,7 +628,8 @@ See [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) for consumer build setup.
 - mmap and SQLite shared-memory methods are not implemented.
 - `VACUUM` should be treated as admin maintenance, not a normal API path.
 - Transactions must not cross `await` boundaries.
-- The stable memory layout should be considered unstable until a `1.0` release.
+- `canister-api` is a reference canister API, not the stable `1.x` Candid
+  contract.
 
 ## License
 
