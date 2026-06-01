@@ -625,11 +625,10 @@ pub fn storage_stats() -> Result<StorageStats, StableMemoryError> {
         .checked_mul(STABLE_PAGE_SIZE)
         .ok_or(StableMemoryError::OffsetOverflow)?;
     let orphan_bytes_estimate = allocated_bytes.saturating_sub(active_bytes);
-    let orphan_ratio_basis_points = if active_bytes == 0 {
-        0
-    } else {
-        orphan_bytes_estimate.saturating_mul(10_000) / active_bytes
-    };
+    let orphan_ratio_basis_points = orphan_bytes_estimate
+        .saturating_mul(10_000)
+        .checked_div(active_bytes)
+        .unwrap_or(0);
     Ok(StorageStats {
         layout_version: block.layout_version,
         page_count: active_page_count(&block)?,
@@ -2056,7 +2055,7 @@ mod tests {
         let segment = read_segment_table(&block, &root, 0).unwrap();
 
         assert_eq!(block.db_size, page_size());
-        assert_eq!(segment[0] != 0, true);
+        assert!(segment[0] != 0);
         assert_eq!(segment[1], 0);
         assert_eq!(segment[2], 0);
     }

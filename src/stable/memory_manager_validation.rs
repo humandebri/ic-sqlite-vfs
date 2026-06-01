@@ -120,7 +120,7 @@ fn read_validated_buckets<M: Memory>(
     let allocated = usize::from(allocated_buckets);
     let mut memory_buckets = vec![Vec::new(); MAX_NUM_MEMORIES as usize];
     for (bucket, owner) in buckets[..allocated].iter().copied().enumerate() {
-        if owner >= MAX_NUM_MEMORIES {
+        if owner == MAX_NUM_MEMORIES {
             return Err(MemoryManagerLayoutError::AllocatedBucketHasNoOwner);
         }
         memory_buckets[owner as usize].push(BucketId(bucket as u16));

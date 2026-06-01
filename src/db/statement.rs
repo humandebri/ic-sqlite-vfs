@@ -766,8 +766,7 @@ impl<'connection> Statement<'connection> {
         if reset_rc != ffi::SQLITE_OK {
             return Err(sqlite_error(self.db, reset_rc));
         }
-        let mut param = 1;
-        for value in values {
+        for (param, value) in (1..).zip(values) {
             let len = match std::ffi::c_int::try_from(value.len()) {
                 Ok(len) => len,
                 Err(_) => {
@@ -788,7 +787,6 @@ impl<'connection> Statement<'connection> {
                 self.clear_bindings();
                 return Err(DbError::Sqlite(rc, "sqlite bind failed".to_string()));
             }
-            param += 1;
         }
         Ok(())
     }
