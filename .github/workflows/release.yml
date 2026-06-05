@@ -31,6 +31,7 @@ jobs:
       - run: cargo package --no-verify
       - run: cargo build --target wasm32-unknown-unknown
       - run: cargo build --target wasm32-unknown-unknown --features canister-api
+      - run: npm run test:pocketic:compat
       - run: npm run test:pocketic:perf
       - name: Check wasm imports
         run: |
