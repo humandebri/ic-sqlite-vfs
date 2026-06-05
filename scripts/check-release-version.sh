@@ -54,8 +54,37 @@ process.stdout.write(pkg.version);
 '
 )"
 
+rust_version="$(
+  node -e '
+const fs = require("fs");
+const manifest = fs.readFileSync("Cargo.toml", "utf8");
+const match = manifest.match(/^rust-version\s*=\s*"([^"]+)"$/m);
+if (!match) {
+  process.exit(1);
+}
+process.stdout.write(match[1]);
+'
+)"
+
+toolchain_channel="$(
+  node -e '
+const fs = require("fs");
+const toolchain = fs.readFileSync("rust-toolchain.toml", "utf8");
+const match = toolchain.match(/^channel\s*=\s*"([^"]+)"$/m);
+if (!match) {
+  process.exit(1);
+}
+process.stdout.write(match[1]);
+'
+)"
+
 if [[ "$cargo_version" != "$package_version" ]]; then
   echo "Cargo.toml version ($cargo_version) differs from package.json version ($package_version)" >&2
+  exit 1
+fi
+
+if [[ "$rust_version" != "$toolchain_channel" ]]; then
+  echo "Cargo.toml rust-version ($rust_version) differs from rust-toolchain.toml channel ($toolchain_channel)" >&2
   exit 1
 fi
 

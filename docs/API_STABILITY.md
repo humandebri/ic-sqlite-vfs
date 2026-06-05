@@ -76,10 +76,9 @@ The multi-database API is part of the `1.0` public Rust surface.
 ## Upgrade Contract
 
 Canister upgrades, logical export, logical import, and post-import application
-migration are release-gated by PocketIC tests. The `1.0.0` release gate uses
-the `0.2.2` fixture as the pre-`1.0` backward-compatibility baseline. After
-publishing `1.0.0`, add a `compat-fixtures/ic-sqlite-vfs-1-0-0` fixture and
-keep `1.0.0 -> current` compatibility in every later `1.x` release gate.
+migration are release-gated by PocketIC tests. The compatibility gate keeps the
+`0.2.2` fixture as the pre-`1.0` backward-compatibility baseline and the
+`1.0.0` fixture as the published `1.x` baseline for later releases.
 
 ## Stable Layout
 
@@ -127,8 +126,8 @@ version `6` in place or provide a documented migration that reads version `6`
 and publishes the new layout atomically.
 
 Cross-version canister compatibility is release-gated by
-`npm run test:pocketic:compat`. That test creates a SQLite image with the
-`0.2.2` compatibility canister, upgrades it to the current canister, exports the
-old image, imports it into a current canister, and reruns the current migration
-path. Import is a raw SQLite image restore; application migrations must run
-after importing an older application schema.
+`npm run test:pocketic:compat`. That test creates SQLite images with the
+`0.2.2` and `1.0.0` compatibility canisters, upgrades them to the current
+canister, exports the images, imports them into current canisters, and reruns the
+current migration path. Import is a raw SQLite image restore; application
+migrations must run after importing an older application schema.

@@ -47,11 +47,11 @@ toolchain、同じマシン種別、同じ PocketIC version で3回以上実行�
 新閾値内に収まる場合だけ行う。ローカル単発の高速化・低速化は advisory として
 扱い、単独では閾値を変更しない。
 
-## Post-release 1.0 Compatibility Fixture
+## Compatibility Fixtures
 
-`1.0.0` publish 後の follow-up PR で
-`compat-fixtures/ic-sqlite-vfs-1-0-0` を追加し、`1.0.0 -> current` の
-upgrade/export/import/migration を `npm run test:pocketic:compat` に含める。
+`npm run test:pocketic:compat` は `0.2.2 -> current` と `1.0.0 -> current`
+の upgrade/export/import/migration を検証する。`0.2.2` fixture は pre-`1.0`
+baseline、`1.0.0` fixture は published `1.x` baseline として維持する。
 
 tag は `Cargo.toml` の version と一致させる。例: `version = "0.2.0"` なら tag は `v0.2.0`。
 crates.io publish は GitHub Actions では行わない。tag push と GitHub
@@ -77,4 +77,10 @@ cargo publish --no-verify
 ## Artifact
 
 tag `v*` を push すると GitHub Actions が wasm を build し、GitHub Release artifact としてアップロードする。
-今回の tag は `v1.0.0`。
+`v1.0.0` は release guard の annotated tag commit 比較修正後、crates.io
+publish 前に修正 commit へ付け替えた。公開済み tag、GitHub Release、
+crates.io artifact は以後変更しない。
+
+`scripts/check-release-version.sh --require-pushed-tag` は annotated tag object
+ではなく tag が指す commit を比較する。これにより local tag と origin tag の
+object SHA が異なっても、同じ commit を指す正常な annotated tag を許可する。
