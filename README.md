@@ -20,12 +20,11 @@ memory pages through a segmented page table.
 
 ## Status
 
-Current public release: `0.2.2`.
+Current public release: `1.0.0`.
 
 The core VFS, transaction facade, import/export flow, and upgrade persistence
-tests are in place. The repository now carries the planned `1.0` compatibility
-contract and release gates; production deployments should still pin exact
-versions until `1.0.0` is published.
+tests are in place. The repository carries the active `1.x` compatibility
+contract and release gates; production deployments should pin exact versions.
 
 `0.2.0` is the first public MemoryManager-backed release. The current crate
 ships a minimal MemoryManager-compatible fork, so consumers no longer need a
@@ -227,7 +226,7 @@ only for this repository's reference canister.
 
 ```toml
 [dependencies]
-ic-sqlite-vfs = { version = "0.2.2", default-features = false, features = ["sqlite-precompiled"] }
+ic-sqlite-vfs = { version = "1.0.0", default-features = false, features = ["sqlite-precompiled"] }
 ```
 
 `sqlite-precompiled` links the vendored `wasm32-unknown-unknown` SQLite archive

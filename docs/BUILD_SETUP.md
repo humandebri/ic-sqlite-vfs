@@ -7,7 +7,7 @@ The vendored archive is built with FTS5, UTC date/time functions, and JSON
 functions enabled.
 
 ```toml
-ic-sqlite-vfs = { version = "0.2.2", default-features = false, features = ["sqlite-precompiled"] }
+ic-sqlite-vfs = { version = "1.0.0", default-features = false, features = ["sqlite-precompiled"] }
 ```
 
 When disabling default features, explicitly enable either `sqlite-precompiled`

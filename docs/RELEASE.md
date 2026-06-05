@@ -47,11 +47,11 @@ toolchain、同じマシン種別、同じ PocketIC version で3回以上実行�
 新閾値内に収まる場合だけ行う。ローカル単発の高速化・低速化は advisory として
 扱い、単独では閾値を変更しない。
 
-## 1.0 Compatibility Fixture
+## Post-release 1.0 Compatibility Fixture
 
-`1.0.0` publish 後、`compat-fixtures/ic-sqlite-vfs-1-0-0` を追加し、
-`1.0.0 -> current` の upgrade/export/import/migration を
-`npm run test:pocketic:compat` に含める。
+`1.0.0` publish 後の follow-up PR で
+`compat-fixtures/ic-sqlite-vfs-1-0-0` を追加し、`1.0.0 -> current` の
+upgrade/export/import/migration を `npm run test:pocketic:compat` に含める。
 
 tag は `Cargo.toml` の version と一致させる。例: `version = "0.2.0"` なら tag は `v0.2.0`。
 crates.io publish は GitHub Actions では行わない。tag push と GitHub
@@ -77,4 +77,4 @@ cargo publish --no-verify
 ## Artifact
 
 tag `v*` を push すると GitHub Actions が wasm を build し、GitHub Release artifact としてアップロードする。
-今回の tag は `v0.2.2`。
+今回の tag は `v1.0.0`。

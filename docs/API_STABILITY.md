@@ -1,8 +1,7 @@
 # API Stability
 
-This file defines the staged `1.0` compatibility contract. The current public
-crate is still `0.2.2`; production deployments should pin exact versions until
-`1.0.0` is published.
+This file defines the active `1.x` compatibility contract. The current public
+crate is `1.0.0`; production deployments should pin exact versions.
 
 ## Stability Contract
 
@@ -69,8 +68,7 @@ panic/trap boundary.
 `stable::memory::read()` does not grow stable memory. Reads beyond the current
 capacity return `StableMemoryError::ReadOutOfBounds`.
 
-The multi-database API is part of the `1.0` public Rust surface once `1.0.0`
-is published.
+The multi-database API is part of the `1.0` public Rust surface.
 
 `0.2.0` also adds `sqlite-precompiled`, which links the vendored
 `wasm32-unknown-unknown` SQLite archive without downstream build-support files.
@@ -78,10 +76,10 @@ is published.
 ## Upgrade Contract
 
 Canister upgrades, logical export, logical import, and post-import application
-migration are release-gated by PocketIC tests. The pre-`1.0` release gate uses
-the `0.2.2` fixture. After `1.0.0` is published, add a
-`compat-fixtures/ic-sqlite-vfs-1-0-0` fixture and keep `1.0.0 -> current`
-compatibility in every `1.x` release gate.
+migration are release-gated by PocketIC tests. The `1.0.0` release gate uses
+the `0.2.2` fixture as the pre-`1.0` backward-compatibility baseline. After
+publishing `1.0.0`, add a `compat-fixtures/ic-sqlite-vfs-1-0-0` fixture and
+keep `1.0.0 -> current` compatibility in every later `1.x` release gate.
 
 ## Stable Layout
 

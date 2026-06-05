@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "ic-sqlite-vfs"
-version = "0.2.1"
+version = "1.0.0"
 dependencies = [
  "candid",
  "cc",
