@@ -86,18 +86,25 @@ if ! grep -Fxq "$expected_tag" <<<"$exact_tags"; then
   exit 1
 fi
 
-local_tag_object="$(git rev-parse "refs/tags/${expected_tag}")"
-remote_tag_object="$(
-  git ls-remote --tags origin "refs/tags/${expected_tag}" \
-    | awk -v ref="refs/tags/${expected_tag}" '$2 == ref { print $1 }'
+local_tag_commit="$(git rev-parse "refs/tags/${expected_tag}^{commit}")"
+remote_tag_commit="$(
+  git ls-remote --tags origin "refs/tags/${expected_tag}^{}" \
+    | awk -v ref="refs/tags/${expected_tag}^{}" '$2 == ref { print $1 }'
 )"
 
-if [[ -z "$remote_tag_object" ]]; then
+if [[ -z "$remote_tag_commit" ]]; then
+  remote_tag_commit="$(
+    git ls-remote --tags origin "refs/tags/${expected_tag}" \
+      | awk -v ref="refs/tags/${expected_tag}" '$2 == ref { print $1 }'
+  )"
+fi
+
+if [[ -z "$remote_tag_commit" ]]; then
   echo "origin is missing tag $expected_tag" >&2
   exit 1
 fi
 
-if [[ "$local_tag_object" != "$remote_tag_object" ]]; then
-  echo "local tag $expected_tag ($local_tag_object) differs from origin ($remote_tag_object)" >&2
+if [[ "$local_tag_commit" != "$remote_tag_commit" ]]; then
+  echo "local tag $expected_tag ($local_tag_commit) differs from origin ($remote_tag_commit)" >&2
   exit 1
 fi
