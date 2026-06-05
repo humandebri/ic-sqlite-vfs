@@ -8,7 +8,7 @@ import { startPocketIcServer } from "./server.mjs";
 const wasm = resolve("target/pocketic/ic_sqlite_vfs.wasm");
 const failpointWasm = resolve("target/pocketic/ic_sqlite_vfs_failpoints.wasm");
 const timeout = 600_000;
-const serverStartTimeout = 60_000;
+const serverStartTimeout = 120_000;
 
 test("PocketIC stable image survives upgrade", { timeout }, async () => {
   await withPocketIc("stableImageSurvivesUpgrade", stableImageSurvivesUpgrade);

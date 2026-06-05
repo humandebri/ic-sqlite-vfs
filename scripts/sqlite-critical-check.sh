@@ -141,6 +141,9 @@ if rg -nP '[\x{061C}\x{200E}\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}]' \
   exit 1
 fi
 
+log "checking public API snapshot"
+scripts/check-public-api-snapshot.sh
+
 log "running cargo test"
 cargo test
 
@@ -175,6 +178,13 @@ for attempt in 1 2; do
   echo "PocketIC regression failed; retrying once"
 done
 
+log "running PocketIC cross-version compatibility"
+: > "$PID_FILE"
+run_with_timeout 600 npm run test:pocketic:compat
+
 log "running PocketIC perf"
 : > "$PID_FILE"
 run_with_timeout 600 npm run test:pocketic:perf
+
+log "checking release package contents"
+scripts/check-release-package.sh

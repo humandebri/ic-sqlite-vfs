@@ -25,9 +25,9 @@ checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
 
 [[package]]
 name = "autocfg"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "binread"
@@ -283,7 +283,9 @@ dependencies = [
 
 [[package]]
 name = "ic-sqlite-vfs"
-version = "1.0.0"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "750e8a21ada5b6a5c567d31d12e5353b1ad08b10a4b3f8fa834dd25255700054"
 dependencies = [
  "candid",
  "cc",
@@ -293,20 +295,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "ic-stable-structures"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee3372ddc0cf2a747fc26ce2d075a240ed6bfab151e63bc70109e8967f7ce6f"
+name = "ic-sqlite-vfs-compat-0-2-2"
+version = "0.1.0"
 dependencies = [
- "ic_principal",
-]
-
-[[package]]
-name = "ic-stable-structures-latest-07-compat"
-version = "0.0.0"
-dependencies = [
+ "candid",
+ "ic-cdk",
  "ic-sqlite-vfs",
- "ic-stable-structures",
+ "serde",
 ]
 
 [[package]]

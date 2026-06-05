@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+LIST="$(mktemp "${TMPDIR:-/tmp}/ic-sqlite-vfs-package.XXXXXX")"
+trap 'rm -f "$LIST"' EXIT
+
+cargo package --list --allow-dirty > "$LIST"
+
+require_path() {
+  local path="$1"
+  if ! grep -Fxq "$path" "$LIST"; then
+    echo "release package is missing required path: $path"
+    echo "Run this check from a git tag or after staging/tracking release files."
+    exit 1
+  fi
+}
+
+reject_pattern() {
+  local pattern="$1"
+  if grep -Eq "$pattern" "$LIST"; then
+    echo "release package contains forbidden path matching: $pattern"
+    grep -E "$pattern" "$LIST"
+    exit 1
+  fi
+}
+
+require_path "docs/PUBLIC_API_1_0.snapshot"
+require_path "scripts/check-release-version.sh"
+require_path "tests/pocketic/cross_version.test.mjs"
+require_path "tests/public_api.rs"
+
+reject_pattern '(^|/)target/'
+reject_pattern '^node_modules/'
+reject_pattern '^package-lock\.json$'
+reject_pattern '^compat-fixtures/.*/target/'

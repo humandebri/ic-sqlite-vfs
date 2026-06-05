@@ -111,6 +111,44 @@ On checksum mismatch, the staging area is discarded, the existing DB is kept,
 and the import flag is cleared. To abort an unfinished import, the controller
 calls `db_cancel_import`.
 
+Import restores the raw SQLite image, not application schema intent. If the
+target canister expects newer migrations than the imported image has, run the
+application migration path after import before exposing new-schema methods. The
+reference compatibility test verifies this by importing a `0.2.2` image, then
+running the current `post_upgrade` migration path.
+
+Reference controller guard:
+
+```rust
+fn require_controller() -> Result<(), String> {
+    let caller = ic_cdk::api::msg_caller();
+    if ic_cdk::api::is_controller(&caller) {
+        Ok(())
+    } else {
+        Err("caller is not a controller".to_string())
+    }
+}
+
+#[ic_cdk::query]
+fn db_export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, String> {
+    require_controller()?;
+    ic_sqlite_vfs::Db::export_chunk(offset, len).map_err(|error| error.to_string())
+}
+
+#[ic_cdk::update]
+fn db_begin_import(total_size: u64, checksum: u64) -> Result<(), String> {
+    require_controller()?;
+    ic_sqlite_vfs::Db::begin_import(total_size, checksum)
+        .map_err(|error| error.to_string())
+}
+
+#[ic_cdk::update]
+fn db_compact() -> Result<(), String> {
+    require_controller()?;
+    ic_sqlite_vfs::Db::compact().map_err(|error| error.to_string())
+}
+```
+
 ## Capacity
 
 If growing the selected `VirtualMemory` fails, the error includes

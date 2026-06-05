@@ -1,23 +1,23 @@
 # API Stability
 
-`0.2.0` is the first public MemoryManager-backed line.
+This file defines the active `1.x` compatibility contract. The current public
+crate is `1.0.0`; production deployments should pin exact versions.
 
 ## Stability Contract
 
-The project has not promised compatibility for deployed canisters yet.
+Starting with `1.0.0`, all rustdoc-visible public items under `src/` are part
+of the `1.x` source compatibility contract. Additive public APIs are allowed.
+Removing public items, changing public signatures, or changing documented
+semantics requires a breaking major release.
 
-For all `0.x` releases, breaking changes may include:
+`canister-api` is a reference canister implementation used by examples and
+PocketIC tests. Generated DID compatibility and private Candid method names in
+`src/api.rs` are not part of the `1.x` compatibility contract. The
+`canister-api-test-failpoints` feature is also outside the stable contract.
 
-- stable memory superblock fields
-- DB image region layout
-- `Db` facade signatures
-- migration API
-- import/export API
-- checksum meaning and algorithm
-- compile-time SQLite flags
-
-Patch releases should remain bug-fix only when practical. Minor `0.x` releases
-may still break API or layout. Production users should pin exact versions.
+The frozen public Rust surface is tracked by
+`docs/PUBLIC_API_1_0.snapshot` and checked by
+`scripts/check-public-api-snapshot.sh`.
 
 ## Release Notes
 
@@ -68,21 +68,22 @@ panic/trap boundary.
 `stable::memory::read()` does not grow stable memory. Reads beyond the current
 capacity return `StableMemoryError::ReadOutOfBounds`.
 
-The multi-database API is still covered by the `0.x` compatibility rules.
-Production deployments should pin exact versions.
+The multi-database API is part of the `1.0` public Rust surface.
 
 `0.2.0` also adds `sqlite-precompiled`, which links the vendored
 `wasm32-unknown-unknown` SQLite archive without downstream build-support files.
 
 ## Upgrade Contract
 
-Canister upgrades are tested for the same crate version.
+Canister upgrades, logical export, logical import, and post-import application
+migration are release-gated by PocketIC tests. The `1.0.0` release gate uses
+the `0.2.2` fixture as the pre-`1.0` backward-compatibility baseline. After
+publishing `1.0.0`, add a `compat-fixtures/ic-sqlite-vfs-1-0-0` fixture and
+keep `1.0.0 -> current` compatibility in every later `1.x` release gate.
 
-Cross-version upgrade compatibility is not promised during `0.x`.
+## Stable Layout
 
-## Current Layout
-
-`0.2.0` uses:
+The `1.0` stable-memory image uses:
 
 ```text
 selected virtual memory:
@@ -94,19 +95,40 @@ The superblock stores the active page table offset, logical page count, and
 logical size. The SQLite database image itself is still portable through the
 chunked export API.
 
-In `0.2.0`, `checksum` is last verified checksum metadata. It is not a
-durability boundary. Update commits use a heap write overlay, publish dirty
-pages and a new page table through the superblock, advance `last_tx_id`, and may set
-`checksum_stale`. `db_refresh_checksum` and `db_refresh_checksum_chunk` are the
-only operations that persistently update the stored checksum after a normal
-commit.
+`checksum` is last verified checksum metadata. It is not a durability boundary.
+Update commits use a heap write overlay, publish dirty pages and a new page
+table through the superblock, advance `last_tx_id`, and may set
+`checksum_stale`. `db_refresh_checksum` and `db_refresh_checksum_chunk` are
+the only operations that persistently update the stored checksum after a
+normal commit.
 
-## Road To Stable
+## 1.0 Compatibility Contract
 
-The `1.0` line requires:
+The `1.0` line freezes these surfaces for all `1.x` releases:
 
-- frozen superblock format
-- documented migration path for layout changes
-- stable `Db` facade
-- stable import/export checksum format
-- build setup that does not require copying repository support files
+- stable memory superblock magic `ICSQLITE`, superblock version `6`, encoded
+  little-endian field offsets, and meta-checksum semantics
+- page-map layout version `6`: selected virtual memory offset `0..64KiB` is the
+  superblock, and logical SQLite pages are resolved through the segmented page
+  table rooted by the superblock
+- bundled MemoryManager-compatible layout for `MemoryId` values `0..=254`,
+  matching the `ic-stable-structures` 0.7 memory-manager layout
+- logical export format: byte-for-byte SQLite image over `0..db_size`
+- import/export checksum format: FNV-1a 64-bit checksum over the logical SQLite
+  image bytes in ascending offset order
+- public Rust API: every rustdoc-visible public item under `src/`, including
+  top-level re-exports, `api`, `config`, `db`, `read_metrics`, `sqlite_vfs`,
+  and `stable`
+- downstream build path: `default-features = false` with `sqlite-precompiled`
+
+`1.x` releases may add APIs and metadata fields, but must keep existing `1.0`
+stable-memory images readable. A future layout change must either keep reading
+version `6` in place or provide a documented migration that reads version `6`
+and publishes the new layout atomically.
+
+Cross-version canister compatibility is release-gated by
+`npm run test:pocketic:compat`. That test creates a SQLite image with the
+`0.2.2` compatibility canister, upgrades it to the current canister, exports the
+old image, imports it into a current canister, and reruns the current migration
+path. Import is a raw SQLite image restore; application migrations must run
+after importing an older application schema.

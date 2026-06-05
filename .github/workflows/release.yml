@@ -26,10 +26,8 @@ jobs:
       - run: npm ci
       - run: cargo fmt --check
       - run: bash scripts/sqlite-critical-check.sh
-      - name: Check release tag matches crate version
-        run: |
-          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "ic-sqlite-vfs"))')"
-          test "${GITHUB_REF_NAME}" = "v${version}"
+      - name: Check release version and tag
+        run: bash scripts/check-release-version.sh --require-pushed-tag
       - run: cargo package --no-verify
       - run: cargo build --target wasm32-unknown-unknown
       - run: cargo build --target wasm32-unknown-unknown --features canister-api

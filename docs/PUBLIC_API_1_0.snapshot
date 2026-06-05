@@ -1,0 +1,392 @@
+src/api.rs:pub active_bytes: u64,
+src/api.rs:pub allocated_bytes: u64,
+src/api.rs:pub checksum: u64,
+src/api.rs:pub checksum: u64,
+src/api.rs:pub checksum_refresh_offset: u64,
+src/api.rs:pub checksum_refreshing: bool,
+src/api.rs:pub checksum_stale: bool,
+src/api.rs:pub compact_recommended: bool,
+src/api.rs:pub complete: bool,
+src/api.rs:pub db_size: u64,
+src/api.rs:pub db_size: u64,
+src/api.rs:pub flags: u64,
+src/api.rs:pub import_written_until: u64,
+src/api.rs:pub importing: bool,
+src/api.rs:pub last_tx_id: u64,
+src/api.rs:pub layout_version: u64,
+src/api.rs:pub orphan_bytes_estimate: u64,
+src/api.rs:pub orphan_ratio_basis_points: u64,
+src/api.rs:pub page_count: u64,
+src/api.rs:pub page_table_bytes: u64,
+src/api.rs:pub scanned_bytes: u64,
+src/api.rs:pub schema_version: u64,
+src/api.rs:pub stable_bytes: u64,
+src/api.rs:pub stable_pages: u64,
+src/api.rs:pub struct ChecksumRefresh {
+src/api.rs:pub struct DbMeta {
+src/config.rs:pub const DB_REGION_OFFSET: u64 = SUPERBLOCK_OFFSET + SUPERBLOCK_SIZE;
+src/config.rs:pub const MAIN_DB_PATH: &str = "/main.db";
+src/config.rs:pub const SQLITE_CACHE_SIZE_KIB: i32 = 32_768;
+src/config.rs:pub const SQLITE_PAGE_SIZE: u32 = 16_384;
+src/config.rs:pub const SQLITE_URI: &str = "file:/main.db?vfs=icstable";
+src/config.rs:pub const SQLITE_URI_NUL: &[u8] = b"file:/main.db?vfs=icstable\0";
+src/config.rs:pub const STABLE_PAGE_SIZE: u64 = 65_536;
+src/config.rs:pub const STATEMENT_CACHE_CAPACITY: usize = 32;
+src/config.rs:pub const SUPERBLOCK_OFFSET: u64 = 0;
+src/config.rs:pub const SUPERBLOCK_SIZE: u64 = STABLE_PAGE_SIZE;
+src/config.rs:pub const VFS_NAME: &str = "icstable";
+src/config.rs:pub const VFS_NAME_NUL: &[u8] = b"icstable\0";
+src/db/connection.rs:pub fn changes(&self) -> u64 {
+src/db/connection.rs:pub fn discard(mut self) {
+src/db/connection.rs:pub fn execute(&self, sql: &str, values: &[&dyn ToSql]) -> Result<(), DbError> {
+src/db/connection.rs:pub fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
+src/db/connection.rs:pub fn execute_named(&self, sql: &str, values: &[(&str, &dyn ToSql)]) -> Result<(), DbError> {
+src/db/connection.rs:pub fn execute_text_text(&self, sql: &str, first: &str, second: &str) -> Result<(), DbError> {
+src/db/connection.rs:pub fn exists(&self, sql: &str, values: &[&dyn ToSql]) -> Result<bool, DbError> {
+src/db/connection.rs:pub fn open_read_only() -> Result<Connection, DbError> {
+src/db/connection.rs:pub fn open_read_write() -> Result<Connection, DbError> {
+src/db/connection.rs:pub fn prepare(&self, sql: &str) -> Result<Statement<'_>, DbError> {
+src/db/connection.rs:pub fn prepare_cached(&self, sql: &str) -> Result<CachedStatement<'_>, DbError> {
+src/db/connection.rs:pub fn query_all<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<Vec<T>, DbError>
+src/db/connection.rs:pub fn query_all_named<T, F>(
+src/db/connection.rs:pub fn query_column<T: FromColumn>(
+src/db/connection.rs:pub fn query_column_named<T: FromColumn>(
+src/db/connection.rs:pub fn query_map<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<Vec<T>, DbError>
+src/db/connection.rs:pub fn query_map_named<T, F>(
+src/db/connection.rs:pub fn query_one<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<T, DbError>
+src/db/connection.rs:pub fn query_one_named<T, F>(
+src/db/connection.rs:pub fn query_optional<T, F>(
+src/db/connection.rs:pub fn query_optional_named<T, F>(
+src/db/connection.rs:pub fn query_optional_scalar<T: FromColumn>(
+src/db/connection.rs:pub fn query_optional_scalar_named<T: FromColumn>(
+src/db/connection.rs:pub fn query_optional_string_text(
+src/db/connection.rs:pub fn query_row<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<T, DbError>
+src/db/connection.rs:pub fn query_row_named<T, F>(
+src/db/connection.rs:pub fn query_scalar<T: FromColumn>(
+src/db/connection.rs:pub fn query_scalar_named<T: FromColumn>(
+src/db/connection.rs:pub fn query_text_iter_text_len_sum<'value, I>(
+src/db/connection.rs:pub fn raw(&self) -> *mut ffi::sqlite3 {
+src/db/connection.rs:pub struct CachedStatement<'connection> {
+src/db/connection.rs:pub struct Connection {
+src/db/migrate.rs:pub fn apply(connection: &Connection, migrations: &[Migration]) -> Result<(), DbError> {
+src/db/migrate.rs:pub sql: &'static str,
+src/db/migrate.rs:pub struct Migration {
+src/db/migrate.rs:pub version: u64,
+src/db/mod.rs:pub enum DbError {
+src/db/mod.rs:pub fn begin_import(self, total_size: u64, expected_checksum: u64) -> Result<(), DbError> {
+src/db/mod.rs:pub fn begin_import(total_size: u64, expected_checksum: u64) -> Result<(), DbError> {
+src/db/mod.rs:pub fn cancel_import() -> Result<(), DbError> {
+src/db/mod.rs:pub fn cancel_import(self) -> Result<(), DbError> {
+src/db/mod.rs:pub fn compact() -> Result<(), DbError> {
+src/db/mod.rs:pub fn compact(self) -> Result<(), DbError> {
+src/db/mod.rs:pub fn db_checksum() -> Result<u64, DbError> {
+src/db/mod.rs:pub fn db_checksum(self) -> Result<u64, DbError> {
+src/db/mod.rs:pub fn export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, DbError> {
+src/db/mod.rs:pub fn export_chunk(self, offset: u64, len: u64) -> Result<Vec<u8>, DbError> {
+src/db/mod.rs:pub fn finish_import() -> Result<(), DbError> {
+src/db/mod.rs:pub fn finish_import(self) -> Result<(), DbError> {
+src/db/mod.rs:pub fn import_chunk(offset: u64, bytes: &[u8]) -> Result<(), DbError> {
+src/db/mod.rs:pub fn import_chunk(self, offset: u64, bytes: &[u8]) -> Result<(), DbError> {
+src/db/mod.rs:pub fn init(memory: DbMemory) -> Result<(), DbError> {
+src/db/mod.rs:pub fn init(memory: DbMemory) -> Result<Self, DbError> {
+src/db/mod.rs:pub fn integrity_check() -> Result<String, DbError> {
+src/db/mod.rs:pub fn integrity_check(self) -> Result<String, DbError> {
+src/db/mod.rs:pub fn migrate(migrations: &[migrate::Migration]) -> Result<(), DbError> {
+src/db/mod.rs:pub fn migrate(self, migrations: &[migrate::Migration]) -> Result<(), DbError> {
+src/db/mod.rs:pub fn query<T, F>(f: F) -> Result<T, DbError>
+src/db/mod.rs:pub fn query<T, F>(self, f: F) -> Result<T, DbError>
+src/db/mod.rs:pub fn refresh_checksum() -> Result<u64, DbError> {
+src/db/mod.rs:pub fn refresh_checksum(self) -> Result<u64, DbError> {
+src/db/mod.rs:pub fn refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, DbError> {
+src/db/mod.rs:pub fn refresh_checksum_chunk(self, max_bytes: u64) -> Result<ChecksumRefresh, DbError> {
+src/db/mod.rs:pub fn update<T, F>(f: F) -> Result<T, DbError>
+src/db/mod.rs:pub fn update<T, F>(self, f: F) -> Result<T, DbError>
+src/db/mod.rs:pub mod connection;
+src/db/mod.rs:pub mod migrate;
+src/db/mod.rs:pub mod pragmas;
+src/db/mod.rs:pub mod row;
+src/db/mod.rs:pub mod statement;
+src/db/mod.rs:pub mod transaction;
+src/db/mod.rs:pub mod value;
+src/db/mod.rs:pub struct Db;
+src/db/mod.rs:pub struct DbHandle {
+src/db/mod.rs:pub use row::{FromColumn, Row, TextLen};
+src/db/mod.rs:pub use stable_blob::ChecksumRefresh;
+src/db/mod.rs:pub use transaction::UpdateConnection;
+src/db/mod.rs:pub use value::{Null, ToSql, Value, NULL};
+src/db/pragmas.rs:pub fn apply_read_only(connection: &Connection) -> Result<(), DbError> {
+src/db/pragmas.rs:pub fn apply_read_write(connection: &Connection, apply_page_size: bool) -> Result<(), DbError> {
+src/db/row.rs:pub fn get<T: FromColumn>(&self, index: usize) -> Result<T, DbError> {
+src/db/row.rs:pub struct Row<'row> {
+src/db/row.rs:pub struct TextLen(pub usize);
+src/db/row.rs:pub trait FromColumn: Sized {
+src/db/statement.rs:pub code: std::ffi::c_int,
+src/db/statement.rs:pub column_read: u64,
+src/db/statement.rs:pub fn execute(&mut self, values: &[&dyn ToSql]) -> Result<(), DbError> {
+src/db/statement.rs:pub fn execute_i64_blob(&mut self, first: i64, second: &[u8]) -> Result<(), DbError> {
+src/db/statement.rs:pub fn execute_i64_i64_text(
+src/db/statement.rs:pub fn execute_i64_text(&mut self, first: i64, second: &str) -> Result<(), DbError> {
+src/db/statement.rs:pub fn execute_named(&mut self, values: &[(&str, &dyn ToSql)]) -> Result<(), DbError> {
+src/db/statement.rs:pub fn execute_text_text(&mut self, first: &str, second: &str) -> Result<(), DbError> {
+src/db/statement.rs:pub fn execute_text_text_profiled(
+src/db/statement.rs:pub fn next_row(&mut self) -> Result<Option<Row<'_>>, DbError> {
+src/db/statement.rs:pub fn next_text_len_zero(&mut self) -> Result<Option<usize>, DbError> {
+src/db/statement.rs:pub fn query<'statement>(
+src/db/statement.rs:pub fn query_all<T, F>(&mut self, values: &[&dyn ToSql], mut f: F) -> Result<Vec<T>, DbError>
+src/db/statement.rs:pub fn query_all_named<T, F>(
+src/db/statement.rs:pub fn query_column<T: FromColumn>(
+src/db/statement.rs:pub fn query_column_named<T: FromColumn>(
+src/db/statement.rs:pub fn query_i64<'statement>(
+src/db/statement.rs:pub fn query_named<'statement>(
+src/db/statement.rs:pub fn query_one<T, F>(&mut self, values: &[&dyn ToSql], f: F) -> Result<T, DbError>
+src/db/statement.rs:pub fn query_one_named<T, F>(
+src/db/statement.rs:pub fn query_optional<T, F>(
+src/db/statement.rs:pub fn query_optional_named<T, F>(
+src/db/statement.rs:pub fn query_optional_scalar<T: FromColumn>(
+src/db/statement.rs:pub fn query_optional_scalar_named<T: FromColumn>(
+src/db/statement.rs:pub fn query_optional_string_text(&mut self, value: &str) -> Result<Option<String>, DbError> {
+src/db/statement.rs:pub fn query_optional_string_text_len(
+src/db/statement.rs:pub fn query_optional_string_text_len_profiled(
+src/db/statement.rs:pub fn query_optional_string_text_profiled(
+src/db/statement.rs:pub fn query_scalar<T: FromColumn>(&mut self, values: &[&dyn ToSql]) -> Result<T, DbError> {
+src/db/statement.rs:pub fn query_scalar_named<T: FromColumn>(
+src/db/statement.rs:pub fn query_text_iter<'statement, I>(
+src/db/statement.rs:pub fn query_text_iter_ephemeral<'statement, I>(
+src/db/statement.rs:pub fn query_text_iter_text_len_sum<'value, I>(&mut self, values: I) -> Result<u64, DbError>
+src/db/statement.rs:pub fn query_text_iter_text_len_sum_profiled<'value, I>(
+src/db/statement.rs:pub fn query_texts<'statement>(
+src/db/statement.rs:pub ordinal: u64,
+src/db/statement.rs:pub reset_bind: u64,
+src/db/statement.rs:pub reset_bind: u64,
+src/db/statement.rs:pub reset_bind: u64,
+src/db/statement.rs:pub row_scan: u64,
+src/db/statement.rs:pub step: u64,
+src/db/statement.rs:pub step: u64,
+src/db/statement.rs:pub struct ExecuteTextTextProfile {
+src/db/statement.rs:pub struct QueryOptionalStringTextProfile {
+src/db/statement.rs:pub struct QueryTextLenSumProfile {
+src/db/statement.rs:pub struct Rows<'statement, 'connection> {
+src/db/statement.rs:pub struct Statement<'connection> {
+src/db/transaction.rs:pub fn run_immediate<T, F>(connection: &Connection, f: F) -> Result<T, DbError>
+src/db/transaction.rs:pub fn savepoint<T, F>(&mut self, f: F) -> Result<T, DbError>
+src/db/transaction.rs:pub struct UpdateConnection<'connection> {
+src/db/value.rs:pub const NULL: Null = Null;
+src/db/value.rs:pub enum Value<'value> {
+src/db/value.rs:pub fn to_sql_ref<T: ToSql>(value: &T) -> &dyn ToSql {
+src/db/value.rs:pub struct Null;
+src/db/value.rs:pub trait ToSql {
+src/lib.rs:pub mod api;
+src/lib.rs:pub mod config;
+src/lib.rs:pub mod db;
+src/lib.rs:pub mod read_metrics;
+src/lib.rs:pub mod sqlite_vfs;
+src/lib.rs:pub mod stable;
+src/lib.rs:pub use db::{Db, DbError, DbHandle};
+src/lib.rs:pub use stable::memory::DbMemory;
+src/lib.rs:pub use stable::memory_manager::{MemoryId, MemoryManager, MemoryManagerInitError};
+src/lib.rs:pub use stable::raw_memory::DefaultMemoryImpl;
+src/read_metrics.rs:pub commit_build_segments: u64,
+src/read_metrics.rs:pub commit_capacity: u64,
+src/read_metrics.rs:pub commit_load: u64,
+src/read_metrics.rs:pub commit_page_write: u64,
+src/read_metrics.rs:pub commit_superblock_store: u64,
+src/read_metrics.rs:pub commit_table_write: u64,
+src/read_metrics.rs:pub fn disable_read_metrics() {
+src/read_metrics.rs:pub fn read_metrics_snapshot() -> ReadMetrics {
+src/read_metrics.rs:pub fn reset_read_metrics() {
+src/read_metrics.rs:pub page_table_root_hits: u64,
+src/read_metrics.rs:pub page_table_root_misses: u64,
+src/read_metrics.rs:pub page_table_segment_hits: u64,
+src/read_metrics.rs:pub page_table_segment_misses: u64,
+src/read_metrics.rs:pub stable_data_read_bytes: u64,
+src/read_metrics.rs:pub stable_data_read_calls: u64,
+src/read_metrics.rs:pub stable_data_write_bytes: u64,
+src/read_metrics.rs:pub stable_data_write_calls: u64,
+src/read_metrics.rs:pub stable_grow_calls: u64,
+src/read_metrics.rs:pub stable_grow_pages: u64,
+src/read_metrics.rs:pub struct ReadMetrics {
+src/read_metrics.rs:pub superblock_loads: u64,
+src/read_metrics.rs:pub x_check_reserved_lock_calls: u64,
+src/read_metrics.rs:pub x_device_characteristics_calls: u64,
+src/read_metrics.rs:pub x_file_control_calls: u64,
+src/read_metrics.rs:pub x_file_size_calls: u64,
+src/read_metrics.rs:pub x_lock_calls: u64,
+src/read_metrics.rs:pub x_read_bytes: u64,
+src/read_metrics.rs:pub x_read_calls: u64,
+src/read_metrics.rs:pub x_unlock_calls: u64,
+src/read_metrics.rs:pub x_write_bytes: u64,
+src/read_metrics.rs:pub x_write_calls: u64,
+src/sqlite_vfs/ffi.rs:pub fn SQLITE_STATIC() -> sqlite3_destructor_type {
+src/sqlite_vfs/ffi.rs:pub fn SQLITE_TRANSIENT() -> sqlite3_destructor_type {
+src/sqlite_vfs/file.rs:pub enum FileKind {
+src/sqlite_vfs/file.rs:pub fn new(
+src/sqlite_vfs/file.rs:pub static IO_METHODS: ffi::sqlite3_io_methods = ffi::sqlite3_io_methods {
+src/sqlite_vfs/file.rs:pub struct IcStableFile {
+src/sqlite_vfs/file.rs:pub unsafe fn install(
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut c_void {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn free(ptr: *mut c_void) {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn gmtime(_time: *const i64) -> *mut c_void {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn localtime_r(_time: *const i64, _out: *mut c_void) -> *mut c_void {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn memchr(input: *const c_void, needle: c_int, len: usize) -> *mut c_void {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn strchr(input: *const c_char, needle: c_int) -> *mut c_char {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn strcmp(left: *const c_char, right: *const c_char) -> c_int {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn strcspn(input: *const c_char, reject: *const c_char) -> usize {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn strftime(
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn strncmp(left: *const c_char, right: *const c_char, max: usize) -> c_int {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn strrchr(input: *const c_char, needle: c_int) -> *mut c_char {
+src/sqlite_vfs/libc.rs:pub unsafe extern "C" fn strspn(input: *const c_char, accept: *const c_char) -> usize {
+src/sqlite_vfs/lock.rs:pub fn has_reserved() -> bool {
+src/sqlite_vfs/lock.rs:pub fn level() -> c_int {
+src/sqlite_vfs/lock.rs:pub fn lock(level: c_int) {
+src/sqlite_vfs/lock.rs:pub fn reset_for_tests() {
+src/sqlite_vfs/lock.rs:pub fn unlock(level: c_int) {
+src/sqlite_vfs/mod.rs:pub mod ffi;
+src/sqlite_vfs/mod.rs:pub mod file;
+src/sqlite_vfs/mod.rs:pub mod libc;
+src/sqlite_vfs/mod.rs:pub mod lock;
+src/sqlite_vfs/mod.rs:pub mod register;
+src/sqlite_vfs/mod.rs:pub mod stable_blob;
+src/sqlite_vfs/mod.rs:pub mod temp;
+src/sqlite_vfs/mod.rs:pub mod vfs;
+src/sqlite_vfs/mod.rs:pub use register::register;
+src/sqlite_vfs/overlay.rs:pub fn begin(base_size: u64) -> Result<(), StableMemoryError> {
+src/sqlite_vfs/overlay.rs:pub fn dirty_pages(&self) -> &[(u64, Vec<u8>)] {
+src/sqlite_vfs/overlay.rs:pub fn file_size() -> Option<u64> {
+src/sqlite_vfs/overlay.rs:pub fn is_active() -> bool {
+src/sqlite_vfs/overlay.rs:pub fn is_empty(&self) -> bool {
+src/sqlite_vfs/overlay.rs:pub fn new(base_size: u64) -> Self {
+src/sqlite_vfs/overlay.rs:pub fn read_at(&mut self, offset: u64, dst: &mut [u8]) -> Result<bool, StableMemoryError> {
+src/sqlite_vfs/overlay.rs:pub fn read_at(offset: u64, dst: &mut [u8]) -> Option<Result<bool, StableMemoryError>> {
+src/sqlite_vfs/overlay.rs:pub fn rollback() {
+src/sqlite_vfs/overlay.rs:pub fn size(&self) -> u64 {
+src/sqlite_vfs/overlay.rs:pub fn take() -> Option<Overlay> {
+src/sqlite_vfs/overlay.rs:pub fn truncate(&mut self, size: u64) -> Result<(), StableMemoryError> {
+src/sqlite_vfs/overlay.rs:pub fn truncate(size: u64) -> Option<Result<(), StableMemoryError>> {
+src/sqlite_vfs/overlay.rs:pub fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
+src/sqlite_vfs/overlay.rs:pub fn write_at(offset: u64, bytes: &[u8]) -> Option<Result<(), StableMemoryError>> {
+src/sqlite_vfs/overlay.rs:pub struct Overlay {
+src/sqlite_vfs/register.rs:pub extern "C" fn sqlite3_mutex_alloc(_kind: c_int) -> *mut ffi::sqlite3_mutex {
+src/sqlite_vfs/register.rs:pub extern "C" fn sqlite3_mutex_enter(_mutex: *mut ffi::sqlite3_mutex) {}
+src/sqlite_vfs/register.rs:pub extern "C" fn sqlite3_mutex_free(_mutex: *mut ffi::sqlite3_mutex) {}
+src/sqlite_vfs/register.rs:pub extern "C" fn sqlite3_mutex_held(_mutex: *mut ffi::sqlite3_mutex) -> c_int {
+src/sqlite_vfs/register.rs:pub extern "C" fn sqlite3_mutex_leave(_mutex: *mut ffi::sqlite3_mutex) {}
+src/sqlite_vfs/register.rs:pub extern "C" fn sqlite3_mutex_notheld(_mutex: *mut ffi::sqlite3_mutex) -> c_int {
+src/sqlite_vfs/register.rs:pub extern "C" fn sqlite3_mutex_try(_mutex: *mut ffi::sqlite3_mutex) -> c_int {
+src/sqlite_vfs/register.rs:pub fn register() -> c_int {
+src/sqlite_vfs/register.rs:pub unsafe extern "C" fn sqlite3_os_end() -> c_int {
+src/sqlite_vfs/register.rs:pub unsafe extern "C" fn sqlite3_os_init() -> c_int {
+src/sqlite_vfs/stable_blob.rs:pub active_bytes: u64,
+src/sqlite_vfs/stable_blob.rs:pub allocated_bytes: u64,
+src/sqlite_vfs/stable_blob.rs:pub checksum: u64,
+src/sqlite_vfs/stable_blob.rs:pub compact_recommended: bool,
+src/sqlite_vfs/stable_blob.rs:pub complete: bool,
+src/sqlite_vfs/stable_blob.rs:pub db_size: u64,
+src/sqlite_vfs/stable_blob.rs:pub fn begin_import(total_size: u64, expected_checksum: u64) -> Result<(), StableMemoryError> {
+src/sqlite_vfs/stable_blob.rs:pub fn cancel_import() -> Result<(), StableMemoryError> {
+src/sqlite_vfs/stable_blob.rs:pub fn checksum() -> Result<u64, StableMemoryError> {
+src/sqlite_vfs/stable_blob.rs:pub fn compact() -> Result<(), StableMemoryError> {
+src/sqlite_vfs/stable_blob.rs:pub fn export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, StableMemoryError> {
+src/sqlite_vfs/stable_blob.rs:pub fn finish_import() -> Result<(), StableMemoryError> {
+src/sqlite_vfs/stable_blob.rs:pub fn import_chunk(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
+src/sqlite_vfs/stable_blob.rs:pub fn invalidate_read_cache() {
+src/sqlite_vfs/stable_blob.rs:pub fn refresh_checksum() -> Result<u64, StableMemoryError> {
+src/sqlite_vfs/stable_blob.rs:pub fn refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, StableMemoryError> {
+src/sqlite_vfs/stable_blob.rs:pub fn storage_stats() -> Result<StorageStats, StableMemoryError> {
+src/sqlite_vfs/stable_blob.rs:pub layout_version: u64,
+src/sqlite_vfs/stable_blob.rs:pub orphan_bytes_estimate: u64,
+src/sqlite_vfs/stable_blob.rs:pub orphan_ratio_basis_points: u64,
+src/sqlite_vfs/stable_blob.rs:pub page_count: u64,
+src/sqlite_vfs/stable_blob.rs:pub page_table_bytes: u64,
+src/sqlite_vfs/stable_blob.rs:pub scanned_bytes: u64,
+src/sqlite_vfs/stable_blob.rs:pub struct ChecksumRefresh {
+src/sqlite_vfs/stable_blob.rs:pub struct StorageStats {
+src/sqlite_vfs/temp.rs:pub fn is_empty(&self) -> bool {
+src/sqlite_vfs/temp.rs:pub fn len(&self) -> u64 {
+src/sqlite_vfs/temp.rs:pub fn read(&self, offset: u64, dst: &mut [u8]) -> bool {
+src/sqlite_vfs/temp.rs:pub fn truncate(&mut self, size: u64) -> bool {
+src/sqlite_vfs/temp.rs:pub fn write(&mut self, offset: u64, bytes: &[u8]) -> bool {
+src/sqlite_vfs/temp.rs:pub struct TempFile {
+src/sqlite_vfs/vfs.rs:pub static mut VFS: ffi::sqlite3_vfs = ffi::sqlite3_vfs {
+src/sqlite_vfs/vfs.rs:pub unsafe fn prepare() -> *mut ffi::sqlite3_vfs {
+src/stable/memory.rs:pub enum StableMemoryError {
+src/stable/memory.rs:pub fn active_context_id() -> Result<ContextId, StableMemoryError> {
+src/stable/memory.rs:pub fn default_context() -> Option<ContextId> {
+src/stable/memory.rs:pub fn ensure_capacity(end_offset: u64) -> Result<(), StableMemoryError> {
+src/stable/memory.rs:pub fn init(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
+src/stable/memory.rs:pub fn init_context(memory: DbMemory) -> ContextId {
+src/stable/memory.rs:pub fn is_initialized() -> bool {
+src/stable/memory.rs:pub fn memory_for_tests() -> DbMemory {
+src/stable/memory.rs:pub fn read(offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
+src/stable/memory.rs:pub fn reset_for_tests() {
+src/stable/memory.rs:pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
+src/stable/memory.rs:pub fn set_next_context_id_for_tests(value: u64) {
+src/stable/memory.rs:pub fn size_pages() -> u64 {
+src/stable/memory.rs:pub fn snapshot_for_tests() -> Vec<u8> {
+src/stable/memory.rs:pub fn with_context<T>(context: ContextId, f: impl FnOnce() -> T) -> T {
+src/stable/memory.rs:pub fn write(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
+src/stable/memory.rs:pub struct ContextId(u64);
+src/stable/memory.rs:pub type DbMemory = VirtualMemory<DefaultMemoryImpl>;
+src/stable/memory_layout.rs:pub const fn new(id: u8) -> Self {
+src/stable/memory_layout.rs:pub struct MemoryId(pub(super) u8);
+src/stable/memory_manager.rs:pub enum MemoryManagerInitError {
+src/stable/memory_manager.rs:pub fn get(&self, id: MemoryId) -> VirtualMemory<M> {
+src/stable/memory_manager.rs:pub fn init(memory: M) -> Self {
+src/stable/memory_manager.rs:pub fn init_strict(memory: M) -> Result<Self, MemoryManagerInitError> {
+src/stable/memory_manager.rs:pub fn init_strict_with_bucket_size(
+src/stable/memory_manager.rs:pub fn init_with_bucket_size(memory: M, bucket_size_in_pages: u16) -> Self {
+src/stable/memory_manager.rs:pub struct MemoryManager<M: Memory> {
+src/stable/memory_manager.rs:pub struct VirtualMemory<M: Memory> {
+src/stable/memory_manager.rs:pub use crate::stable::memory_layout::MemoryId;
+src/stable/meta.rs:pub checksum: u64,
+src/stable/meta.rs:pub checksum_refresh_hash: u64,
+src/stable/meta.rs:pub checksum_refresh_offset: u64,
+src/stable/meta.rs:pub checksum_refresh_tx_id: u64,
+src/stable/meta.rs:pub const FLAG_CHECKSUM_REFRESHING: u64 = 1 << 2;
+src/stable/meta.rs:pub const FLAG_CHECKSUM_STALE: u64 = 1 << 1;
+src/stable/meta.rs:pub const FLAG_IMPORTING: u64 = 1;
+src/stable/meta.rs:pub const PAGE_MAP_LAYOUT_VERSION: u64 = 6;
+src/stable/meta.rs:pub db_base_offset: u64,
+src/stable/meta.rs:pub db_size: u64,
+src/stable/meta.rs:pub flags: u64,
+src/stable/meta.rs:pub fn clear_checksum_refresh(&mut self) {
+src/stable/meta.rs:pub fn clear_superblock_cache() {
+src/stable/meta.rs:pub fn commit_db_image(db_base_offset: u64, db_size: u64) -> Result<(), StableMemoryError> {
+src/stable/meta.rs:pub fn commit_page_map(
+src/stable/meta.rs:pub fn commit_page_map_unmetered(
+src/stable/meta.rs:pub fn fnv1a64(bytes: &[u8]) -> u64 {
+src/stable/meta.rs:pub fn fresh() -> Self {
+src/stable/meta.rs:pub fn is_checksum_refreshing(&self) -> bool {
+src/stable/meta.rs:pub fn is_checksum_stale(&self) -> bool {
+src/stable/meta.rs:pub fn is_importing(&self) -> bool {
+src/stable/meta.rs:pub fn load() -> Result<Self, StableMemoryError> {
+src/stable/meta.rs:pub fn record_committed_tx() -> Result<(), StableMemoryError> {
+src/stable/meta.rs:pub fn set_db_size(size: u64) -> Result<(), StableMemoryError> {
+src/stable/meta.rs:pub fn store(&self) -> Result<(), StableMemoryError> {
+src/stable/meta.rs:pub fn store_page_map_without_tx(
+src/stable/meta.rs:pub fn store_page_map_without_tx_unmetered(
+src/stable/meta.rs:pub fn verify_checksum(&self) -> bool {
+src/stable/meta.rs:pub import_base_offset: u64,
+src/stable/meta.rs:pub import_expected_checksum: u64,
+src/stable/meta.rs:pub import_total_size: u64,
+src/stable/meta.rs:pub import_written_until: u64,
+src/stable/meta.rs:pub last_tx_id: u64,
+src/stable/meta.rs:pub layout_version: u64,
+src/stable/meta.rs:pub magic: [u8; 8],
+src/stable/meta.rs:pub meta_checksum: u64,
+src/stable/meta.rs:pub page_count: u64,
+src/stable/meta.rs:pub page_table_offset: u64,
+src/stable/meta.rs:pub schema_version: u64,
+src/stable/meta.rs:pub sqlite_page_size: u32,
+src/stable/meta.rs:pub struct Superblock {
+src/stable/meta.rs:pub version: u32,
+src/stable/mod.rs:pub mod memory;
+src/stable/mod.rs:pub mod memory_manager;
+src/stable/mod.rs:pub mod meta;
+src/stable/mod.rs:pub mod raw_memory;
+src/stable/raw_memory.rs:pub struct Ic0StableMemory;
+src/stable/raw_memory.rs:pub trait Memory {
+src/stable/raw_memory.rs:pub type DefaultMemoryImpl = Ic0StableMemory;
+src/stable/raw_memory.rs:pub type DefaultMemoryImpl = VectorMemory;
+src/stable/raw_memory.rs:pub type VectorMemory = Rc<RefCell<Vec<u8>>>;

@@ -5,6 +5,7 @@ node_modules/
 benchmarks/kv-canister/.icp/cache/
 benchmarks/kv-canister/target/
 examples/minimal-kv/target/
+compat-fixtures/ic-sqlite-vfs-0-2-2/target/
 vendor/sqlite/wasm32-unknown-unknown/obj/
 fuzz/target/
 fuzz/artifacts/
