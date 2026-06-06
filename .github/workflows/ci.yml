@@ -25,9 +25,9 @@ jobs:
       - run: npm ci
       - run: cargo fmt --check
       - run: bash scripts/sqlite-critical-check.sh
+      - run: npm run test:pocketic:compat
       - run: cargo build --target wasm32-unknown-unknown
       - run: cargo build --target wasm32-unknown-unknown --features canister-api
-      - run: npm run test:pocketic:compat
       - name: Check wasm imports
         run: |
           imports="$(wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm | grep '<-' || true)"

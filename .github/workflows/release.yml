@@ -29,9 +29,9 @@ jobs:
       - name: Check release version and tag
         run: bash scripts/check-release-version.sh --require-pushed-tag
       - run: cargo package --no-verify
+      - run: npm run test:pocketic:compat
       - run: cargo build --target wasm32-unknown-unknown
       - run: cargo build --target wasm32-unknown-unknown --features canister-api
-      - run: npm run test:pocketic:compat
       - run: npm run test:pocketic:perf
       - name: Check wasm imports
         run: |
