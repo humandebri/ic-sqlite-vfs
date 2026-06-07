@@ -88,6 +88,18 @@ if [[ "$rust_version" != "$toolchain_channel" ]]; then
   exit 1
 fi
 
+expected_rust_toolchain_action="dtolnay/rust-toolchain@${toolchain_channel}"
+for workflow in .github/workflows/ci.yml .github/workflows/release.yml; do
+  if grep -Fq "dtolnay/rust-toolchain@stable" "$workflow"; then
+    echo "$workflow uses dtolnay/rust-toolchain@stable; expected $expected_rust_toolchain_action" >&2
+    exit 1
+  fi
+  if ! grep -Fq "$expected_rust_toolchain_action" "$workflow"; then
+    echo "$workflow does not use $expected_rust_toolchain_action" >&2
+    exit 1
+  fi
+done
+
 expected_tag="v${cargo_version}"
 exact_tags="$(git tag --points-at HEAD)"
 

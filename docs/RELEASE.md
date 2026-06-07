@@ -38,7 +38,8 @@ tarballではなく git tag checkout 側のrelease gateで検証する。
 - dfx: `0.31.0`
 - PocketIC: `@dfinity/pic` が起動する `pocket-ic`
 
-`rust-toolchain.toml` は Rust toolchain と wasm targets を固定する。
+`rust-toolchain.toml` は Rust toolchain と wasm targets を固定する。CI と
+release workflow も `Cargo.toml` の `rust-version` と同じ `1.95.0` を使う。
 
 ## Perf Gate
 

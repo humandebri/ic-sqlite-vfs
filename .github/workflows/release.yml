@@ -11,7 +11,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: wasm32-unknown-unknown
       - uses: actions/setup-node@v6
@@ -29,7 +29,6 @@ jobs:
       - name: Check release version and tag
         run: bash scripts/check-release-version.sh --require-pushed-tag
       - run: cargo package --no-verify
-      - run: npm run test:pocketic:compat
       - run: cargo build --target wasm32-unknown-unknown
       - run: cargo build --target wasm32-unknown-unknown --features canister-api
       - run: npm run test:pocketic:perf

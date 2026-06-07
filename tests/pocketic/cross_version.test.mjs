@@ -357,9 +357,19 @@ async function importImage(actor, chunks, size, checksum) {
 }
 
 async function refreshChecksumByChunks(actor, maxChunkSize) {
+  const maxChecksumRefreshChunks = 1024;
+  let previousScanned = -1n;
+  let iterations = 0;
   let refresh;
   do {
+    assert(iterations < maxChecksumRefreshChunks, "checksum refresh took too many chunks");
     refresh = await expectOk("refresh checksum chunk", actor.db_refresh_checksum_chunk(maxChunkSize));
+    iterations += 1;
+    assert(
+      refresh.scanned_bytes > previousScanned,
+      `checksum refresh made no progress: ${refresh.scanned_bytes}`,
+    );
+    previousScanned = refresh.scanned_bytes;
   } while (!refresh.complete);
   return refresh;
 }
