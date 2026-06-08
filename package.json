@@ -1,16 +1,17 @@
 {
   "name": "ic-sqlite-vfs",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "build:wasm": "cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs.wasm",
-    "build:wasm:failpoints": "cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api-test-failpoints && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs_failpoints.wasm",
+    "build:wasm": "cargo build --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs.wasm",
+    "build:wasm:failpoints": "cargo build --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api-test-failpoints && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs_failpoints.wasm",
     "build:compat:0.2.2": "cd compat-fixtures/ic-sqlite-vfs-0-2-2 && cargo build --target wasm32-unknown-unknown --release && cd ../.. && mkdir -p target/pocketic && cp compat-fixtures/ic-sqlite-vfs-0-2-2/target/wasm32-unknown-unknown/release/ic_sqlite_vfs_compat_0_2_2.wasm target/pocketic/ic_sqlite_vfs_compat_0_2_2.wasm",
+    "build:compat:1.0.0": "cd compat-fixtures/ic-sqlite-vfs-1-0-0 && cargo build --target wasm32-unknown-unknown --release && cd ../.. && mkdir -p target/pocketic && cp compat-fixtures/ic-sqlite-vfs-1-0-0/target/wasm32-unknown-unknown/release/ic_sqlite_vfs_compat_1_0_0.wasm target/pocketic/ic_sqlite_vfs_compat_1_0_0.wasm",
     "build:bench:wasm": "cd benchmarks/kv-canister && cargo build --target wasm32-unknown-unknown --release && cd ../.. && mkdir -p target/pocketic && cp benchmarks/kv-canister/target/wasm32-unknown-unknown/release/ic_sqlite_vfs_kv_bench.wasm target/pocketic/ic_sqlite_vfs_kv_bench.wasm",
     "build:bench:ic-rusqlite": "cd benchmarks/ic-rusqlite-kv-canister && cargo build --target wasm32-wasip1 --release && wasi2ic target/wasm32-wasip1/release/ic_rusqlite_kv_bench.wasm target/wasm32-wasip1/release/ic_rusqlite_kv_bench_nowasi.wasm && cd ../.. && mkdir -p target/pocketic && cp benchmarks/ic-rusqlite-kv-canister/target/wasm32-wasip1/release/ic_rusqlite_kv_bench_nowasi.wasm target/pocketic/ic_rusqlite_kv_bench.wasm",
     "test:pocketic:regression": "npm run build:wasm && npm run build:wasm:failpoints && node --test tests/pocketic/upgrade.test.mjs",
-    "test:pocketic:compat": "npm run build:wasm && npm run build:compat:0.2.2 && node --test tests/pocketic/cross_version.test.mjs",
+    "test:pocketic:compat": "npm run build:wasm && npm run build:compat:0.2.2 && npm run build:compat:1.0.0 && node --test tests/pocketic/cross_version.test.mjs",
     "test:pocketic:perf": "npm run build:bench:wasm && node --test tests/pocketic/perf_regression.test.mjs",
     "test:pocketic:ic-rusqlite-perf": "npm run build:bench:ic-rusqlite && node --test tests/pocketic/ic_rusqlite_perf.test.mjs",
     "test:pocketic": "npm run test:pocketic:regression && npm run test:pocketic:compat && npm run test:pocketic:perf"

@@ -900,6 +900,7 @@ fn commit_profile_enabled() -> bool {
     false
 }
 
+#[cfg(any(test, debug_assertions, feature = "bench-profile"))]
 #[inline(always)]
 fn commit_profile_start(enabled: bool) -> Option<u64> {
     if enabled {
@@ -907,6 +908,12 @@ fn commit_profile_start(enabled: bool) -> Option<u64> {
     } else {
         None
     }
+}
+
+#[cfg(not(any(test, debug_assertions, feature = "bench-profile")))]
+#[inline(always)]
+fn commit_profile_start(_enabled: bool) -> Option<u64> {
+    None
 }
 
 macro_rules! commit_profile_recorder {

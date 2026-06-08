@@ -114,8 +114,8 @@ calls `db_cancel_import`.
 Import restores the raw SQLite image, not application schema intent. If the
 target canister expects newer migrations than the imported image has, run the
 application migration path after import before exposing new-schema methods. The
-reference compatibility test verifies this by importing a `0.2.2` image, then
-running the current `post_upgrade` migration path.
+reference compatibility test verifies this by importing `0.2.2` and `1.0.0`
+images, then running the current `post_upgrade` migration path.
 
 Reference controller guard:
 

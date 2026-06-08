@@ -20,7 +20,7 @@ memory pages through a segmented page table.
 
 ## Status
 
-Current public release: `1.0.0`.
+Current public release: `1.0.1`.
 
 The core VFS, transaction facade, import/export flow, and upgrade persistence
 tests are in place. The repository carries the active `1.x` compatibility
@@ -226,7 +226,7 @@ only for this repository's reference canister.
 
 ```toml
 [dependencies]
-ic-sqlite-vfs = { version = "1.0.0", default-features = false, features = ["sqlite-precompiled"] }
+ic-sqlite-vfs = { version = "1.0.1", default-features = false, features = ["sqlite-precompiled"] }
 ```
 
 `sqlite-precompiled` links the vendored `wasm32-unknown-unknown` SQLite archive
@@ -579,14 +579,15 @@ scripts/check-public-api-snapshot.sh
 cargo test
 cargo test --features canister-api
 cargo +nightly fuzz run state_ops -- -max_total_time=30
-cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled
-cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api
+cargo check --release
+cargo check --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled
+npm run build:wasm
 icp build
 npm run test:pocketic
 npm run test:pocketic:compat
 cargo package
 scripts/check-release-package.sh
-wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm
+wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm
 ```
 
 Current coverage:

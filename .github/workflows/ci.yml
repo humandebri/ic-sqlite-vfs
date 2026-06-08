@@ -9,11 +9,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: wasm32-unknown-unknown
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -24,12 +24,15 @@ jobs:
           sudo ln -sf "$(command -v clang)" /usr/local/bin/wasm32-wasi-clang
       - run: npm ci
       - run: cargo fmt --check
+      - run: bash scripts/check-release-version.sh
       - run: bash scripts/sqlite-critical-check.sh
-      - run: cargo build --target wasm32-unknown-unknown
-      - run: cargo build --target wasm32-unknown-unknown --features canister-api
+      - run: npm run test:pocketic:compat
+      - run: npm run test:pocketic:perf
+      - run: scripts/check-release-package.sh
+      - run: npm run build:wasm
       - name: Check wasm imports
         run: |
-          imports="$(wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm | grep '<-' || true)"
+          imports="$(wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm | grep '<-' || true)"
           echo "$imports"
           if echo "$imports" | grep -v '<- ic0\.'; then
             echo "unexpected non-ic0 import" >&2
