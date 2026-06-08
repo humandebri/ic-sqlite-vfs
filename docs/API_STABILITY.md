@@ -1,7 +1,7 @@
 # API Stability
 
 This file defines the active `1.x` compatibility contract. The current public
-crate is `1.0.0`; production deployments should pin exact versions.
+crate is `1.0.1`; production deployments should pin exact versions.
 
 ## Stability Contract
 

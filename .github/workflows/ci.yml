@@ -26,11 +26,10 @@ jobs:
       - run: cargo fmt --check
       - run: bash scripts/check-release-version.sh
       - run: bash scripts/sqlite-critical-check.sh
-      - run: cargo build --target wasm32-unknown-unknown
-      - run: cargo build --target wasm32-unknown-unknown --features canister-api
+      - run: npm run build:wasm
       - name: Check wasm imports
         run: |
-          imports="$(wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm | grep '<-' || true)"
+          imports="$(wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm | grep '<-' || true)"
           echo "$imports"
           if echo "$imports" | grep -v '<- ic0\.'; then
             echo "unexpected non-ic0 import" >&2

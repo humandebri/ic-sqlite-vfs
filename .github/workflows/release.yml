@@ -29,12 +29,11 @@ jobs:
       - name: Check release version and tag
         run: bash scripts/check-release-version.sh --require-pushed-tag
       - run: cargo package --no-verify
-      - run: cargo build --target wasm32-unknown-unknown
-      - run: cargo build --target wasm32-unknown-unknown --features canister-api
+      - run: npm run build:wasm
       - run: npm run test:pocketic:perf
       - name: Check wasm imports
         run: |
-          imports="$(wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm | grep '<-' || true)"
+          imports="$(wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm | grep '<-' || true)"
           echo "$imports"
           if echo "$imports" | grep -v '<- ic0\.'; then
             echo "unexpected non-ic0 import" >&2
@@ -42,4 +41,4 @@ jobs:
           fi
       - uses: softprops/action-gh-release@v3
         with:
-          files: target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm
+          files: target/pocketic/ic_sqlite_vfs.wasm

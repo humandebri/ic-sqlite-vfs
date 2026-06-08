@@ -150,6 +150,12 @@ cargo test
 log "running cargo test --features canister-api"
 cargo test --features canister-api
 
+log "checking release profile"
+cargo check --release
+
+log "checking wasm release profile with sqlite-precompiled"
+cargo check --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled
+
 log "running MemoryManager compatibility fixture for ic-stable-structures 0.7.0"
 cargo test --manifest-path compat-fixtures/ic-stable-structures-070/Cargo.toml --locked
 

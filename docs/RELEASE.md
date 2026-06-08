@@ -8,20 +8,23 @@ PocketIC/npm gate を再現する設計ではない。
 ```sh
 cargo fmt --check
 scripts/check-release-version.sh
+cargo check --release
+cargo check --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled
 cargo test --tests
 cargo test --test public_api
 bash scripts/sqlite-critical-check.sh
-cargo build --target wasm32-unknown-unknown
-cargo build --target wasm32-unknown-unknown --features canister-api
+npm run build:wasm
 npm run test:pocketic:compat
 npm run test:pocketic:perf
 cargo package --no-verify --allow-dirty
 cargo package --list --allow-dirty
 scripts/check-release-package.sh
-wasm-objdump -x target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm
+wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm
 ```
 
 `wasm-objdump` の import は `ic0.*` のみ許可する。`env.*` が出た場合は release しない。
+GitHub Release artifact は `sqlite-precompiled,canister-api` の release profile
+で build した `target/pocketic/ic_sqlite_vfs.wasm` に統一する。
 
 `cargo package --list` では `docs/PUBLIC_API_1_0.snapshot` と release
 check scripts を含め、`target/`、`node_modules/`、`package-lock.json` を
@@ -58,7 +61,7 @@ tag は `Cargo.toml` の version と一致させる。例: `version = "0.2.0"` �
 crates.io publish は GitHub Actions では行わない。tag push と GitHub
 Release 成功確認より先に `cargo publish` を実行しない。
 
-release は以下の順序で行う。
+`1.0.1` release は以下の順序で行う。
 
 ```sh
 VERSION="$(cargo metadata --no-deps --format-version 1 | node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => { const metadata = JSON.parse(input); process.stdout.write(metadata.packages.find(pkg => pkg.name === "ic-sqlite-vfs").version); });')"
@@ -78,6 +81,8 @@ cargo publish --no-verify
 ## Artifact
 
 tag `v*` を push すると GitHub Actions が wasm を build し、GitHub Release artifact としてアップロードする。
+`v1.0.1` 以降の artifact は `sqlite-precompiled,canister-api` の release
+profile build とする。
 `v1.0.0` は release guard の annotated tag commit 比較修正後、crates.io
 publish 前に修正 commit へ付け替えた。公開済み tag、GitHub Release、
 crates.io artifact は以後変更しない。

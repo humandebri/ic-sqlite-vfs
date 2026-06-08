@@ -88,6 +88,52 @@ if [[ "$rust_version" != "$toolchain_channel" ]]; then
   exit 1
 fi
 
+build_wasm_script="$(
+  node -e '
+const fs = require("fs");
+const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+if (!pkg.scripts || typeof pkg.scripts["build:wasm"] !== "string") {
+  process.exit(1);
+}
+process.stdout.write(pkg.scripts["build:wasm"]);
+'
+)"
+
+build_wasm_failpoints_script="$(
+  node -e '
+const fs = require("fs");
+const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+if (!pkg.scripts || typeof pkg.scripts["build:wasm:failpoints"] !== "string") {
+  process.exit(1);
+}
+process.stdout.write(pkg.scripts["build:wasm:failpoints"]);
+'
+)"
+
+for required in \
+  "cargo build --release --target wasm32-unknown-unknown" \
+  "--no-default-features" \
+  "--features sqlite-precompiled,canister-api" \
+  "target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm" \
+  "target/pocketic/ic_sqlite_vfs.wasm"; do
+  if [[ "$build_wasm_script" != *"$required"* ]]; then
+    echo "package.json build:wasm does not contain required release artifact fragment: $required" >&2
+    exit 1
+  fi
+done
+
+for required in \
+  "cargo build --release --target wasm32-unknown-unknown" \
+  "--no-default-features" \
+  "--features sqlite-precompiled,canister-api-test-failpoints" \
+  "target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm" \
+  "target/pocketic/ic_sqlite_vfs_failpoints.wasm"; do
+  if [[ "$build_wasm_failpoints_script" != *"$required"* ]]; then
+    echo "package.json build:wasm:failpoints does not contain required release artifact fragment: $required" >&2
+    exit 1
+  fi
+done
+
 expected_rust_toolchain_action="dtolnay/rust-toolchain@${toolchain_channel}"
 for workflow in .github/workflows/ci.yml .github/workflows/release.yml; do
   if grep -Fq "dtolnay/rust-toolchain@stable" "$workflow"; then
@@ -96,6 +142,14 @@ for workflow in .github/workflows/ci.yml .github/workflows/release.yml; do
   fi
   if ! grep -Fq "$expected_rust_toolchain_action" "$workflow"; then
     echo "$workflow does not use $expected_rust_toolchain_action" >&2
+    exit 1
+  fi
+  if grep -Fq "target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm" "$workflow"; then
+    echo "$workflow still checks or uploads debug wasm; expected target/pocketic/ic_sqlite_vfs.wasm" >&2
+    exit 1
+  fi
+  if ! grep -Fq "target/pocketic/ic_sqlite_vfs.wasm" "$workflow"; then
+    echo "$workflow does not check or upload target/pocketic/ic_sqlite_vfs.wasm" >&2
     exit 1
   fi
 done

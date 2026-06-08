@@ -1,11 +1,11 @@
 {
   "name": "ic-sqlite-vfs",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "build:wasm": "cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs.wasm",
-    "build:wasm:failpoints": "cargo build --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api-test-failpoints && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs_failpoints.wasm",
+    "build:wasm": "cargo build --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs.wasm",
+    "build:wasm:failpoints": "cargo build --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api-test-failpoints && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs_failpoints.wasm",
     "build:compat:0.2.2": "cd compat-fixtures/ic-sqlite-vfs-0-2-2 && cargo build --target wasm32-unknown-unknown --release && cd ../.. && mkdir -p target/pocketic && cp compat-fixtures/ic-sqlite-vfs-0-2-2/target/wasm32-unknown-unknown/release/ic_sqlite_vfs_compat_0_2_2.wasm target/pocketic/ic_sqlite_vfs_compat_0_2_2.wasm",
     "build:compat:1.0.0": "cd compat-fixtures/ic-sqlite-vfs-1-0-0 && cargo build --target wasm32-unknown-unknown --release && cd ../.. && mkdir -p target/pocketic && cp compat-fixtures/ic-sqlite-vfs-1-0-0/target/wasm32-unknown-unknown/release/ic_sqlite_vfs_compat_1_0_0.wasm target/pocketic/ic_sqlite_vfs_compat_1_0_0.wasm",
     "build:bench:wasm": "cd benchmarks/kv-canister && cargo build --target wasm32-unknown-unknown --release && cd ../.. && mkdir -p target/pocketic && cp benchmarks/kv-canister/target/wasm32-unknown-unknown/release/ic_sqlite_vfs_kv_bench.wasm target/pocketic/ic_sqlite_vfs_kv_bench.wasm",
