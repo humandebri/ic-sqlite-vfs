@@ -152,6 +152,18 @@ for workflow in .github/workflows/ci.yml .github/workflows/release.yml; do
     echo "$workflow does not check or upload target/pocketic/ic_sqlite_vfs.wasm" >&2
     exit 1
   fi
+  if ! grep -Fq "npm run test:pocketic:compat" "$workflow"; then
+    echo "$workflow does not run npm run test:pocketic:compat" >&2
+    exit 1
+  fi
+  if ! grep -Fq "npm run test:pocketic:perf" "$workflow"; then
+    echo "$workflow does not run npm run test:pocketic:perf" >&2
+    exit 1
+  fi
+  if ! grep -Fq "scripts/check-release-package.sh" "$workflow"; then
+    echo "$workflow does not run scripts/check-release-package.sh" >&2
+    exit 1
+  fi
 done
 
 expected_tag="v${cargo_version}"

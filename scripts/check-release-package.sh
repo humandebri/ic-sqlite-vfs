@@ -28,6 +28,8 @@ reject_pattern() {
 }
 
 require_path "docs/PUBLIC_API_1_0.snapshot"
+require_path "LICENSE-APACHE"
+require_path "LICENSE-MIT"
 require_path "scripts/check-release-version.sh"
 require_path "tests/pocketic/cross_version.test.mjs"
 require_path "tests/public_api.rs"

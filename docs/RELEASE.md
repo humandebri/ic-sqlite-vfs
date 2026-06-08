@@ -13,18 +13,20 @@ cargo check --release --target wasm32-unknown-unknown --no-default-features --fe
 cargo test --tests
 cargo test --test public_api
 bash scripts/sqlite-critical-check.sh
-npm run build:wasm
-npm run test:pocketic:compat
-npm run test:pocketic:perf
 cargo package --no-verify --allow-dirty
 cargo package --list --allow-dirty
 scripts/check-release-package.sh
+npm run test:pocketic:compat
+npm run test:pocketic:perf
+npm run build:wasm
 wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm
 ```
 
 `wasm-objdump` の import は `ic0.*` のみ許可する。`env.*` が出た場合は release しない。
 GitHub Release artifact は `sqlite-precompiled,canister-api` の release profile
 で build した `target/pocketic/ic_sqlite_vfs.wasm` に統一する。
+`scripts/sqlite-critical-check.sh` は基礎検査と PocketIC regression に限定し、
+compat、perf、package contents は workflow と release gate で明示実行する。
 
 `cargo package --list` では `docs/PUBLIC_API_1_0.snapshot` と release
 check scripts を含め、`target/`、`node_modules/`、`package-lock.json` を

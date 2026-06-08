@@ -183,14 +183,3 @@ for attempt in 1 2; do
   fi
   echo "PocketIC regression failed; retrying once"
 done
-
-log "running PocketIC cross-version compatibility"
-: > "$PID_FILE"
-run_with_timeout 600 npm run test:pocketic:compat
-
-log "running PocketIC perf"
-: > "$PID_FILE"
-run_with_timeout 600 npm run test:pocketic:perf
-
-log "checking release package contents"
-scripts/check-release-package.sh

@@ -26,6 +26,9 @@ jobs:
       - run: cargo fmt --check
       - run: bash scripts/check-release-version.sh
       - run: bash scripts/sqlite-critical-check.sh
+      - run: npm run test:pocketic:compat
+      - run: npm run test:pocketic:perf
+      - run: scripts/check-release-package.sh
       - run: npm run build:wasm
       - name: Check wasm imports
         run: |

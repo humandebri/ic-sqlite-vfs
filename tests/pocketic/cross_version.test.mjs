@@ -301,6 +301,32 @@ test("PocketIC 1.0.0 image upgrades and imports into current canister", { timeou
       Ok: [["from-1.0.0"], [`bulk-019:${"y".repeat(4096)}`], []],
     });
     assert.deepEqual(await migratedImport.kv_get_note("alpha"), { Ok: ["released"] });
+
+    step(name, "reject wrong 1.0.0 checksum without replacing destination");
+    const { actor: checksumTarget } = await pic.setupCanister({
+      idlFactory,
+      wasm: currentWasm,
+    });
+    assert.deepEqual(await checksumTarget.kv_put("existing", "kept"), { Ok: null });
+    await importImageExpectFinishError(checksumTarget, exported, oldMeta.db_size, refresh.checksum + 1n);
+    assert.deepEqual(await checksumTarget.kv_get("existing"), { Ok: ["kept"] });
+    assert.deepEqual(await checksumTarget.db_integrity_check(), { Ok: "ok" });
+
+    step(name, "cancel partial 1.0.0 import and keep active image");
+    const { actor: cancelTarget } = await pic.setupCanister({
+      idlFactory,
+      wasm: currentWasm,
+    });
+    assert.deepEqual(await cancelTarget.kv_put("before-cancel", "kept"), { Ok: null });
+    assert.deepEqual(await cancelTarget.db_begin_import(oldMeta.db_size, refresh.checksum), { Ok: null });
+    assert.deepEqual(await cancelTarget.db_import_chunk(0n, exported[0]), { Ok: null });
+    await expectErr(
+      "read during 1.0.0 import",
+      cancelTarget.kv_get("before-cancel"),
+      /import|unable to open database file/,
+    );
+    assert.deepEqual(await cancelTarget.db_cancel_import(), { Ok: null });
+    assert.deepEqual(await cancelTarget.kv_get("before-cancel"), { Ok: ["kept"] });
   } catch (error) {
     bodyError = error;
   } finally {
