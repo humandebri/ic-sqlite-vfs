@@ -26,6 +26,8 @@ jobs:
       - run: npm ci
       - run: cargo fmt --check
       - run: bash scripts/sqlite-critical-check.sh
+      - run: cargo build --target wasm32-unknown-unknown
+      - run: cargo build --target wasm32-unknown-unknown --features canister-api
       - name: Check release version and tag
         run: bash scripts/check-release-version.sh --require-pushed-tag
       - run: cargo package --no-verify

@@ -152,6 +152,14 @@ for workflow in .github/workflows/ci.yml .github/workflows/release.yml; do
     echo "$workflow does not check or upload target/pocketic/ic_sqlite_vfs.wasm" >&2
     exit 1
   fi
+  if ! grep -Fxq "      - run: cargo build --target wasm32-unknown-unknown" "$workflow"; then
+    echo "$workflow does not run default-feature wasm build" >&2
+    exit 1
+  fi
+  if ! grep -Fxq "      - run: cargo build --target wasm32-unknown-unknown --features canister-api" "$workflow"; then
+    echo "$workflow does not run default-feature canister-api wasm build" >&2
+    exit 1
+  fi
   if ! grep -Fq "npm run test:pocketic:compat" "$workflow"; then
     echo "$workflow does not run npm run test:pocketic:compat" >&2
     exit 1

@@ -10,13 +10,39 @@ documentation = "https://docs.rs/ic-sqlite-vfs"
 repository = "https://github.com/humandebri/ic-sqlite-vfs"
 keywords = ["sqlite", "internet-computer", "stable-memory", "vfs", "icp"]
 categories = ["database", "embedded", "wasm"]
-exclude = [
-  "/.github/",
-  "/.icp/",
-  "/node_modules/",
-  "/target/",
-  "/package-lock.json",
-  "/package.json",
+include = [
+  "/.cargo/config.toml",
+  "/.gitignore",
+  "/Cargo.lock",
+  "/Cargo.toml",
+  "/LICENSE-APACHE",
+  "/LICENSE-MIT",
+  "/README.md",
+  "/build-support/**",
+  "/build.rs",
+  "/c/include/**",
+  "/compat-fixtures/common/**",
+  "/compat-fixtures/ic-sqlite-vfs-1-0-0/Cargo.fixture.toml",
+  "/compat-fixtures/ic-sqlite-vfs-1-0-0/Cargo.lock",
+  "/compat-fixtures/ic-sqlite-vfs-1-0-0/src/lib.rs",
+  "/dfx.json",
+  "/docs/PUBLIC_API_1_0.snapshot",
+  "/docs/**/*.md",
+  "/icp.yaml",
+  "/proofs/**/*.md",
+  "/proofs/**/*.rs",
+  "/rust-toolchain.toml",
+  "/scripts/**",
+  "/spec/**/*.json",
+  "/spec/**/*.toml",
+  "/src/**/*.did",
+  "/src/**/*.rs",
+  "/tests/**/*.mjs",
+  "/tests/**/*.rs",
+  "/vendor/sqlite/bindings/**",
+  "/vendor/sqlite/build-flags.txt",
+  "/vendor/sqlite/src/**",
+  "/vendor/sqlite/wasm32-unknown-unknown/lib/libsqlite3.a",
 ]
 
 [features]

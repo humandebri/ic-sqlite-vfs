@@ -13,6 +13,8 @@ cargo check --release --target wasm32-unknown-unknown --no-default-features --fe
 cargo test --tests
 cargo test --test public_api
 bash scripts/sqlite-critical-check.sh
+cargo build --target wasm32-unknown-unknown
+cargo build --target wasm32-unknown-unknown --features canister-api
 cargo package --no-verify --allow-dirty
 cargo package --list --allow-dirty
 scripts/check-release-package.sh

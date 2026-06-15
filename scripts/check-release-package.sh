@@ -33,8 +33,12 @@ require_path "LICENSE-MIT"
 require_path "scripts/check-release-version.sh"
 require_path "tests/pocketic/cross_version.test.mjs"
 require_path "tests/public_api.rs"
+require_path "compat-fixtures/ic-sqlite-vfs-1-0-0/Cargo.lock"
+require_path "compat-fixtures/ic-sqlite-vfs-1-0-0/Cargo.fixture.toml"
+require_path "compat-fixtures/ic-sqlite-vfs-1-0-0/src/lib.rs"
 
 reject_pattern '(^|/)target/'
+reject_pattern '(^|/)[.]DS_Store$'
 reject_pattern '^node_modules/'
 reject_pattern '^package-lock\.json$'
 reject_pattern '^compat-fixtures/.*/target/'
