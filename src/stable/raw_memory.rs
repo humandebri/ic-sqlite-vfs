@@ -8,7 +8,17 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryBackendIdentity {
+    Ic0StableMemory,
+    Address(*const ()),
+}
+
 pub trait Memory {
+    fn identity(&self) -> MemoryBackendIdentity {
+        MemoryBackendIdentity::Address(std::ptr::from_ref(self).cast::<()>())
+    }
+
     fn size(&self) -> u64;
     fn grow(&self, pages: u64) -> i64;
     fn read(&self, offset: u64, dst: &mut [u8]);
@@ -42,6 +52,10 @@ extern "C" {
 
 #[cfg(target_arch = "wasm32")]
 impl Memory for Ic0StableMemory {
+    fn identity(&self) -> MemoryBackendIdentity {
+        MemoryBackendIdentity::Ic0StableMemory
+    }
+
     fn size(&self) -> u64 {
         unsafe { stable64_size() }
     }
@@ -66,6 +80,10 @@ impl Memory for Ic0StableMemory {
 pub type VectorMemory = Rc<RefCell<Vec<u8>>>;
 
 impl Memory for RefCell<Vec<u8>> {
+    fn identity(&self) -> MemoryBackendIdentity {
+        MemoryBackendIdentity::Address(std::ptr::from_ref(self).cast::<()>())
+    }
+
     fn size(&self) -> u64 {
         self.borrow().len() as u64 / STABLE_PAGE_SIZE
     }
@@ -103,6 +121,10 @@ impl Memory for RefCell<Vec<u8>> {
 }
 
 impl<M: Memory> Memory for Rc<M> {
+    fn identity(&self) -> MemoryBackendIdentity {
+        self.deref().identity()
+    }
+
     fn size(&self) -> u64 {
         self.deref().size()
     }

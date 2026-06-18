@@ -15,22 +15,22 @@ SQLite pager
 ```
 
 `ic-sqlite-vfs` does not use POSIX files, WASI files, stable-fs, or wasi2ic.
-SQLite sees `/main.db`; the VFS maps logical SQLite pages to immutable stable
-memory pages through a segmented page table.
+SQLite sees `/main.db`; the VFS stores logical SQLite pages at fixed offsets in
+stable memory.
 
 ## Status
 
-Current public release: `1.0.1`.
+Current public release: `2.0.0`.
 
 The core VFS, transaction facade, import/export flow, and upgrade persistence
-tests are in place. The repository carries the active `1.x` compatibility
+tests are in place. The repository carries the active `2.x` compatibility
 contract and release gates; production deployments should pin exact versions.
 
 `0.2.0` is the first public MemoryManager-backed release. The current crate
 ships a minimal MemoryManager-compatible fork, so consumers no longer need a
 direct `ic-stable-structures` dependency for SQLite storage.
 
-See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `1.0` compatibility
+See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `2.0` compatibility
 contract.
 
 ## Why
@@ -59,19 +59,25 @@ instructions for reset + insert and 6.5x fewer for insert/update.
 
 `ic-sqlite-vfs` does not reserve a `MemoryId`. The consuming canister chooses
 one `MemoryId` for SQLite and must keep it stable forever. The examples use
-`MemoryId::new(120)`, matching `ic-rusqlite`'s default mounted DB memory ID.
+`MemoryId::new(120)` as the fresh destination slot convention matching
+`ic-rusqlite`'s default mounted DB memory ID.
 
 Do not reuse that `MemoryId` for any other stable structure. Inside the selected
 virtual memory, this crate owns the full virtual address space:
 
 ```text
 virtual offset 0..64KiB      superblock
-virtual offset 64KiB..       immutable SQLite pages, segment tables, and root tables
+virtual offset 64KiB..       in-place SQLite image bytes
 ```
 
 The crate does not own the canister's raw stable memory. Raw stable memory is
 managed by a `MemoryManager<DefaultMemoryImpl>` with the same stable layout as
 the `ic-stable-structures` 0.7 MemoryManager.
+If the selected virtual memory is non-empty and does not start with the
+`ICSQLITE` superblock, initialization fails with
+`StableMemoryError::ForeignStableMemoryImage` without rewriting bytes. Existing
+`ic-rusqlite` raw SQLite images must be exported by the old canister and
+imported into a fresh v8 image.
 
 `Db::init(memory)` is a single global initialization point for one SQLite
 database facade in the current Wasm instance. Calling it twice returns
@@ -79,7 +85,9 @@ database facade in the current Wasm instance. Calling it twice returns
 multiple simultaneous SQLite databases, with a distinct stable `MemoryId` per
 handle. Each handle owns one independent SQLite image. This is not a mount-id
 or filename namespace inside one image; SQLite still opens `/main.db` for each
-handle, and the active context selects the backing `VirtualMemory`.
+handle, and the active context selects the backing `VirtualMemory`. Registering
+the same `MemoryId` twice in one Wasm instance returns
+`StableMemoryError::MemoryAlreadyRegistered`.
 
 The bundled MemoryManager-compatible layout supports `MemoryId` values
 `0..=254`; `255` is reserved internally as the unallocated marker.
@@ -89,9 +97,11 @@ one `MemoryId`, one `DbHandle`, and one SQLite image. The slot catalog
 must stay stable across upgrades.
 
 For compatibility-oriented layouts, use `MemoryId::new(120)` as the default
-SQLite slot anchor. A single-database canister can use `120` directly. A
-per-slot archive can treat `120` as the migrated/default slot, then allocate
-additional archive slots from an adjacent application-owned range.
+SQLite destination slot anchor. A new single-database canister can use `120`
+directly. Do not point `Db::init` at an existing `ic-rusqlite` `120` image; use
+old-canister export and fresh v8 import. A per-slot archive can treat `120` as
+the imported/default slot, then allocate additional archive slots from an
+adjacent application-owned range.
 
 ## Project Positioning
 
@@ -100,7 +110,7 @@ additional archive slots from an adjacent application-owned range.
 | `froghub-io/rusqlite` / `rusqlite-ic` | Rust `rusqlite` wrapper fork | Not the VFS/storage layer by itself | Lets `rusqlite` compile in IC-oriented Wasm builds |
 | `froghub-io/ic-sqlite` | SDK using `rusqlite-ic` + VFS | Simple stable-memory-backed SQLite file | Early IC SQLite SDK |
 | `wasm-forge/ic-rusqlite` | Convenience SDK | WASI/stable-fs via `wasi2ic` | Easy migration path and familiar `rusqlite` API |
-| `humandebri/ic-sqlite-vfs` | SQLite VFS + DB facade | Direct SQLite page map inside a chosen `VirtualMemory` | Lower overhead, no WASI, IC-native transaction model |
+| `humandebri/ic-sqlite-vfs` | SQLite VFS + DB facade | Direct SQLite image inside a chosen `VirtualMemory` | Lower overhead, no WASI, IC-native transaction model |
 
 ## Design
 
@@ -117,13 +127,13 @@ Stable memory layout:
 ```text
 selected virtual memory:
   offset 0..64KiB      superblock
-  offset 64KiB..       immutable SQLite pages, segment tables, and root tables
+  offset 64KiB..       in-place SQLite image bytes
 ```
 
 The superblock stores magic, schema version, logical DB size, transaction id,
-active root table offset, active segment count, last verified checksum, import
-state, and flags. The SQLite database header is logical page 0; the VFS resolves
-logical pages through a root table and fixed 256-page segment tables.
+last verified checksum, import state, and flags. The SQLite database header is
+logical page 0; logical page `n` lives at
+`db_base_offset + n * SQLITE_PAGE_SIZE`.
 
 `checksum` is verification metadata. Normal update commits do not scan the full
 DB image. They advance `last_tx_id` and set `checksum_stale`. A controller can
@@ -159,8 +169,8 @@ PRAGMA temp_store = MEMORY;
 
 Durability is based on IC message atomicity and a heap write overlay, not
 `fsync`. During an update call, VFS writes stay in heap memory until SQLite
-`COMMIT` succeeds. Dirty logical pages and a new page table are appended to
-stable memory, then made active by the final superblock update.
+`COMMIT` succeeds. Dirty logical pages are written to their fixed stable-memory
+offsets, then made active by the final superblock update.
 
 Rules:
 
@@ -170,7 +180,7 @@ Rules:
 - WAL is disabled
 - journal and temp data stay in heap memory
 - only the DB image is stored in stable memory
-- failed update calls return `Err` without changing the active page table
+- failed update calls return `Err` without changing the active image
 
 Query complexity is the consuming canister's responsibility. This crate does
 not inspect arbitrary SQL for index use or planner cost. Public APIs should
@@ -226,7 +236,7 @@ only for this repository's reference canister.
 
 ```toml
 [dependencies]
-ic-sqlite-vfs = { version = "1.0.1", default-features = false, features = ["sqlite-precompiled"] }
+ic-sqlite-vfs = { version = "2.0.0", default-features = false, features = ["sqlite-precompiled"] }
 ```
 
 `sqlite-precompiled` links the vendored `wasm32-unknown-unknown` SQLite archive
@@ -560,11 +570,11 @@ Native performance probe, measured locally on 2026-05-19 with
 
 For 20,000 rows in the same native probe:
 
-| Workload | elapsed | xRead calls | stable data reads | root hit/miss | segment hit/miss | superblock loads |
-|---|---:|---:|---:|---:|---:|---:|
-| indexed point reads | 25 ms | 81 | 80 | 78 / 1 | 78 / 1 | 0 |
-| `LIKE '%stable%'` scan | 2 ms | 0 | 0 | 0 / 0 | 0 / 0 | 0 |
-| full logical export | 0 ms | 0 | 80 | 80 / 0 | 80 / 0 | 0 |
+| Workload | elapsed | xRead calls | stable data reads | superblock loads |
+|---|---:|---:|---:|---:|
+| indexed point reads | 25 ms | 81 | 80 | 0 |
+| `LIKE '%stable%'` scan | 2 ms | 0 | 0 | 0 |
+| full logical export | 0 ms | 0 | 80 | 0 |
 
 The write workload numbers exclude a full DB checksum scan from the commit
 path. `db_refresh_checksum` and `db_refresh_checksum_chunk` are separate
@@ -600,8 +610,8 @@ Current coverage:
 - chunked export/import with checksum verification
 - failed import preserving the existing database
 - capacity and sparse write bounds
-- failpoints for overlay write, truncate, commit capacity, page write, page table write, and superblock publish
-- segmented page-map commit and truncate behavior
+- failpoints for overlay write, truncate, commit capacity, page write, and superblock publish
+- in-place commit, truncate, and sparse-extend behavior
 - stable write trap, grow failure, SQLite step error, and panic during update
 - fuzz-style deterministic operation sequences
 - property-based and libFuzzer state-machine operation sequences
@@ -617,7 +627,7 @@ recovery, capacity handling, and integrity checks.
 See [docs/RELEASE.md](docs/RELEASE.md) for release gates and publish-time
 version/tag checks.
 
-See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `1.0` compatibility
+See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `2.0` compatibility
 contract.
 
 See [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) for consumer build setup.
@@ -628,7 +638,7 @@ See [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) for consumer build setup.
 - mmap and SQLite shared-memory methods are not implemented.
 - `VACUUM` should be treated as admin maintenance, not a normal API path.
 - Transactions must not cross `await` boundaries.
-- `canister-api` is a reference canister API, not the stable `1.x` Candid
+- `canister-api` is a reference canister API, not the stable `2.x` Candid
   contract.
 
 ## License

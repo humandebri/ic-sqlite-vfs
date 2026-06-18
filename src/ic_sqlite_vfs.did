@@ -14,6 +14,7 @@ type DbMeta = record {
   layout_version : nat64;
   page_count : nat64;
   page_table_bytes : nat64;
+  zero_extent_count : nat64;
   active_bytes : nat64;
   allocated_bytes : nat64;
   orphan_bytes_estimate : nat64;

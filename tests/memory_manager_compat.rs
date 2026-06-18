@@ -1,6 +1,7 @@
 use ic_sqlite_vfs::config::STABLE_PAGE_SIZE;
-use ic_sqlite_vfs::stable::memory_manager::{MemoryId, MemoryManager};
-use ic_sqlite_vfs::stable::raw_memory::{DefaultMemoryImpl, Memory};
+use ic_sqlite_vfs::test_support::Memory;
+use ic_sqlite_vfs::DefaultMemoryImpl;
+use ic_sqlite_vfs::{MemoryId, MemoryManager};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 use std::cell::{Cell, RefCell};

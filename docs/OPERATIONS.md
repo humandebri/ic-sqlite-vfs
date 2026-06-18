@@ -16,9 +16,9 @@ CI rejects `.await` and `async fn` under `src` through
 
 SQLite `xWrite` and `xTruncate` calls inside a transaction do not write
 directly to stable memory. They accumulate page-sized changes in a heap overlay.
-After SQLite `COMMIT` succeeds, the crate appends dirty pages and a new page
-table, then updates the superblock active page table offset. Normal `Err`
-returns, SQL rollback, and panic do not change the active page table.
+After SQLite `COMMIT` succeeds, the crate writes dirty logical pages to their
+fixed stable-memory offsets, then updates the superblock. Normal `Err` returns,
+SQL rollback, and panic do not change the active image.
 
 ## Query Policy
 
@@ -59,11 +59,13 @@ one `DbHandle`, and one SQLite image. The consuming canister reserves
 `MemoryId` values in the `0..=254` range. `255` is the internal
 unallocated-bucket marker and must not be used.
 
-`MemoryId::new(120)` is the default slot anchor that matches the
-`ic-rusqlite` default mounted DB. A single-DB canister can use `120` directly.
-A per-slot archive can put the migrated/default slot at `120`, or reserve `120`
-for the index/default DB and allocate adjacent application-owned IDs for
-archive slots.
+`MemoryId::new(120)` is the default fresh destination slot anchor matching the
+`ic-rusqlite` default mounted DB. Do not call `Db::init` on an existing
+`ic-rusqlite` `120` image; export the logical SQLite image from the old
+canister and import it into a fresh v8 image. A new single-DB canister can use
+`120` directly. A per-slot archive can put the imported/default slot at `120`,
+or reserve `120` for the index/default DB and allocate adjacent
+application-owned IDs for archive slots.
 
 The slot catalog belongs to the consuming canister. Store
 `archive_id -> slot_id -> MemoryId` in stable state, then rebuild the same
@@ -115,7 +117,7 @@ Import restores the raw SQLite image, not application schema intent. If the
 target canister expects newer migrations than the imported image has, run the
 application migration path after import before exposing new-schema methods. The
 reference compatibility test verifies this by importing `0.2.2` and `1.0.0`
-images, then running the current `post_upgrade` migration path.
+logical SQLite images, then running the current `post_upgrade` migration path.
 
 Reference controller guard:
 
@@ -155,11 +157,11 @@ If growing the selected `VirtualMemory` fails, the error includes
 `current_pages` and `required_pages`. The caller should not retry blindly; check
 capacity limits, remaining cycles, and chunk size.
 
-Normal commits publish safely by appending dirty pages, dirty segment tables,
-and a new root table before updating the superblock. Capacity growth for small
-updates is roughly proportional to the number of dirty pages and dirty
-segments. When `db_meta.compact_recommended == true`, a controller can run
-`db_compact`.
+Normal commits publish safely by writing dirty pages in place before updating
+the superblock. Truncate and sparse re-extend paths zero-fill the logical gap
+with page writes and v8 zero-mask metadata, so stale physical bytes never become
+logical SQLite data. `db_compact` remains available but is a no-op for the v8
+layout, and `db_meta.compact_recommended` stays `false`.
 
 ## Integrity
 
@@ -171,7 +173,7 @@ Admin monitoring should check these values periodically:
   progress
 - `db_meta.checksum_refreshing == false`
 - `db_meta.orphan_ratio_basis_points`
-- `db_meta.compact_recommended`
+- `db_meta.compact_recommended == false`
 
 `db_meta.checksum` is the last verified checksum. `checksum_stale == true` can
 be normal after updates. When a fresh verified checksum is required, a

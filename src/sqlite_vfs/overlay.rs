@@ -2,7 +2,7 @@
 //!
 //! SQLite may write dirty pages before it knows whether a transaction will
 //! commit. The overlay keeps full logical pages in heap memory so failed
-//! transactions can discard them without publishing a new page table.
+//! transactions can discard them without publishing a new stable image.
 
 use crate::config::SQLITE_PAGE_SIZE;
 use crate::sqlite_vfs::stable_blob;

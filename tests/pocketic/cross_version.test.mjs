@@ -14,8 +14,8 @@ const smallChunkSize = chunkSize - 17n;
 
 const result = (ok) => IDL.Variant({ Ok: ok, Err: IDL.Text });
 
-const dbMetaRecord = (IDL) =>
-  IDL.Record({
+const dbMetaRecord = (IDL, { zeroExtentCount = true } = {}) => {
+  const fields = {
     db_size: IDL.Nat64,
     stable_pages: IDL.Nat64,
     stable_bytes: IDL.Nat64,
@@ -36,7 +36,12 @@ const dbMetaRecord = (IDL) =>
     orphan_bytes_estimate: IDL.Nat64,
     orphan_ratio_basis_points: IDL.Nat64,
     compact_recommended: IDL.Bool,
-  });
+  };
+  if (zeroExtentCount) {
+    fields.zero_extent_count = IDL.Nat64;
+  }
+  return IDL.Record(fields);
+};
 
 const checksumRefreshRecord = (IDL) =>
   IDL.Record({
@@ -47,7 +52,7 @@ const checksumRefreshRecord = (IDL) =>
   });
 
 const compat022IdlFactory = ({ IDL }) => {
-  const DbMeta = dbMetaRecord(IDL);
+  const DbMeta = dbMetaRecord(IDL, { zeroExtentCount: false });
   return IDL.Service({
     kv_put: IDL.Func([IDL.Text, IDL.Text], [result(IDL.Null)], []),
     kv_get: IDL.Func([IDL.Text], [result(IDL.Opt(IDL.Text))], ["query"]),
@@ -60,7 +65,7 @@ const compat022IdlFactory = ({ IDL }) => {
 };
 
 const compat100IdlFactory = ({ IDL }) => {
-  const DbMeta = dbMetaRecord(IDL);
+  const DbMeta = dbMetaRecord(IDL, { zeroExtentCount: false });
   const ChecksumRefresh = checksumRefreshRecord(IDL);
   return IDL.Service({
     kv_put: IDL.Func([IDL.Text, IDL.Text], [result(IDL.Null)], []),
@@ -78,7 +83,7 @@ const compat100IdlFactory = ({ IDL }) => {
   });
 };
 
-test("PocketIC 0.2.2 image upgrades and imports into current canister", { timeout }, async () => {
+test("PocketIC 0.2.2 image imports into current canister", { timeout }, async () => {
   const name = "crossVersion022";
   const server = await startPocketIcServer({ timeoutMs: 60_000 });
   let pic;
@@ -113,19 +118,8 @@ test("PocketIC 0.2.2 image upgrades and imports into current canister", { timeou
     assert(oldMeta.db_size > chunkSize, "old image did not cross the 64KiB chunk boundary");
     const exported = await exportImage(oldActor, oldMeta.db_size, smallChunkSize);
 
-    step(name, "upgrade old image to current canister");
-    await pic.upgradeCanister({ canisterId, wasm: currentWasm });
-    const upgraded = pic.createActor(idlFactory, canisterId);
-    assert.deepEqual(await upgraded.kv_get("alpha"), { Ok: ["from-0.2.2"] });
-    assert.deepEqual(await upgraded.kv_get("beta"), { Ok: ["second"] });
-    assert.deepEqual(await upgraded.kv_get("bulk-019"), {
-      Ok: [`bulk-019:${"x".repeat(4096)}`],
-    });
-    assert.deepEqual(await upgraded.db_integrity_check(), { Ok: "ok" });
-    const upgradedMeta = await expectOk("upgraded meta", upgraded.db_meta());
-    assert.equal(upgradedMeta.schema_version, 2n);
-    assert.deepEqual(await upgraded.kv_set_note("alpha", "migrated"), { Ok: null });
-    assert.deepEqual(await upgraded.kv_get_note("alpha"), { Ok: ["migrated"] });
+    step(name, "reject direct old-layout upgrade");
+    await assert.rejects(() => pic.upgradeCanister({ canisterId, wasm: currentWasm }));
 
     step(name, "import old image into current canister");
     const { actor: destination, canisterId: destinationId } = await pic.setupCanister({
@@ -225,7 +219,7 @@ test("PocketIC 0.2.2 image upgrades and imports into current canister", { timeou
   }
 });
 
-test("PocketIC 1.0.0 image upgrades and imports into current canister", { timeout }, async () => {
+test("PocketIC 1.0.0 image imports into current canister", { timeout }, async () => {
   const name = "crossVersion100";
   const server = await startPocketIcServer({ timeoutMs: 60_000 });
   let pic;
@@ -268,17 +262,8 @@ test("PocketIC 1.0.0 image upgrades and imports into current canister", { timeou
     assert(oldMeta.db_size > chunkSize, "1.0.0 image did not cross the 64KiB chunk boundary");
     const exported = await exportImage(oldActor, oldMeta.db_size, smallChunkSize);
 
-    step(name, "upgrade 1.0.0 image to current canister");
-    await pic.upgradeCanister({ canisterId, wasm: currentWasm });
-    const upgraded = pic.createActor(idlFactory, canisterId);
-    assert.deepEqual(await upgraded.kv_get("alpha"), { Ok: ["from-1.0.0"] });
-    assert.deepEqual(await upgraded.kv_get_note("alpha"), { Ok: ["released"] });
-    assert.deepEqual(await upgraded.kv_get_many(["alpha", "bulk-019", "missing"]), {
-      Ok: [["from-1.0.0"], [`bulk-019:${"y".repeat(4096)}`], []],
-    });
-    assert.deepEqual(await upgraded.db_integrity_check(), { Ok: "ok" });
-    const upgradedMeta = await expectOk("upgraded 1.0.0 meta", upgraded.db_meta());
-    assert.equal(upgradedMeta.schema_version, 2n);
+    step(name, "reject direct 1.0.0 layout upgrade");
+    await assert.rejects(() => pic.upgradeCanister({ canisterId, wasm: currentWasm }));
 
     step(name, "import 1.0.0 image into current canister");
     const { actor: destination, canisterId: destinationId } = await pic.setupCanister({

@@ -1,7 +1,7 @@
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
-use ic_sqlite_vfs::stable::memory;
-use ic_sqlite_vfs::stable::meta::Superblock;
+use ic_sqlite_vfs::test_support::lock;
+use ic_sqlite_vfs::test_support::memory;
+use ic_sqlite_vfs::test_support::Superblock;
 use ic_sqlite_vfs::{params, Db};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
@@ -9,7 +9,6 @@ use serial_test::serial;
 use std::collections::BTreeMap;
 
 fn reset() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     Db::init(memory::memory_for_tests()).unwrap();

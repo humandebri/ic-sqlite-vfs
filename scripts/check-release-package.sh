@@ -27,7 +27,7 @@ reject_pattern() {
   fi
 }
 
-require_path "docs/PUBLIC_API_1_0.snapshot"
+require_path "docs/PUBLIC_API_2_0.snapshot"
 require_path "LICENSE-APACHE"
 require_path "LICENSE-MIT"
 require_path "scripts/check-release-version.sh"

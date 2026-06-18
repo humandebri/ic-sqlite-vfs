@@ -175,7 +175,7 @@ impl Db {
 
 impl DbHandle {
     pub fn init(memory: DbMemory) -> Result<Self, DbError> {
-        let handle = Self::from_context(memory::init_context(memory));
+        let handle = Self::from_context(memory::init_context(memory)?);
         clear_read_connection(handle.context);
         clear_write_connection(handle.context);
         if let Err(error) = handle.initialize() {
@@ -195,7 +195,7 @@ impl DbHandle {
         self.with_context(|| {
             crate::sqlite_vfs::register();
             Superblock::load()?;
-            stable_blob::ensure_page_map_layout()?;
+            stable_blob::ensure_current_layout()?;
             Ok(())
         })
     }

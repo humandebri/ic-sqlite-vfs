@@ -39,10 +39,6 @@ const idlFactory = ({ IDL }) => {
     x_read_bytes: IDL.Nat64,
     stable_data_read_calls: IDL.Nat64,
     stable_data_read_bytes: IDL.Nat64,
-    page_table_root_hits: IDL.Nat64,
-    page_table_root_misses: IDL.Nat64,
-    page_table_segment_hits: IDL.Nat64,
-    page_table_segment_misses: IDL.Nat64,
     superblock_loads: IDL.Nat64,
   });
   const BenchGetManyProfileReport = IDL.Record({
@@ -63,10 +59,6 @@ const idlFactory = ({ IDL }) => {
     x_read_bytes: IDL.Nat64,
     stable_data_read_calls: IDL.Nat64,
     stable_data_read_bytes: IDL.Nat64,
-    page_table_root_hits: IDL.Nat64,
-    page_table_root_misses: IDL.Nat64,
-    page_table_segment_hits: IDL.Nat64,
-    page_table_segment_misses: IDL.Nat64,
     superblock_loads: IDL.Nat64,
   });
   const BenchWriteProfileReport = IDL.Record({
@@ -99,16 +91,10 @@ const idlFactory = ({ IDL }) => {
     stable_data_write_bytes: IDL.Nat64,
     stable_grow_calls: IDL.Nat64,
     stable_grow_pages: IDL.Nat64,
-    page_table_root_hits: IDL.Nat64,
-    page_table_root_misses: IDL.Nat64,
-    page_table_segment_hits: IDL.Nat64,
-    page_table_segment_misses: IDL.Nat64,
     superblock_loads: IDL.Nat64,
     commit_load: IDL.Nat64,
-    commit_build_segments: IDL.Nat64,
     commit_capacity: IDL.Nat64,
     commit_page_write: IDL.Nat64,
-    commit_table_write: IDL.Nat64,
     commit_superblock_store: IDL.Nat64,
   });
   const BenchGrowthProfileReport = IDL.Record({
@@ -141,16 +127,10 @@ const idlFactory = ({ IDL }) => {
     stable_data_write_bytes: IDL.Nat64,
     stable_grow_calls: IDL.Nat64,
     stable_grow_pages: IDL.Nat64,
-    page_table_root_hits: IDL.Nat64,
-    page_table_root_misses: IDL.Nat64,
-    page_table_segment_hits: IDL.Nat64,
-    page_table_segment_misses: IDL.Nat64,
     superblock_loads: IDL.Nat64,
     commit_load: IDL.Nat64,
-    commit_build_segments: IDL.Nat64,
     commit_capacity: IDL.Nat64,
     commit_page_write: IDL.Nat64,
-    commit_table_write: IDL.Nat64,
     commit_superblock_store: IDL.Nat64,
   });
   const DbStatsReport = IDL.Record({
@@ -497,10 +477,8 @@ function assertWriteProfile(write, profile) {
 
   const commitParts =
     profile.commit_load +
-    profile.commit_build_segments +
     profile.commit_capacity +
     profile.commit_page_write +
-    profile.commit_table_write +
     profile.commit_superblock_store;
   assert(commitParts > 0n, "bench_write_profile reported no commit work");
   assert(
@@ -538,10 +516,8 @@ function assertGrowthProfile(growth, profile) {
 
   const commitParts =
     profile.commit_load +
-    profile.commit_build_segments +
     profile.commit_capacity +
     profile.commit_page_write +
-    profile.commit_table_write +
     profile.commit_superblock_store;
   assert(commitParts > 0n, "bench_growth_profile reported no commit work");
   assert(
@@ -579,10 +555,6 @@ function formatReport(report) {
       `x_read_bytes=${report.x_read_bytes}`,
       `stable_data_read_calls=${report.stable_data_read_calls}`,
       `stable_data_read_bytes=${report.stable_data_read_bytes}`,
-      `page_table_root_hits=${report.page_table_root_hits}`,
-      `page_table_root_misses=${report.page_table_root_misses}`,
-      `page_table_segment_hits=${report.page_table_segment_hits}`,
-      `page_table_segment_misses=${report.page_table_segment_misses}`,
       `superblock_loads=${report.superblock_loads}`,
     );
   }
@@ -599,10 +571,6 @@ function formatReport(report) {
       `x_read_bytes=${report.x_read_bytes}`,
       `stable_data_read_calls=${report.stable_data_read_calls}`,
       `stable_data_read_bytes=${report.stable_data_read_bytes}`,
-      `page_table_root_hits=${report.page_table_root_hits}`,
-      `page_table_root_misses=${report.page_table_root_misses}`,
-      `page_table_segment_hits=${report.page_table_segment_hits}`,
-      `page_table_segment_misses=${report.page_table_segment_misses}`,
       `superblock_loads=${report.superblock_loads}`,
     );
   }
@@ -632,16 +600,10 @@ function formatReport(report) {
       `stable_data_write_bytes=${report.stable_data_write_bytes}`,
       `stable_grow_calls=${report.stable_grow_calls}`,
       `stable_grow_pages=${report.stable_grow_pages}`,
-      `page_table_root_hits=${report.page_table_root_hits}`,
-      `page_table_root_misses=${report.page_table_root_misses}`,
-      `page_table_segment_hits=${report.page_table_segment_hits}`,
-      `page_table_segment_misses=${report.page_table_segment_misses}`,
       `superblock_loads=${report.superblock_loads}`,
       `commit_load=${report.commit_load}`,
-      `commit_build_segments=${report.commit_build_segments}`,
       `commit_capacity=${report.commit_capacity}`,
       `commit_page_write=${report.commit_page_write}`,
-      `commit_table_write=${report.commit_table_write}`,
       `commit_superblock_store=${report.commit_superblock_store}`,
     );
   }

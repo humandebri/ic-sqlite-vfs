@@ -103,8 +103,8 @@ mod tests {
         memory::reset_for_tests();
         reset_for_tests();
         let manager = MemoryManager::init(DefaultMemoryImpl::default());
-        let first = memory::init_context(manager.get(MemoryId::new(32)));
-        let second = memory::init_context(manager.get(MemoryId::new(33)));
+        let first = memory::init_context(manager.get(MemoryId::new(32))).unwrap();
+        let second = memory::init_context(manager.get(MemoryId::new(33))).unwrap();
 
         memory::with_context(first, || {
             lock(ffi::SQLITE_LOCK_RESERVED);

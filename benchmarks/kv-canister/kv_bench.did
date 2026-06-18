@@ -25,10 +25,6 @@ type BenchReadProfileReport = record {
   x_read_bytes : nat64;
   stable_data_read_calls : nat64;
   stable_data_read_bytes : nat64;
-  page_table_root_hits : nat64;
-  page_table_root_misses : nat64;
-  page_table_segment_hits : nat64;
-  page_table_segment_misses : nat64;
   superblock_loads : nat64;
 };
 type BenchGetManyProfileReport = record {
@@ -49,10 +45,6 @@ type BenchGetManyProfileReport = record {
   x_read_bytes : nat64;
   stable_data_read_calls : nat64;
   stable_data_read_bytes : nat64;
-  page_table_root_hits : nat64;
-  page_table_root_misses : nat64;
-  page_table_segment_hits : nat64;
-  page_table_segment_misses : nat64;
   superblock_loads : nat64;
 };
 type BenchWriteProfileReport = record {
@@ -85,16 +77,10 @@ type BenchWriteProfileReport = record {
   stable_data_write_bytes : nat64;
   stable_grow_calls : nat64;
   stable_grow_pages : nat64;
-  page_table_root_hits : nat64;
-  page_table_root_misses : nat64;
-  page_table_segment_hits : nat64;
-  page_table_segment_misses : nat64;
   superblock_loads : nat64;
   commit_load : nat64;
-  commit_build_segments : nat64;
   commit_capacity : nat64;
   commit_page_write : nat64;
-  commit_table_write : nat64;
   commit_superblock_store : nat64;
 };
 type BenchGrowthProfileReport = record {
@@ -127,16 +113,10 @@ type BenchGrowthProfileReport = record {
   stable_data_write_bytes : nat64;
   stable_grow_calls : nat64;
   stable_grow_pages : nat64;
-  page_table_root_hits : nat64;
-  page_table_root_misses : nat64;
-  page_table_segment_hits : nat64;
-  page_table_segment_misses : nat64;
   superblock_loads : nat64;
   commit_load : nat64;
-  commit_build_segments : nat64;
   commit_capacity : nat64;
   commit_page_write : nat64;
-  commit_table_write : nat64;
   commit_superblock_store : nat64;
 };
 type DbStatsReport = record {

@@ -6,9 +6,6 @@ production code へ `verus!` macro は混入しない。
 対象:
 
 - page count
-- segment count
-- segment index
-- root table byte count
 - import offset overflow 境界
 - import chunk written_until 単調進行
 - MemoryManager bucket address / max managed pages
@@ -18,15 +15,13 @@ production code へ `verus!` macro は混入しない。
 - overflow-safe virtual segment containment
 - FNV-1a chunk folding equivalence
 - arbitrary chunk-list FNV folding equivalence
-- segmented page-map commit and truncate invariants
-- page table byte encoding round-trip
+- in-place commit offset and truncate invariants
 - import state-machine transitions
 - abstract Superblock fixed-field encode/decode round-trip
 - Superblock byte offset / field-width layout
 - Superblock little-endian byte round-trip
 - overlay page slicing arithmetic
-- content-preserving compact table transformation
-- compact failure keeps active image unchanged
+- no-op compact invariants
 
 対象外:
 
@@ -34,7 +29,6 @@ production code へ `verus!` macro は混入しない。
 - FFI
 - IC stable memory API
 - checksum 実装
-- thread-local read cache
 - `Rc<RefCell<_>>` runtime borrowing
 - `ic0.stable64_*` system API behavior
 - SQLite C core behavior
@@ -48,8 +42,7 @@ verus --crate-type=lib --out-dir target/verus proofs/verus/memory_manager_layout
 verus --crate-type=lib --out-dir target/verus proofs/verus/memory_manager_grow.rs
 verus --crate-type=lib --out-dir target/verus proofs/verus/memory_capacity.rs
 verus --crate-type=lib --out-dir target/verus proofs/verus/checksum_fnv.rs
-verus --crate-type=lib --out-dir target/verus proofs/verus/page_map_commit.rs
-verus --crate-type=lib --out-dir target/verus proofs/verus/page_table_byte_encoding.rs
+verus --crate-type=lib --out-dir target/verus proofs/verus/in_place_commit.rs
 verus --crate-type=lib --out-dir target/verus proofs/verus/import_state_machine.rs
 verus --crate-type=lib --out-dir target/verus proofs/verus/memory_manager_allocation.rs
 verus --crate-type=lib --out-dir target/verus proofs/verus/superblock_encoding.rs

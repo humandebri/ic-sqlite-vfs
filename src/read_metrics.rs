@@ -23,16 +23,10 @@ pub struct ReadMetrics {
     pub stable_data_write_bytes: u64,
     pub stable_grow_calls: u64,
     pub stable_grow_pages: u64,
-    pub page_table_root_hits: u64,
-    pub page_table_root_misses: u64,
-    pub page_table_segment_hits: u64,
-    pub page_table_segment_misses: u64,
     pub superblock_loads: u64,
     pub commit_load: u64,
-    pub commit_build_segments: u64,
     pub commit_capacity: u64,
     pub commit_page_write: u64,
-    pub commit_table_write: u64,
     pub commit_superblock_store: u64,
 }
 
@@ -53,16 +47,10 @@ static STABLE_DATA_WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
 static STABLE_DATA_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
 static STABLE_GROW_CALLS: AtomicU64 = AtomicU64::new(0);
 static STABLE_GROW_PAGES: AtomicU64 = AtomicU64::new(0);
-static PAGE_TABLE_ROOT_HITS: AtomicU64 = AtomicU64::new(0);
-static PAGE_TABLE_ROOT_MISSES: AtomicU64 = AtomicU64::new(0);
-static PAGE_TABLE_SEGMENT_HITS: AtomicU64 = AtomicU64::new(0);
-static PAGE_TABLE_SEGMENT_MISSES: AtomicU64 = AtomicU64::new(0);
 static SUPERBLOCK_LOADS: AtomicU64 = AtomicU64::new(0);
 static COMMIT_LOAD: AtomicU64 = AtomicU64::new(0);
-static COMMIT_BUILD_SEGMENTS: AtomicU64 = AtomicU64::new(0);
 static COMMIT_CAPACITY: AtomicU64 = AtomicU64::new(0);
 static COMMIT_PAGE_WRITE: AtomicU64 = AtomicU64::new(0);
-static COMMIT_TABLE_WRITE: AtomicU64 = AtomicU64::new(0);
 static COMMIT_SUPERBLOCK_STORE: AtomicU64 = AtomicU64::new(0);
 
 #[doc(hidden)]
@@ -100,16 +88,10 @@ pub fn read_metrics_snapshot() -> ReadMetrics {
         stable_data_write_bytes: STABLE_DATA_WRITE_BYTES.load(Ordering::Relaxed),
         stable_grow_calls: STABLE_GROW_CALLS.load(Ordering::Relaxed),
         stable_grow_pages: STABLE_GROW_PAGES.load(Ordering::Relaxed),
-        page_table_root_hits: PAGE_TABLE_ROOT_HITS.load(Ordering::Relaxed),
-        page_table_root_misses: PAGE_TABLE_ROOT_MISSES.load(Ordering::Relaxed),
-        page_table_segment_hits: PAGE_TABLE_SEGMENT_HITS.load(Ordering::Relaxed),
-        page_table_segment_misses: PAGE_TABLE_SEGMENT_MISSES.load(Ordering::Relaxed),
         superblock_loads: SUPERBLOCK_LOADS.load(Ordering::Relaxed),
         commit_load: COMMIT_LOAD.load(Ordering::Relaxed),
-        commit_build_segments: COMMIT_BUILD_SEGMENTS.load(Ordering::Relaxed),
         commit_capacity: COMMIT_CAPACITY.load(Ordering::Relaxed),
         commit_page_write: COMMIT_PAGE_WRITE.load(Ordering::Relaxed),
-        commit_table_write: COMMIT_TABLE_WRITE.load(Ordering::Relaxed),
         commit_superblock_store: COMMIT_SUPERBLOCK_STORE.load(Ordering::Relaxed),
     }
 }
@@ -190,38 +172,14 @@ pub(crate) fn record_stable_grow(pages: u64) {
 }
 
 #[inline(always)]
-pub(crate) fn record_page_table_root_hit() {
-    increment(&PAGE_TABLE_ROOT_HITS);
-}
-
-#[inline(always)]
-pub(crate) fn record_page_table_root_miss() {
-    increment(&PAGE_TABLE_ROOT_MISSES);
-}
-
-#[inline(always)]
-pub(crate) fn record_page_table_segment_hit() {
-    increment(&PAGE_TABLE_SEGMENT_HITS);
-}
-
-#[inline(always)]
-pub(crate) fn record_page_table_segment_miss() {
-    increment(&PAGE_TABLE_SEGMENT_MISSES);
-}
-
-#[inline(always)]
 pub(crate) fn record_superblock_load() {
     increment(&SUPERBLOCK_LOADS);
 }
 
 #[inline(always)]
+#[allow(dead_code)]
 pub(crate) fn record_commit_load(instructions: u64) {
     add(&COMMIT_LOAD, instructions);
-}
-
-#[inline(always)]
-pub(crate) fn record_commit_build_segments(instructions: u64) {
-    add(&COMMIT_BUILD_SEGMENTS, instructions);
 }
 
 #[inline(always)]
@@ -235,16 +193,11 @@ pub(crate) fn record_commit_page_write(instructions: u64) {
 }
 
 #[inline(always)]
-pub(crate) fn record_commit_table_write(instructions: u64) {
-    add(&COMMIT_TABLE_WRITE, instructions);
-}
-
-#[inline(always)]
 pub(crate) fn record_commit_superblock_store(instructions: u64) {
     add(&COMMIT_SUPERBLOCK_STORE, instructions);
 }
 
-fn counters() -> [&'static AtomicU64; 27] {
+fn counters() -> [&'static AtomicU64; 21] {
     [
         &X_READ_CALLS,
         &X_READ_BYTES,
@@ -262,16 +215,10 @@ fn counters() -> [&'static AtomicU64; 27] {
         &STABLE_DATA_WRITE_BYTES,
         &STABLE_GROW_CALLS,
         &STABLE_GROW_PAGES,
-        &PAGE_TABLE_ROOT_HITS,
-        &PAGE_TABLE_ROOT_MISSES,
-        &PAGE_TABLE_SEGMENT_HITS,
-        &PAGE_TABLE_SEGMENT_MISSES,
         &SUPERBLOCK_LOADS,
         &COMMIT_LOAD,
-        &COMMIT_BUILD_SEGMENTS,
         &COMMIT_CAPACITY,
         &COMMIT_PAGE_WRITE,
-        &COMMIT_TABLE_WRITE,
         &COMMIT_SUPERBLOCK_STORE,
     ]
 }

@@ -19,6 +19,7 @@ export const idlFactory = ({ IDL }) => {
     layout_version: IDL.Nat64,
     page_count: IDL.Nat64,
     page_table_bytes: IDL.Nat64,
+    zero_extent_count: IDL.Nat64,
     active_bytes: IDL.Nat64,
     allocated_bytes: IDL.Nat64,
     orphan_bytes_estimate: IDL.Nat64,

@@ -3,21 +3,31 @@
 //! The format is deliberately fixed-width little-endian data so upgrades can
 //! inspect and migrate it without deserializing a Rust-specific structure.
 
-use crate::config::{SQLITE_PAGE_SIZE, SUPERBLOCK_OFFSET, SUPERBLOCK_SIZE};
+use crate::config::{SQLITE_PAGE_SIZE, SUPERBLOCK_OFFSET};
 use crate::stable::memory::{self, ContextId, StableMemoryError};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 const MAGIC: [u8; 8] = *b"ICSQLITE";
-const VERSION: u32 = 6;
-const ENCODED_LEN: usize = 152;
-pub const PAGE_MAP_LAYOUT_VERSION: u64 = 6;
+const VERSION: u32 = 8;
+pub const MAX_ZERO_EXTENTS: usize = 1024;
+const ZERO_EXTENT_BYTES: usize = 16;
+const EXTENTS_OFFSET: usize = 160;
+const META_CHECKSUM_OFFSET: usize = 152;
+const ENCODED_LEN: usize = EXTENTS_OFFSET + MAX_ZERO_EXTENTS * ZERO_EXTENT_BYTES;
+pub const CURRENT_LAYOUT_VERSION: u64 = 8;
 pub const FLAG_IMPORTING: u64 = 1;
 pub const FLAG_CHECKSUM_STALE: u64 = 1 << 1;
 pub const FLAG_CHECKSUM_REFRESHING: u64 = 1 << 2;
 
 thread_local! {
     static SUPERBLOCK_CACHE: RefCell<BTreeMap<ContextId, Superblock>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ZeroExtent {
+    pub(crate) start_page: u64,
+    pub(crate) end_page: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +51,7 @@ pub struct Superblock {
     pub page_table_offset: u64,
     pub page_count: u64,
     pub layout_version: u64,
+    pub(crate) zero_extents: Vec<ZeroExtent>,
     pub meta_checksum: u64,
 }
 
@@ -65,7 +76,8 @@ impl Superblock {
             db_base_offset: crate::config::DB_REGION_OFFSET,
             page_table_offset: 0,
             page_count: 0,
-            layout_version: PAGE_MAP_LAYOUT_VERSION,
+            layout_version: CURRENT_LAYOUT_VERSION,
+            zero_extents: Vec::new(),
             meta_checksum: 0,
         };
         block.meta_checksum = block.compute_meta_checksum();
@@ -79,16 +91,26 @@ impl Superblock {
         }
         #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
         crate::read_metrics::record_superblock_load();
-        memory::ensure_capacity(SUPERBLOCK_OFFSET + SUPERBLOCK_SIZE)?;
-        let mut bytes = [0_u8; ENCODED_LEN];
-        memory::read_preallocated(SUPERBLOCK_OFFSET, &mut bytes)?;
-        let block = Self::decode(&bytes);
-        if block.magic != MAGIC {
+        if memory::size_pages() == 0 {
             let fresh = Self::fresh();
             fresh.store()?;
             return Ok(fresh);
         }
+        let mut bytes = [0_u8; ENCODED_LEN];
+        memory::read_preallocated(SUPERBLOCK_OFFSET, &mut bytes)?;
+        let block = Self::decode(&bytes);
+        if block.magic != MAGIC {
+            return Err(StableMemoryError::ForeignStableMemoryImage);
+        }
+        if block.layout_version != CURRENT_LAYOUT_VERSION {
+            return Err(StableMemoryError::UnsupportedLayoutVersion(
+                block.layout_version,
+            ));
+        }
         if !block.verify_checksum() {
+            return Err(StableMemoryError::MetaChecksumMismatch);
+        }
+        if !block.has_normalized_zero_extents() {
             return Err(StableMemoryError::MetaChecksumMismatch);
         }
         cache_superblock(&block);
@@ -103,7 +125,8 @@ impl Superblock {
         let mut block = self.clone();
         block.version = VERSION;
         block.meta_checksum = block.compute_meta_checksum();
-        memory::write(SUPERBLOCK_OFFSET, &block.encode())?;
+        let encoded = block.encode();
+        memory::write(SUPERBLOCK_OFFSET, &encoded[..block.encoded_len()])?;
         cache_superblock_owned(block);
         Ok(())
     }
@@ -112,16 +135,8 @@ impl Superblock {
         let mut block = self.clone();
         block.version = VERSION;
         block.meta_checksum = block.compute_meta_checksum();
-        memory::write_prechecked(SUPERBLOCK_OFFSET, &block.encode())?;
-        cache_superblock_owned(block);
-        Ok(())
-    }
-
-    fn store_preallocated_unmetered(&self) -> Result<(), StableMemoryError> {
-        let mut block = self.clone();
-        block.version = VERSION;
-        block.meta_checksum = block.compute_meta_checksum();
-        memory::write_prechecked_unmetered(SUPERBLOCK_OFFSET, &block.encode())?;
+        let encoded = block.encode();
+        memory::write_prechecked(SUPERBLOCK_OFFSET, &encoded[..block.encoded_len()])?;
         cache_superblock_owned(block);
         Ok(())
     }
@@ -140,72 +155,37 @@ impl Superblock {
         block.store_preallocated()
     }
 
-    pub fn commit_db_image(db_base_offset: u64, db_size: u64) -> Result<(), StableMemoryError> {
+    pub(crate) fn commit_db_image(
+        db_base_offset: u64,
+        db_size: u64,
+        zero_extents: Vec<ZeroExtent>,
+    ) -> Result<(), StableMemoryError> {
         let mut block = Self::load()?;
         block.db_base_offset = db_base_offset;
         block.db_size = db_size;
+        block.page_table_offset = 0;
+        block.page_count = page_count_for_size(db_size);
+        block.layout_version = CURRENT_LAYOUT_VERSION;
+        block.zero_extents = zero_extents;
         block.last_tx_id = block.last_tx_id.saturating_add(1);
         block.flags |= FLAG_CHECKSUM_STALE;
         block.clear_checksum_refresh();
         block.store_preallocated()
     }
 
-    pub fn commit_page_map(
-        page_table_offset: u64,
-        page_count: u64,
+    pub(crate) fn store_db_image_without_tx(
+        db_base_offset: u64,
         db_size: u64,
+        zero_extents: Vec<ZeroExtent>,
     ) -> Result<(), StableMemoryError> {
         let mut block = Self::load()?;
-        block.page_table_offset = page_table_offset;
-        block.page_count = page_count;
+        block.db_base_offset = db_base_offset;
         block.db_size = db_size;
-        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
-        block.last_tx_id = block.last_tx_id.saturating_add(1);
-        block.flags |= FLAG_CHECKSUM_STALE;
-        block.clear_checksum_refresh();
+        block.page_table_offset = 0;
+        block.page_count = page_count_for_size(db_size);
+        block.layout_version = CURRENT_LAYOUT_VERSION;
+        block.zero_extents = zero_extents;
         block.store_preallocated()
-    }
-
-    pub fn commit_page_map_unmetered(
-        page_table_offset: u64,
-        page_count: u64,
-        db_size: u64,
-    ) -> Result<(), StableMemoryError> {
-        let mut block = Self::load()?;
-        block.page_table_offset = page_table_offset;
-        block.page_count = page_count;
-        block.db_size = db_size;
-        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
-        block.last_tx_id = block.last_tx_id.saturating_add(1);
-        block.flags |= FLAG_CHECKSUM_STALE;
-        block.clear_checksum_refresh();
-        block.store_preallocated_unmetered()
-    }
-
-    pub fn store_page_map_without_tx(
-        page_table_offset: u64,
-        page_count: u64,
-        db_size: u64,
-    ) -> Result<(), StableMemoryError> {
-        let mut block = Self::load()?;
-        block.page_table_offset = page_table_offset;
-        block.page_count = page_count;
-        block.db_size = db_size;
-        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
-        block.store_preallocated()
-    }
-
-    pub fn store_page_map_without_tx_unmetered(
-        page_table_offset: u64,
-        page_count: u64,
-        db_size: u64,
-    ) -> Result<(), StableMemoryError> {
-        let mut block = Self::load()?;
-        block.page_table_offset = page_table_offset;
-        block.page_count = page_count;
-        block.db_size = db_size;
-        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
-        block.store_preallocated_unmetered()
     }
 
     pub fn verify_checksum(&self) -> bool {
@@ -222,6 +202,18 @@ impl Superblock {
 
     pub fn is_checksum_refreshing(&self) -> bool {
         self.flags & FLAG_CHECKSUM_REFRESHING != 0
+    }
+
+    pub(crate) fn zero_extents(&self) -> &[ZeroExtent] {
+        &self.zero_extents
+    }
+
+    pub(crate) fn zero_extent_count(&self) -> usize {
+        self.zero_extents.len()
+    }
+
+    pub(crate) fn clear_zero_extents(&mut self) {
+        self.zero_extents.clear();
     }
 
     pub fn clear_checksum_refresh(&mut self) {
@@ -252,11 +244,35 @@ impl Superblock {
         out[120..128].copy_from_slice(&self.page_table_offset.to_le_bytes());
         out[128..136].copy_from_slice(&self.page_count.to_le_bytes());
         out[136..144].copy_from_slice(&self.layout_version.to_le_bytes());
-        out[144..152].copy_from_slice(&self.meta_checksum.to_le_bytes());
+        out[144..152].copy_from_slice(
+            &u64::try_from(self.zero_extents.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        out[152..160].copy_from_slice(&self.meta_checksum.to_le_bytes());
+        for (index, extent) in self.zero_extents.iter().take(MAX_ZERO_EXTENTS).enumerate() {
+            let offset = EXTENTS_OFFSET + index * ZERO_EXTENT_BYTES;
+            out[offset..offset + 8].copy_from_slice(&extent.start_page.to_le_bytes());
+            out[offset + 8..offset + 16].copy_from_slice(&extent.end_page.to_le_bytes());
+        }
         out
     }
 
     fn decode(bytes: &[u8; ENCODED_LEN]) -> Self {
+        let zero_extent_count = u64::from_le_bytes(eight(bytes, 144));
+        let mut zero_extents = Vec::new();
+        if let Ok(count) = usize::try_from(zero_extent_count) {
+            if count <= MAX_ZERO_EXTENTS {
+                zero_extents.reserve(count);
+                for index in 0..count {
+                    let offset = EXTENTS_OFFSET + index * ZERO_EXTENT_BYTES;
+                    zero_extents.push(ZeroExtent {
+                        start_page: u64::from_le_bytes(eight(bytes, offset)),
+                        end_page: u64::from_le_bytes(eight(bytes, offset + 8)),
+                    });
+                }
+            }
+        }
         Self {
             magic: eight(bytes, 0),
             version: u32::from_le_bytes(four(bytes, 8)),
@@ -277,14 +293,37 @@ impl Superblock {
             page_table_offset: u64::from_le_bytes(eight(bytes, 120)),
             page_count: u64::from_le_bytes(eight(bytes, 128)),
             layout_version: u64::from_le_bytes(eight(bytes, 136)),
-            meta_checksum: u64::from_le_bytes(eight(bytes, 144)),
+            zero_extents,
+            meta_checksum: u64::from_le_bytes(eight(bytes, META_CHECKSUM_OFFSET)),
         }
     }
 
     fn compute_meta_checksum(&self) -> u64 {
         let mut copy = self.clone();
         copy.meta_checksum = 0;
-        fnv1a64(&copy.encode())
+        let encoded = copy.encode();
+        fnv1a64(&encoded[..copy.encoded_len()])
+    }
+
+    fn has_normalized_zero_extents(&self) -> bool {
+        if self.zero_extents.len() > MAX_ZERO_EXTENTS {
+            return false;
+        }
+        let mut previous_end = None;
+        for extent in &self.zero_extents {
+            if extent.start_page >= extent.end_page {
+                return false;
+            }
+            if previous_end.is_some_and(|end| extent.start_page <= end) {
+                return false;
+            }
+            previous_end = Some(extent.end_page);
+        }
+        true
+    }
+
+    fn encoded_len(&self) -> usize {
+        EXTENTS_OFFSET + self.zero_extents.len().min(MAX_ZERO_EXTENTS) * ZERO_EXTENT_BYTES
     }
 }
 
@@ -326,6 +365,10 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+fn page_count_for_size(size: u64) -> u64 {
+    size.div_ceil(u64::from(SQLITE_PAGE_SIZE))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,7 +392,17 @@ mod tests {
         block.db_base_offset = 0xb1b2_b3b4_b5b6_b7b8;
         block.page_table_offset = 0xc1c2_c3c4_c5c6_c7c8;
         block.page_count = 0xd1d2_d3d4_d5d6_d7d8;
-        block.layout_version = PAGE_MAP_LAYOUT_VERSION;
+        block.layout_version = CURRENT_LAYOUT_VERSION;
+        block.zero_extents = vec![
+            ZeroExtent {
+                start_page: 2,
+                end_page: 5,
+            },
+            ZeroExtent {
+                start_page: 9,
+                end_page: 11,
+            },
+        ];
         block.meta_checksum = block.compute_meta_checksum();
         block
     }
@@ -365,7 +418,12 @@ mod tests {
         assert_eq!(&encoded[16..24], &block.db_size.to_le_bytes());
         assert_eq!(&encoded[80..88], &block.import_base_offset.to_le_bytes());
         assert_eq!(&encoded[120..128], &block.page_table_offset.to_le_bytes());
-        assert_eq!(&encoded[144..152], &block.meta_checksum.to_le_bytes());
+        assert_eq!(&encoded[144..152], &2_u64.to_le_bytes());
+        assert_eq!(&encoded[152..160], &block.meta_checksum.to_le_bytes());
+        assert_eq!(&encoded[160..168], &2_u64.to_le_bytes());
+        assert_eq!(&encoded[168..176], &5_u64.to_le_bytes());
+        assert_eq!(&encoded[176..184], &9_u64.to_le_bytes());
+        assert_eq!(&encoded[184..192], &11_u64.to_le_bytes());
         assert_eq!(Superblock::decode(&encoded), block);
     }
 
@@ -373,7 +431,7 @@ mod tests {
     fn superblock_meta_digest_zeroes_only_meta_field() {
         let block = sample_block();
         let mut checksum_input = block.encode();
-        checksum_input[144..152].copy_from_slice(&0_u64.to_le_bytes());
+        checksum_input[152..160].copy_from_slice(&0_u64.to_le_bytes());
 
         let mut changed_checksum = block.clone();
         changed_checksum.meta_checksum ^= u64::MAX;
@@ -381,7 +439,14 @@ mod tests {
         let mut changed_field = block.clone();
         changed_field.last_tx_id = changed_field.last_tx_id.wrapping_add(1);
 
-        assert_eq!(block.compute_meta_checksum(), fnv1a64(&checksum_input));
+        let mut changed_extent = block.clone();
+        changed_extent.zero_extents[0].end_page += 1;
+        changed_extent.meta_checksum = changed_extent.compute_meta_checksum();
+
+        assert_eq!(
+            block.compute_meta_checksum(),
+            fnv1a64(&checksum_input[..block.encoded_len()])
+        );
         assert_eq!(
             changed_checksum.compute_meta_checksum(),
             block.compute_meta_checksum()
@@ -390,6 +455,7 @@ mod tests {
             changed_field.compute_meta_checksum(),
             block.compute_meta_checksum()
         );
+        assert_ne!(changed_extent.meta_checksum, block.compute_meta_checksum());
     }
 
     #[test]
@@ -419,8 +485,11 @@ mod tests {
                 );
 
                 let mut checksum_input = encoded;
-                checksum_input[144..152].copy_from_slice(&0_u64.to_le_bytes());
-                prop_assert_eq!(block.compute_meta_checksum(), fnv1a64(&checksum_input));
+                checksum_input[152..160].copy_from_slice(&0_u64.to_le_bytes());
+                prop_assert_eq!(
+                    block.compute_meta_checksum(),
+                    fnv1a64(&checksum_input[..block.encoded_len()])
+                );
                 Ok(())
             })
             .unwrap();
@@ -447,7 +516,8 @@ mod tests {
             (120, block.page_table_offset),
             (128, block.page_count),
             (136, block.layout_version),
-            (144, block.meta_checksum),
+            (144, block.zero_extents.len() as u64),
+            (152, block.meta_checksum),
         ];
 
         for (offset, expected) in fields {

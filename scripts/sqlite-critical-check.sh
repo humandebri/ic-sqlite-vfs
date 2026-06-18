@@ -113,8 +113,7 @@ run_verus_proofs() {
       proofs/verus/memory_manager_grow.rs \
       proofs/verus/memory_capacity.rs \
       proofs/verus/checksum_fnv.rs \
-      proofs/verus/page_map_commit.rs \
-      proofs/verus/page_table_byte_encoding.rs \
+      proofs/verus/in_place_commit.rs \
       proofs/verus/import_state_machine.rs \
       proofs/verus/memory_manager_allocation.rs \
       proofs/verus/superblock_encoding.rs \

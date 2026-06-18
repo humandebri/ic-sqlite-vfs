@@ -30,10 +30,26 @@ GitHub Release artifact は `sqlite-precompiled,canister-api` の release profil
 `scripts/sqlite-critical-check.sh` は基礎検査と PocketIC regression に限定し、
 compat、perf、package contents は workflow と release gate で明示実行する。
 
-`cargo package --list` では `docs/PUBLIC_API_1_0.snapshot` と release
+`cargo package --list` では `docs/PUBLIC_API_2_0.snapshot` と release
 check scripts を含め、`target/`、`node_modules/`、`package-lock.json` を
 含めない。PocketIC fixture は nested Cargo package なので crates.io
 tarballではなく git tag checkout 側のrelease gateで検証する。
+
+## 2.0.0 Notes
+
+2.0.0 は breaking stable-layout release。v8 は SQLite image を
+`db_base_offset` 以降に in-place 保存する。v6 segmented page-map stable
+layout の直接 upgrade success は要求しない。旧 canister で logical SQLite
+image を export し、fresh v8 canister へ import する経路を release gate で
+検証する。
+
+公開Rust APIでは `PAGE_MAP_LAYOUT_VERSION` を削除し、
+`CURRENT_LAYOUT_VERSION` に改名する。v8 では page-table read cache がないため
+`stable_blob::invalidate_read_cache()` も削除する。`compact()` は public API として
+維持するが、v8 では no-op。
+`read_metrics`、`sqlite_vfs`、`stable` は public compatibility surface から外す。
+既存 `ic-rusqlite` raw SQLite image を直接 `Db::init` する経路は拒否し、
+旧 canister export から fresh v8 import だけを正式移行経路にする。
 
 ## Toolchain
 
@@ -57,15 +73,15 @@ toolchain、同じマシン種別、同じ PocketIC version で3回以上実行�
 
 ## Compatibility Fixtures
 
-`npm run test:pocketic:compat` は `0.2.2 -> current` と `1.0.0 -> current`
-の upgrade/export/import/migration を検証する。`0.2.2` fixture は pre-`1.0`
-baseline、`1.0.0` fixture は published `1.x` baseline として維持する。
+`npm run test:pocketic:compat` は `0.2.2` と `1.0.0` の旧 canister から
+logical SQLite image を export し、current fresh canister へ import できることを
+検証する。2.0 では旧 stable layout の直接 upgrade success は要求しない。
 
 tag は `Cargo.toml` の version と一致させる。例: `version = "0.2.0"` なら tag は `v0.2.0`。
 crates.io publish は GitHub Actions では行わない。tag push と GitHub
 Release 成功確認より先に `cargo publish` を実行しない。
 
-`1.0.1` release は以下の順序で行う。
+release は以下の順序で行う。
 
 ```sh
 VERSION="$(cargo metadata --no-deps --format-version 1 | node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => { const metadata = JSON.parse(input); process.stdout.write(metadata.packages.find(pkg => pkg.name === "ic-sqlite-vfs").version); });')"
@@ -85,7 +101,7 @@ cargo publish --no-verify
 ## Artifact
 
 tag `v*` を push すると GitHub Actions が wasm を build し、GitHub Release artifact としてアップロードする。
-`v1.0.1` 以降の artifact は `sqlite-precompiled,canister-api` の release
+`v2.0.0` 以降の artifact は `sqlite-precompiled,canister-api` の release
 profile build とする。
 `v1.0.0` は release guard の annotated tag commit 比較修正後、crates.io
 publish 前に修正 commit へ付け替えた。公開済み tag、GitHub Release、

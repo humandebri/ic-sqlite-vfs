@@ -7,7 +7,9 @@ through synchronous `Db::update` and `Db::query` closures.
 ## Initialization
 
 Choose one stable `MemoryId` for SQLite and keep it unchanged across upgrades.
-Do not reuse that `MemoryId` for another stable structure.
+Do not reuse that `MemoryId` for another stable structure. For migrations from
+`ic-rusqlite`, this is the fresh destination slot, not direct reuse of the old
+stable-memory image.
 
 ```rust
 use ic_sqlite_vfs::{Db, DefaultMemoryImpl, MemoryId, MemoryManager};
@@ -50,9 +52,11 @@ invalid.
 Index DBs, catalog DBs, metadata stores, and reserved ranges consume the same
 finite ID space.
 
-Use `MemoryId::new(120)` as the default slot anchor when preserving
-`ic-rusqlite` mounted DB conventions. For a migrated single DB, keep that image
-at `120`. For per-slot archives, either assign the migrated/default archive to
+Use `MemoryId::new(120)` as the default fresh destination slot anchor when
+preserving `ic-rusqlite` mounted DB conventions. Do not call `Db::init` on the
+old `ic-rusqlite` `120` image. The old canister must export the logical SQLite
+image, and the new v8 canister must import it into an empty selected virtual
+memory. For per-slot archives, either assign the imported/default archive to
 `120` or reserve `120` for the index/default DB, then allocate neighboring slot
 IDs from an application-owned range. Record the choice in the slot catalog; the
 crate does not reserve the range.
@@ -68,6 +72,23 @@ export each handle separately, and restore each image into the matching
 `MemoryId`. Do not pack several independent SQLite databases into one
 `VirtualMemory`, and do not depend on a forked `u16` `MemoryId` layout for this
 crate.
+
+## `ic-rusqlite` export/import boundary
+
+`ic-rusqlite` stores a raw SQLite file image. `ic-sqlite-vfs` v8 stores an
+`ICSQLITE` superblock at offset `0` and the SQLite image after `64KiB`.
+Direct stable-memory upgrade cannot reinterpret one layout as the other.
+
+Required path:
+
+1. Keep the old canister running with the old `ic-rusqlite` code.
+2. Export the logical SQLite bytes from the old code path.
+3. Deploy or install the new v8 code with an empty selected virtual memory.
+4. Call `Db::init` on that empty memory, then import the exported SQLite bytes.
+
+If the selected memory already contains `SQLite format 3\0` or any other
+non-`ICSQLITE` bytes, `Db::init` returns
+`StableMemoryError::ForeignStableMemoryImage` and preserves the existing bytes.
 
 ## Access Pattern
 

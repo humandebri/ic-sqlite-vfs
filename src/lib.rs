@@ -9,18 +9,24 @@ compile_error!("features `sqlite-bundled` and `sqlite-precompiled` cannot be ena
 
 #[cfg(feature = "canister-api")]
 pub mod api;
+#[cfg(feature = "bench-profile")]
+#[doc(hidden)]
+pub mod bench_support;
 pub mod config;
 pub mod db;
 #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
 #[doc(hidden)]
-pub mod read_metrics;
+mod read_metrics;
 #[doc(hidden)]
-pub mod sqlite_vfs;
+mod sqlite_vfs;
 #[doc(hidden)]
-pub mod stable;
+mod stable;
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub mod test_support;
 
 pub use db::{Db, DbError, DbHandle};
-pub use stable::memory::DbMemory;
+pub use stable::memory::{DbMemory, StableMemoryError};
 pub use stable::memory_manager::{MemoryId, MemoryManager, MemoryManagerInitError};
 pub use stable::raw_memory::DefaultMemoryImpl;
 

@@ -1,8 +1,8 @@
 use ic_sqlite_vfs::config::STABLE_PAGE_SIZE;
-use ic_sqlite_vfs::stable::memory_manager::{
-    MemoryId as LocalMemoryId, MemoryManager as LocalMemoryManager,
+use ic_sqlite_vfs::test_support::Memory as LocalMemory;
+use ic_sqlite_vfs::{
+    DefaultMemoryImpl, MemoryId as LocalMemoryId, MemoryManager as LocalMemoryManager,
 };
-use ic_sqlite_vfs::stable::raw_memory::{DefaultMemoryImpl, Memory as LocalMemory};
 use ic_stable_structures::memory_manager::{
     MemoryId as UpstreamMemoryId, MemoryManager as UpstreamMemoryManager,
 };

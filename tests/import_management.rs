@@ -1,12 +1,11 @@
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
-use ic_sqlite_vfs::stable::memory;
-use ic_sqlite_vfs::stable::meta::Superblock;
+use ic_sqlite_vfs::test_support::lock;
+use ic_sqlite_vfs::test_support::memory;
+use ic_sqlite_vfs::test_support::Superblock;
 use ic_sqlite_vfs::{params, Db};
 use serial_test::serial;
 
 fn reset() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     Db::init(memory::memory_for_tests()).unwrap();
@@ -27,7 +26,7 @@ fn import_management_is_rejected_inside_update_transaction() {
             "INSERT INTO import_guard(value) VALUES (?1)",
             params!["pending"],
         )?;
-        Db::begin_import(0, ic_sqlite_vfs::stable::meta::fnv1a64(&[]))?;
+        Db::begin_import(0, ic_sqlite_vfs::test_support::meta::fnv1a64(&[]))?;
         Ok(())
     });
 

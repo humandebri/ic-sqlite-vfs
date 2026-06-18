@@ -1,11 +1,10 @@
 use ic_sqlite_vfs::config::{SQLITE_CACHE_SIZE_KIB, SQLITE_PAGE_SIZE};
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::sqlite_vfs::{self, ffi, lock, stable_blob};
-use ic_sqlite_vfs::stable::memory;
-use ic_sqlite_vfs::stable::memory_manager::{MemoryId, MemoryManager};
-use ic_sqlite_vfs::stable::meta::Superblock;
-use ic_sqlite_vfs::stable::raw_memory::DefaultMemoryImpl;
+use ic_sqlite_vfs::test_support::memory;
+use ic_sqlite_vfs::test_support::{ffi, lock, vfs, Memory, Superblock};
+use ic_sqlite_vfs::DefaultMemoryImpl;
 use ic_sqlite_vfs::{params, Db, DbError, DbHandle};
+use ic_sqlite_vfs::{MemoryId, MemoryManager};
 use serial_test::serial;
 use std::ffi::{c_void, CStr, CString};
 use std::ptr;
@@ -23,7 +22,7 @@ impl Drop for RawConnection {
 }
 
 fn open_raw(filename: &str, flags: i32) -> Result<RawConnection, String> {
-    sqlite_vfs::register();
+    vfs::register();
     let filename = CString::new(filename).unwrap();
     let vfs = CString::new(ic_sqlite_vfs::config::VFS_NAME).unwrap();
     let mut db = ptr::null_mut();
@@ -95,7 +94,6 @@ fn query_count_raw(connection: &RawConnection, sql: &str) -> i64 {
 }
 
 fn reset() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     Db::init(memory::memory_for_tests()).unwrap();
@@ -104,7 +102,6 @@ fn reset() {
 #[test]
 #[serial]
 fn update_and_query_require_explicit_memory_initialization() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
 
@@ -147,9 +144,9 @@ fn failed_db_init_allows_retry_with_another_memory() {
     let error = Db::init(manager.get(MemoryId::new(20))).unwrap_err();
     assert!(matches!(
         error,
-        ic_sqlite_vfs::DbError::Stable(
-            ic_sqlite_vfs::stable::memory::StableMemoryError::UnsupportedLayoutVersion(0)
-        )
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::UnsupportedLayoutVersion(
+            0
+        ))
     ));
 
     Db::init(manager.get(MemoryId::new(21))).unwrap();
@@ -158,6 +155,137 @@ fn failed_db_init_allows_retry_with_another_memory() {
         sql: "CREATE TABLE recovered(k TEXT PRIMARY KEY NOT NULL);",
     }])
     .unwrap();
+}
+
+#[test]
+#[serial]
+fn db_init_rejects_v6_page_map_layout_without_auto_migration() {
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    memory::init(manager.get(MemoryId::new(22))).unwrap();
+    let mut block = Superblock::fresh();
+    block.layout_version = 6;
+    block.store().unwrap();
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let error = Db::init(manager.get(MemoryId::new(22))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::UnsupportedLayoutVersion(
+            6
+        ))
+    ));
+}
+
+#[test]
+#[serial]
+fn db_init_fresh_initializes_empty_virtual_memory() {
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    Db::init(manager.get(MemoryId::new(23))).unwrap();
+
+    let block = Superblock::load().unwrap();
+    assert_eq!(
+        block.layout_version,
+        ic_sqlite_vfs::test_support::meta::CURRENT_LAYOUT_VERSION
+    );
+}
+
+#[test]
+#[serial]
+fn db_init_rejects_sqlite_format_image_without_overwriting_bytes() {
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let db_memory = manager.get(MemoryId::new(24));
+    let header = b"SQLite format 3\0";
+    assert_eq!(db_memory.grow(1), 0);
+    db_memory.write(0, header);
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let error = Db::init(manager.get(MemoryId::new(24))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::ForeignStableMemoryImage)
+    ));
+
+    let mut preserved = [0_u8; 16];
+    db_memory.read(0, &mut preserved);
+    assert_eq!(&preserved, header);
+}
+
+#[test]
+#[serial]
+fn db_init_rejects_random_non_empty_memory_without_overwriting_bytes() {
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let db_memory = manager.get(MemoryId::new(25));
+    let header = *b"not-ic-sqlite!!!";
+    assert_eq!(db_memory.grow(1), 0);
+    db_memory.write(0, &header);
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let error = Db::init(manager.get(MemoryId::new(25))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::ForeignStableMemoryImage)
+    ));
+
+    let mut preserved = [0_u8; 16];
+    db_memory.read(0, &mut preserved);
+    assert_eq!(preserved, header);
+}
+
+#[test]
+#[serial]
+fn db_handle_rejects_duplicate_memory_identity() {
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let first = DbHandle::init(manager.get(MemoryId::new(36))).unwrap();
+
+    let error = DbHandle::init(manager.get(MemoryId::new(36))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::MemoryAlreadyRegistered)
+    ));
+    first.query(|_| Ok::<_, DbError>(())).unwrap();
+}
+
+#[test]
+#[serial]
+fn db_handle_rejects_duplicate_memory_id_across_managers_on_same_backing() {
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let backing = DefaultMemoryImpl::default();
+    let first_manager = MemoryManager::init(backing.clone());
+    let second_manager = MemoryManager::init(backing);
+    let first = DbHandle::init(first_manager.get(MemoryId::new(37))).unwrap();
+
+    let error = DbHandle::init(second_manager.get(MemoryId::new(37))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::MemoryAlreadyRegistered)
+    ));
+    first.query(|_| Ok::<_, DbError>(())).unwrap();
+}
+
+#[test]
+#[serial]
+fn db_handle_allows_same_memory_id_on_distinct_backing_memories() {
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let first_manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let second_manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let first = DbHandle::init(first_manager.get(MemoryId::new(38))).unwrap();
+    let second = DbHandle::init(second_manager.get(MemoryId::new(38))).unwrap();
+
+    first.query(|_| Ok::<_, DbError>(())).unwrap();
+    second.query(|_| Ok::<_, DbError>(())).unwrap();
 }
 
 #[test]
@@ -201,7 +329,6 @@ fn different_memory_ids_keep_database_images_separate() {
 #[test]
 #[serial]
 fn db_handles_keep_simultaneous_contexts_separate() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     let manager = MemoryManager::init(DefaultMemoryImpl::default());
@@ -252,7 +379,6 @@ fn db_handles_keep_simultaneous_contexts_separate() {
 #[test]
 #[serial]
 fn db_handle_export_import_roundtrip_is_scoped_to_handle() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     let manager = MemoryManager::init(DefaultMemoryImpl::default());
@@ -618,10 +744,7 @@ fn compact_preserves_logical_database_contents() {
     let page_count_before = Superblock::load().unwrap().page_count;
     Db::compact().unwrap();
     let block = Superblock::load().unwrap();
-    assert_ne!(
-        block.page_table_offset % ic_sqlite_vfs::config::STABLE_PAGE_SIZE,
-        0
-    );
+    assert_eq!(block.page_table_offset, 0);
     let checksum_after = Db::db_checksum().unwrap();
     let value = Db::query(|connection| {
         connection.query_scalar::<String>("SELECT v FROM compacted WHERE k = 'key-0042'", params![])
@@ -641,7 +764,7 @@ fn compact_preserves_logical_database_contents() {
 
 #[test]
 #[serial]
-fn read_table_cache_is_invalidated_after_publish_paths() {
+fn cached_read_connection_observes_publish_paths() {
     reset();
     Db::migrate(&[Migration {
         version: 1,
@@ -921,10 +1044,7 @@ fn import_replaces_cached_read_connection() {
     Db::import_chunk(0, &old_image).unwrap();
     Db::finish_import().unwrap();
     let block = Superblock::load().unwrap();
-    assert_ne!(
-        block.page_table_offset % ic_sqlite_vfs::config::STABLE_PAGE_SIZE,
-        0
-    );
+    assert_eq!(block.page_table_offset, 0);
     let imported = Db::query(|connection| {
         connection.query_scalar::<String>(
             "SELECT v FROM import_cache_guard WHERE k = 'key'",
@@ -976,7 +1096,7 @@ fn update_is_rejected_during_import_after_write_connection_cache_exists() {
     assert!(matches!(
         result,
         Err(DbError::Stable(
-            memory::StableMemoryError::ImportAlreadyStarted
+            ic_sqlite_vfs::StableMemoryError::ImportAlreadyStarted
         ))
     ));
     Db::cancel_import().unwrap();

@@ -1,8 +1,7 @@
-//! Compile-time guard for the documented 1.0 Rust API surface.
+//! Compile-time guard for the documented 2.0 Rust API surface.
 //!
 //! The snapshot gate catches broad public-item drift. This compile test keeps
-//! the stable paths type-checking for downstream code that imports modules
-//! directly rather than only using the top-level facade.
+//! the stable facade type-checking for downstream code.
 
 #[cfg(feature = "canister-api")]
 use ic_sqlite_vfs::api::{ChecksumRefresh as ApiChecksumRefresh, DbMeta};
@@ -17,18 +16,10 @@ use ic_sqlite_vfs::db::statement::{
 };
 use ic_sqlite_vfs::db::transaction::UpdateConnection;
 use ic_sqlite_vfs::db::value::{to_sql_ref, Null, ToSql, Value, NULL};
-use ic_sqlite_vfs::read_metrics::{read_metrics_snapshot, ReadMetrics};
-use ic_sqlite_vfs::sqlite_vfs::file::{FileKind, IcStableFile};
-use ic_sqlite_vfs::sqlite_vfs::{ffi, register, stable_blob, temp::TempFile};
-use ic_sqlite_vfs::stable::memory::{self, ContextId, StableMemoryError};
-use ic_sqlite_vfs::stable::meta::{self, Superblock};
-use ic_sqlite_vfs::stable::raw_memory::{Memory, VectorMemory};
 use ic_sqlite_vfs::{
     named_params, params, Db, DbError, DbHandle, DbMemory, DefaultMemoryImpl, MemoryId,
-    MemoryManager, MemoryManagerInitError,
+    MemoryManager, MemoryManagerInitError, StableMemoryError,
 };
-use std::cell::RefCell;
-use std::rc::Rc;
 
 #[test]
 fn documented_public_api_surface_compiles() {
@@ -112,7 +103,6 @@ fn documented_public_api_surface_compiles() {
     });
 
     assert_public_support_types();
-    assert_low_level_public_modules();
 }
 
 fn assert_to_sql<T: ToSql>() {}
@@ -139,8 +129,8 @@ fn assert_public_support_types() {
         let _meta_size = std::mem::size_of::<DbMeta>();
         let _api_refresh_size = std::mem::size_of::<ApiChecksumRefresh>();
     }
-    let _read_metrics_size = std::mem::size_of::<ReadMetrics>();
     let _statement_size = std::mem::size_of::<Statement<'_>>();
+    let _stable_error_size = std::mem::size_of::<StableMemoryError>();
     #[cfg(feature = "bench-profile")]
     {
         let _query_profile = QueryOptionalStringTextProfile {
@@ -157,7 +147,6 @@ fn assert_public_support_types() {
             row_scan: 0,
         };
     }
-    let _snapshot: fn() -> ReadMetrics = read_metrics_snapshot;
     let _config_values = (
         config::SQLITE_PAGE_SIZE,
         config::SQLITE_CACHE_SIZE_KIB,
@@ -173,36 +162,3 @@ fn assert_public_support_types() {
         config::SQLITE_URI_NUL,
     );
 }
-
-fn assert_low_level_public_modules() {
-    let _register: fn() -> std::ffi::c_int = register;
-    let _vfs_prepare: unsafe fn() -> *mut ffi::sqlite3_vfs =
-        ic_sqlite_vfs::sqlite_vfs::vfs::prepare;
-    let _io_methods = &ic_sqlite_vfs::sqlite_vfs::file::IO_METHODS;
-    let _file_kind = FileKind::Main;
-    let _file_size = std::mem::size_of::<IcStableFile>();
-    let _temp = TempFile::default();
-
-    let _checksum_refresh_size = std::mem::size_of::<stable_blob::ChecksumRefresh>();
-    let _storage_stats_size = std::mem::size_of::<stable_blob::StorageStats>();
-    let _export: fn(u64, u64) -> Result<Vec<u8>, StableMemoryError> = stable_blob::export_chunk;
-    let _begin_import: fn(u64, u64) -> Result<(), StableMemoryError> = stable_blob::begin_import;
-    let _import_chunk: fn(u64, &[u8]) -> Result<(), StableMemoryError> = stable_blob::import_chunk;
-    let _finish_import: fn() -> Result<(), StableMemoryError> = stable_blob::finish_import;
-    let _cancel_import: fn() -> Result<(), StableMemoryError> = stable_blob::cancel_import;
-
-    let _context_size = std::mem::size_of::<ContextId>();
-    let _memory_error_size = std::mem::size_of::<StableMemoryError>();
-    let _size_pages: fn() -> u64 = memory::size_pages;
-    let _active_context: fn() -> Result<ContextId, StableMemoryError> = memory::active_context_id;
-
-    let _superblock = Superblock::fresh();
-    let _page_layout = meta::PAGE_MAP_LAYOUT_VERSION;
-    let _fnv: fn(&[u8]) -> u64 = meta::fnv1a64;
-
-    let vector: VectorMemory = Rc::new(RefCell::new(Vec::new()));
-    assert_memory_trait::<VectorMemory>();
-    let _memory_size = vector.size();
-}
-
-fn assert_memory_trait<T: Memory>() {}

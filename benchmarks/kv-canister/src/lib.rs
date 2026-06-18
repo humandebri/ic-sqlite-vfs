@@ -5,10 +5,9 @@
 
 use candid::CandidType;
 use ic_cdk::{api::performance_counter, init, post_upgrade, query, update};
+use ic_sqlite_vfs::bench_support::{memory, read_metrics, Superblock};
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::db::statement::{ExecuteTextTextProfile, QueryOptionalStringTextProfile};
-use ic_sqlite_vfs::read_metrics;
-use ic_sqlite_vfs::stable::{memory, meta::Superblock};
 use ic_sqlite_vfs::{Db, DefaultMemoryImpl, MemoryId, MemoryManager};
 use serde::Deserialize;
 use std::cell::RefCell;
@@ -78,10 +77,6 @@ pub struct BenchReadProfileReport {
     pub x_read_bytes: u64,
     pub stable_data_read_calls: u64,
     pub stable_data_read_bytes: u64,
-    pub page_table_root_hits: u64,
-    pub page_table_root_misses: u64,
-    pub page_table_segment_hits: u64,
-    pub page_table_segment_misses: u64,
     pub superblock_loads: u64,
 }
 
@@ -104,10 +99,6 @@ pub struct BenchGetManyProfileReport {
     pub x_read_bytes: u64,
     pub stable_data_read_calls: u64,
     pub stable_data_read_bytes: u64,
-    pub page_table_root_hits: u64,
-    pub page_table_root_misses: u64,
-    pub page_table_segment_hits: u64,
-    pub page_table_segment_misses: u64,
     pub superblock_loads: u64,
 }
 
@@ -142,16 +133,10 @@ pub struct BenchWriteProfileReport {
     pub stable_data_write_bytes: u64,
     pub stable_grow_calls: u64,
     pub stable_grow_pages: u64,
-    pub page_table_root_hits: u64,
-    pub page_table_root_misses: u64,
-    pub page_table_segment_hits: u64,
-    pub page_table_segment_misses: u64,
     pub superblock_loads: u64,
     pub commit_load: u64,
-    pub commit_build_segments: u64,
     pub commit_capacity: u64,
     pub commit_page_write: u64,
-    pub commit_table_write: u64,
     pub commit_superblock_store: u64,
 }
 
@@ -186,16 +171,10 @@ pub struct BenchGrowthProfileReport {
     pub stable_data_write_bytes: u64,
     pub stable_grow_calls: u64,
     pub stable_grow_pages: u64,
-    pub page_table_root_hits: u64,
-    pub page_table_root_misses: u64,
-    pub page_table_segment_hits: u64,
-    pub page_table_segment_misses: u64,
     pub superblock_loads: u64,
     pub commit_load: u64,
-    pub commit_build_segments: u64,
     pub commit_capacity: u64,
     pub commit_page_write: u64,
-    pub commit_table_write: u64,
     pub commit_superblock_store: u64,
 }
 
@@ -441,10 +420,6 @@ fn bench_get_many_in_profile(rows: u32) -> Result<BenchGetManyProfileReport, Str
         x_read_bytes: metrics.x_read_bytes,
         stable_data_read_calls: metrics.stable_data_read_calls,
         stable_data_read_bytes: metrics.stable_data_read_bytes,
-        page_table_root_hits: metrics.page_table_root_hits,
-        page_table_root_misses: metrics.page_table_root_misses,
-        page_table_segment_hits: metrics.page_table_segment_hits,
-        page_table_segment_misses: metrics.page_table_segment_misses,
         superblock_loads: metrics.superblock_loads,
     })
 }
@@ -544,10 +519,6 @@ fn bench_read_profile(rows: u32) -> Result<BenchReadProfileReport, String> {
         x_read_bytes: metrics.x_read_bytes,
         stable_data_read_calls: metrics.stable_data_read_calls,
         stable_data_read_bytes: metrics.stable_data_read_bytes,
-        page_table_root_hits: metrics.page_table_root_hits,
-        page_table_root_misses: metrics.page_table_root_misses,
-        page_table_segment_hits: metrics.page_table_segment_hits,
-        page_table_segment_misses: metrics.page_table_segment_misses,
         superblock_loads: metrics.superblock_loads,
     })
 }
@@ -651,16 +622,10 @@ fn bench_write_profile(rows: u32) -> Result<BenchWriteProfileReport, String> {
         stable_data_write_bytes: metrics.stable_data_write_bytes,
         stable_grow_calls: metrics.stable_grow_calls,
         stable_grow_pages: metrics.stable_grow_pages,
-        page_table_root_hits: metrics.page_table_root_hits,
-        page_table_root_misses: metrics.page_table_root_misses,
-        page_table_segment_hits: metrics.page_table_segment_hits,
-        page_table_segment_misses: metrics.page_table_segment_misses,
         superblock_loads: metrics.superblock_loads,
         commit_load: metrics.commit_load,
-        commit_build_segments: metrics.commit_build_segments,
         commit_capacity: metrics.commit_capacity,
         commit_page_write: metrics.commit_page_write,
-        commit_table_write: metrics.commit_table_write,
         commit_superblock_store: metrics.commit_superblock_store,
     })
 }
@@ -914,16 +879,10 @@ fn bench_growth_profile(rows: u32, writes: u32) -> Result<BenchGrowthProfileRepo
         stable_data_write_bytes: metrics.stable_data_write_bytes,
         stable_grow_calls: metrics.stable_grow_calls,
         stable_grow_pages: metrics.stable_grow_pages,
-        page_table_root_hits: metrics.page_table_root_hits,
-        page_table_root_misses: metrics.page_table_root_misses,
-        page_table_segment_hits: metrics.page_table_segment_hits,
-        page_table_segment_misses: metrics.page_table_segment_misses,
         superblock_loads: metrics.superblock_loads,
         commit_load: metrics.commit_load,
-        commit_build_segments: metrics.commit_build_segments,
         commit_capacity: metrics.commit_capacity,
         commit_page_write: metrics.commit_page_write,
-        commit_table_write: metrics.commit_table_write,
         commit_superblock_store: metrics.commit_superblock_store,
     })
 }

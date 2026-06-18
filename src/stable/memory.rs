@@ -4,9 +4,9 @@
 //! coexist with other stable structures managed by the same MemoryManager.
 
 use crate::config::STABLE_PAGE_SIZE;
-use crate::stable::memory_manager::VirtualMemory;
 #[cfg(any(test, debug_assertions))]
 use crate::stable::memory_manager::{MemoryId, MemoryManager};
+use crate::stable::memory_manager::{MemoryIdentity, VirtualMemory};
 use crate::stable::raw_memory::{DefaultMemoryImpl, Memory};
 use std::cell::{Cell, RefCell};
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
@@ -23,6 +23,8 @@ pub enum StableMemoryError {
     NotInitialized,
     #[error("stable memory backend is already initialized")]
     AlreadyInitialized,
+    #[error("stable memory is already registered with a database handle")]
+    MemoryAlreadyRegistered,
     #[error(
         "stable memory grow failed: current_pages={current_pages}, required_pages={required_pages}"
     )]
@@ -62,6 +64,10 @@ pub enum StableMemoryError {
     MetaChecksumMismatch,
     #[error("unsupported stable layout version: {0}")]
     UnsupportedLayoutVersion(u64),
+    #[error("non-empty stable memory does not contain an ic-sqlite-vfs image")]
+    ForeignStableMemoryImage,
+    #[error("zero extent limit exceeded: limit={limit}")]
+    ZeroExtentLimitExceeded { limit: usize },
 }
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
@@ -81,6 +87,7 @@ thread_local! {
     static DEFAULT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
     static CURRENT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
     static DB_MEMORY: RefCell<Vec<(ContextId, DbMemory)>> = const { RefCell::new(Vec::new()) };
+    static REGISTERED_MEMORY: RefCell<Vec<(ContextId, MemoryIdentity)>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn init(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
@@ -88,13 +95,15 @@ pub fn init(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
         if default.get().is_some() {
             return Err(StableMemoryError::AlreadyInitialized);
         }
-        let context = init_context(memory);
+        let context = init_context(memory)?;
         default.set(Some(context));
         Ok(context)
     })
 }
 
-pub fn init_context(memory: DbMemory) -> ContextId {
+pub fn init_context(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
+    let identity = memory.identity();
+    reject_registered_memory(identity)?;
     let context = NEXT_CONTEXT_ID.with(|next| {
         let current = next.get();
         let context = ContextId(current);
@@ -104,7 +113,24 @@ pub fn init_context(memory: DbMemory) -> ContextId {
     DB_MEMORY.with(|slot| {
         slot.borrow_mut().push((context, memory));
     });
-    context
+    REGISTERED_MEMORY.with(|slot| {
+        slot.borrow_mut().push((context, identity));
+    });
+    Ok(context)
+}
+
+fn reject_registered_memory(identity: MemoryIdentity) -> Result<(), StableMemoryError> {
+    REGISTERED_MEMORY.with(|slot| {
+        if slot
+            .borrow()
+            .iter()
+            .any(|(_, registered)| *registered == identity)
+        {
+            Err(StableMemoryError::MemoryAlreadyRegistered)
+        } else {
+            Ok(())
+        }
+    })
 }
 
 pub fn is_initialized() -> bool {
@@ -220,6 +246,7 @@ pub fn write(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn write_preallocated(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
     if bytes.is_empty() {
         return Ok(());
@@ -358,17 +385,22 @@ pub fn set_next_context_id_for_tests(value: u64) {
 #[cfg(any(test, debug_assertions))]
 pub(crate) fn clear_initialization() {
     DB_MEMORY.with(|memory| memory.borrow_mut().clear());
+    REGISTERED_MEMORY.with(|memory| memory.borrow_mut().clear());
     DEFAULT_CONTEXT.with(|context| context.set(None));
     CURRENT_CONTEXT.with(|context| context.set(None));
     NEXT_CONTEXT_ID.with(|next| next.set(1));
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
     clear_failpoint();
     crate::stable::meta::clear_superblock_cache();
-    crate::sqlite_vfs::stable_blob::invalidate_read_cache();
 }
 
 pub(crate) fn clear_failed_initialization(context: ContextId) {
     DB_MEMORY.with(|memory| {
+        memory
+            .borrow_mut()
+            .retain(|(stored_context, _)| *stored_context != context);
+    });
+    REGISTERED_MEMORY.with(|memory| {
         memory
             .borrow_mut()
             .retain(|(stored_context, _)| *stored_context != context);
@@ -388,10 +420,9 @@ pub(crate) fn clear_failed_initialization(context: ContextId) {
         slot.borrow_mut().remove(&context);
     });
     crate::stable::meta::clear_superblock_cache();
-    crate::sqlite_vfs::stable_blob::invalidate_read_cache();
 }
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 pub fn snapshot_for_tests() -> Vec<u8> {
     let len = usize::try_from(size_pages().saturating_mul(STABLE_PAGE_SIZE))
         .expect("test memory size fits usize");
@@ -400,7 +431,7 @@ pub fn snapshot_for_tests() -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
     reset_for_tests();
     let memory = memory_for_tests();
