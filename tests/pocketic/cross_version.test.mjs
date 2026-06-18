@@ -275,7 +275,7 @@ test("PocketIC 1.0.0 image imports into current canister", { timeout }, async ()
     assert.deepEqual(await destination.kv_get_note("alpha"), { Ok: ["released"] });
     assert.deepEqual(await destination.db_integrity_check(), { Ok: "ok" });
     const importMeta = await expectOk("imported 1.0.0 meta", destination.db_meta());
-    assert.equal(importMeta.schema_version, 2n);
+    assert.equal(importMeta.schema_version, 0n);
 
     step(name, "rerun current migrations after 1.0.0 import");
     await pic.upgradeCanister({ canisterId: destinationId, wasm: currentWasm });

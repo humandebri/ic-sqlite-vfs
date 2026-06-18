@@ -129,6 +129,7 @@ impl Superblock {
 
     fn store_with_capacity_check(&self) -> Result<(), StableMemoryError> {
         let mut block = self.clone();
+        block.validate_zero_extents()?;
         block.version = VERSION;
         block.meta_checksum = block.compute_meta_checksum();
         let encoded = block.encode();
@@ -139,6 +140,7 @@ impl Superblock {
 
     fn store_preallocated(&self) -> Result<(), StableMemoryError> {
         let mut block = self.clone();
+        block.validate_zero_extents()?;
         block.version = VERSION;
         block.meta_checksum = block.compute_meta_checksum();
         let encoded = block.encode();
@@ -312,20 +314,26 @@ impl Superblock {
     }
 
     fn has_normalized_zero_extents(&self) -> bool {
+        self.validate_zero_extents().is_ok()
+    }
+
+    fn validate_zero_extents(&self) -> Result<(), StableMemoryError> {
         if self.zero_extents.len() > MAX_ZERO_EXTENTS {
-            return false;
+            return Err(StableMemoryError::ZeroExtentLimitExceeded {
+                limit: MAX_ZERO_EXTENTS,
+            });
         }
         let mut previous_end = None;
         for extent in &self.zero_extents {
             if extent.start_page >= extent.end_page {
-                return false;
+                return Err(StableMemoryError::MetaChecksumMismatch);
             }
             if previous_end.is_some_and(|end| extent.start_page <= end) {
-                return false;
+                return Err(StableMemoryError::MetaChecksumMismatch);
             }
             previous_end = Some(extent.end_page);
         }
-        true
+        Ok(())
     }
 
     fn encoded_len(&self) -> usize {
@@ -517,6 +525,66 @@ mod tests {
             Superblock::load(),
             Err(StableMemoryError::MetaChecksumMismatch)
         ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn commit_db_image_rejects_over_limit_zero_extents_without_publish() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let before = Superblock::load().unwrap();
+        let mut next_start = 0_u64;
+        let extents = (0..=MAX_ZERO_EXTENTS)
+            .map(|_| {
+                let extent = ZeroExtent {
+                    start_page: next_start,
+                    end_page: next_start + 1,
+                };
+                next_start += 2;
+                extent
+            })
+            .collect::<Vec<_>>();
+
+        let result = Superblock::commit_db_image(before.db_base_offset, before.db_size, extents);
+
+        assert!(matches!(
+            result,
+            Err(StableMemoryError::ZeroExtentLimitExceeded {
+                limit: MAX_ZERO_EXTENTS
+            })
+        ));
+        clear_superblock_cache();
+        assert_eq!(Superblock::load().unwrap(), before);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn store_db_image_without_tx_rejects_unnormalized_zero_extents_without_publish() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let before = Superblock::load().unwrap();
+        let extents = vec![
+            ZeroExtent {
+                start_page: 2,
+                end_page: 3,
+            },
+            ZeroExtent {
+                start_page: 1,
+                end_page: 2,
+            },
+        ];
+
+        let result =
+            Superblock::store_db_image_without_tx(before.db_base_offset, before.db_size, extents);
+
+        assert!(matches!(
+            result,
+            Err(StableMemoryError::MetaChecksumMismatch)
+        ));
+        clear_superblock_cache();
+        assert_eq!(Superblock::load().unwrap(), before);
     }
 
     fn assert_u64_field_offsets(

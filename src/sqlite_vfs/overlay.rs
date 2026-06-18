@@ -7,6 +7,7 @@
 use crate::config::SQLITE_PAGE_SIZE;
 use crate::sqlite_vfs::stable_blob;
 use crate::stable::memory::{self, ContextId, StableMemoryError};
+use crate::stable::meta::ZeroExtent;
 use std::cell::RefCell;
 
 const CLEAN_PAGE_CACHE_CAPACITY: usize = 8;
@@ -17,6 +18,7 @@ pub struct Overlay {
     size: u64,
     pages: Vec<(u64, Vec<u8>)>,
     clean_pages: Vec<(u64, Vec<u8>)>,
+    zero_extents: Vec<ZeroExtent>,
 }
 
 thread_local! {
@@ -30,6 +32,7 @@ impl Overlay {
             size: base_size,
             pages: Vec::new(),
             clean_pages: Vec::new(),
+            zero_extents: Vec::new(),
         }
     }
 
@@ -41,8 +44,12 @@ impl Overlay {
         &self.pages
     }
 
+    pub fn zero_extents(&self) -> &[ZeroExtent] {
+        &self.zero_extents
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.size == self.base_size && self.pages.is_empty()
+        self.size == self.base_size && self.pages.is_empty() && self.zero_extents.is_empty()
     }
 
     pub fn read_at(&mut self, offset: u64, dst: &mut [u8]) -> Result<bool, StableMemoryError> {
@@ -70,6 +77,11 @@ impl Overlay {
         }
         let len = u64::try_from(bytes.len()).map_err(|_| StableMemoryError::OffsetOverflow)?;
         let end = checked_add(offset, len)?;
+        let old_size = self.size;
+        if end > old_size {
+            self.record_newly_active_zero_pages(old_size, end)?;
+            self.zero_newly_active_partial_pages(old_size, end)?;
+        }
         let full_page_no = page_no(offset);
         if bytes.len() == page_len() && offset.is_multiple_of(page_size()) {
             self.write_full_page(full_page_no, bytes)?;
@@ -99,6 +111,13 @@ impl Overlay {
     }
 
     pub fn truncate(&mut self, size: u64) -> Result<(), StableMemoryError> {
+        let old_size = self.size;
+        if size > old_size {
+            self.record_newly_active_zero_pages(old_size, size)?;
+            self.zero_newly_active_partial_pages(old_size, size)?;
+        } else if size < old_size {
+            self.record_truncated_zero_pages(size, old_size)?;
+        }
         self.size = size;
         let keep_pages = stable_blob::page_count_for_size(size)?;
         self.pages.retain(|(page_no, _)| *page_no < keep_pages);
@@ -116,13 +135,86 @@ impl Overlay {
         Ok(())
     }
 
+    fn record_newly_active_zero_pages(
+        &mut self,
+        old_size: u64,
+        new_size: u64,
+    ) -> Result<(), StableMemoryError> {
+        let first_new_page = stable_blob::page_count_for_size(old_size)?;
+        let final_page_count = stable_blob::page_count_for_size(new_size)?;
+        self.record_zero_extent(first_new_page, final_page_count);
+        Ok(())
+    }
+
+    fn record_truncated_zero_pages(
+        &mut self,
+        new_size: u64,
+        old_size: u64,
+    ) -> Result<(), StableMemoryError> {
+        let first_zero_page = stable_blob::page_count_for_size(new_size)?;
+        let old_page_count = stable_blob::page_count_for_size(old_size)?;
+        self.record_zero_extent(first_zero_page, old_page_count);
+        Ok(())
+    }
+
+    fn record_zero_extent(&mut self, start_page: u64, end_page: u64) {
+        if start_page < end_page {
+            self.zero_extents.push(ZeroExtent {
+                start_page,
+                end_page,
+            });
+        }
+    }
+
+    fn zero_newly_active_partial_pages(
+        &mut self,
+        old_size: u64,
+        new_size: u64,
+    ) -> Result<(), StableMemoryError> {
+        if old_size >= new_size {
+            return Ok(());
+        }
+
+        let old_page_no = page_no(old_size);
+        if !old_size.is_multiple_of(page_size()) {
+            let old_page_start = old_page_no
+                .checked_mul(page_size())
+                .ok_or(StableMemoryError::OffsetOverflow)?;
+            let old_page_end = checked_add(old_page_start, page_size())?;
+            let start = page_offset(old_size)?;
+            let end_absolute = new_size.min(old_page_end);
+            let end = if end_absolute == old_page_end {
+                page_len()
+            } else {
+                page_offset(end_absolute)?
+            };
+            let page = self.load_dirty_page(old_page_no)?;
+            page[start..end].fill(0);
+        }
+
+        if !new_size.is_multiple_of(page_size()) {
+            let new_page_no = page_no(new_size);
+            if new_page_no != old_page_no {
+                let end = page_offset(new_size)?;
+                let page = self.load_dirty_page(new_page_no)?;
+                page[..end].fill(0);
+            }
+        }
+
+        Ok(())
+    }
+
     fn load_dirty_page(&mut self, page_no: u64) -> Result<&mut Vec<u8>, StableMemoryError> {
         if let Some(index) = self.dirty_page_index(page_no) {
             return Ok(&mut self.pages[index].1);
         }
-        let page = match self.take_clean_page(page_no) {
-            Some(page) => page,
-            None => stable_blob::read_base_page(page_no)?,
+        let page = if self.page_is_zero_masked(page_no) {
+            vec![0_u8; page_len()]
+        } else {
+            match self.take_clean_page(page_no) {
+                Some(page) => page,
+                None => stable_blob::read_base_page(page_no)?,
+            }
         };
         self.pages.push((page_no, page));
         self.pages
@@ -164,6 +256,12 @@ impl Overlay {
         None
     }
 
+    fn page_is_zero_masked(&self, page_no: u64) -> bool {
+        self.zero_extents
+            .iter()
+            .any(|extent| page_no >= extent.start_page && page_no < extent.end_page)
+    }
+
     fn take_clean_page(&mut self, page_no: u64) -> Option<Vec<u8>> {
         let index = self
             .clean_pages
@@ -202,6 +300,8 @@ impl Overlay {
             if let Some(page) = self.dirty_page(page_no) {
                 dst[copied_total..copied_total + copied]
                     .copy_from_slice(&page[page_offset..page_offset + copied]);
+            } else if self.page_is_zero_masked(page_no) {
+                dst[copied_total..copied_total + copied].fill(0);
             } else if let Some(page) = self.clean_page(page_no) {
                 dst[copied_total..copied_total + copied]
                     .copy_from_slice(&page[page_offset..page_offset + copied]);

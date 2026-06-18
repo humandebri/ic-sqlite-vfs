@@ -122,6 +122,12 @@ IC 基盤層に依存する。
 - C ABI / FFI 境界の正しさ。
 - IC stable memory system API と message execution atomicity。
 - Rust実装とVerus抽象モデルの完全一致。
+- `insert_zero_extent_normalized_*` の Verus lemma は `#[verifier::external_body]`
+  付きの trusted boundary。production の `normalize_zero_extents` との対応は
+  Rust の merge/split/limit property test で補う。
+- 論理 file extension gap の byte-level zero-fill は Verus の page-level
+  zero extent モデルだけでは完結しない。旧 EOF / 新 EOF がページ途中にある
+  場合の補正は Rust 実装と stale-byte sentinel test で検証する。
 - canister が commit 中に inter-canister call を行わないこと。
 - 単一 message の命令・汚染 page 上限を超える大 commit の活性。
 

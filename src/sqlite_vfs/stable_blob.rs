@@ -666,9 +666,16 @@ fn zero_extents_after_commit(
 ) -> Result<Vec<ZeroExtent>, StableMemoryError> {
     let mut extents = block.zero_extents().to_vec();
     let old_page_count = page_count_for_size(block.db_size)?;
+    if overlay.size() > block.db_size {
+        let first_new_page = page_count_for_size(block.db_size)?;
+        add_zero_extent(&mut extents, first_new_page, final_page_count)?;
+    }
     if overlay.size() < block.db_size {
         let first_zero_page = page_count_for_size(overlay.size())?;
         add_zero_extent(&mut extents, first_zero_page, old_page_count)?;
+    }
+    for extent in overlay.zero_extents() {
+        add_zero_extent(&mut extents, extent.start_page, extent.end_page)?;
     }
     for (page_no, _) in overlay.dirty_pages() {
         if *page_no < final_page_count {
@@ -1267,6 +1274,29 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn same_overlay_truncate_reextend_zeroes_active_gap() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        write_at(0, &vec![1_u8; page_len()]).unwrap();
+        write_at(page_size(), &vec![0xAA; page_len()]).unwrap();
+        write_at(2 * page_size(), &vec![3_u8; page_len()]).unwrap();
+
+        begin_update().unwrap();
+        truncate(page_size()).unwrap();
+        truncate(2 * page_size()).unwrap();
+        let mut overlay_gap = vec![1_u8; page_len()];
+        read_at(page_size(), &mut overlay_gap).unwrap();
+        commit_update().unwrap();
+
+        let committed_gap = export_chunk(page_size(), page_size()).unwrap();
+
+        assert_eq!(overlay_gap, vec![0_u8; page_len()]);
+        assert_eq!(committed_gap, vec![0_u8; page_len()]);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn compact_is_noop_for_in_place_layout() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
@@ -1322,6 +1352,69 @@ mod tests {
         );
         assert_eq!(first, [0]);
         assert_eq!(expanded_tail, [0]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn truncate_grow_zeroes_stale_physical_gap() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let old_size = page_size() + 17;
+        let grow_len = page_size() * 2 + 111;
+        let grow_len_usize = usize::try_from(grow_len).unwrap();
+        write_at(old_size - 1, b"a").unwrap();
+        let block = Superblock::load().unwrap();
+        crate::stable::memory::write(block.db_base_offset + old_size, &vec![0xAA; grow_len_usize])
+            .unwrap();
+
+        truncate(old_size + grow_len).unwrap();
+        let gap = export_chunk(old_size, grow_len).unwrap();
+
+        assert!(gap.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn sparse_write_zeroes_stale_physical_gap() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let old_size = page_size() + 17;
+        let write_offset = old_size + page_size() * 2 + 33;
+        let gap_len = write_offset - old_size;
+        let gap_len_usize = usize::try_from(gap_len).unwrap();
+        write_at(old_size - 1, b"a").unwrap();
+        let block = Superblock::load().unwrap();
+        crate::stable::memory::write(block.db_base_offset + old_size, &vec![0xAA; gap_len_usize])
+            .unwrap();
+
+        write_at(write_offset, b"z").unwrap();
+        let gap = export_chunk(old_size, gap_len).unwrap();
+        let written = export_chunk(write_offset, 1).unwrap();
+
+        assert!(gap.iter().all(|byte| *byte == 0));
+        assert_eq!(written, b"z");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn failed_import_slack_stays_hidden_after_normal_grow() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        write_at(0, b"a").unwrap();
+        begin_import(page_size(), 0).unwrap();
+        let importing = Superblock::load().unwrap();
+        import_chunk(0, &vec![0xAA; page_len()]).unwrap();
+        assert!(finish_import().is_err());
+
+        let block = Superblock::load().unwrap();
+        let logical_import_offset = importing.import_base_offset - block.db_base_offset;
+        truncate(logical_import_offset + page_size()).unwrap();
+        let grown_over_import_slack = export_chunk(logical_import_offset, page_size()).unwrap();
+
+        assert!(grown_over_import_slack.iter().all(|byte| *byte == 0));
     }
 
     #[test]
