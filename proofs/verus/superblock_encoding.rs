@@ -28,6 +28,7 @@ struct Superblock {
     page_table_offset: u64,
     page_count: u64,
     layout_version: u64,
+    zero_extent_count: u64,
     meta_checksum: u64,
 }
 
@@ -36,7 +37,7 @@ struct EncodedSuperblock {
 }
 
 spec fn encoded_len() -> nat {
-    20
+    21
 }
 
 spec fn encode(block: Superblock) -> EncodedSuperblock {
@@ -61,6 +62,7 @@ spec fn encode(block: Superblock) -> EncodedSuperblock {
             block.page_table_offset,
             block.page_count,
             block.layout_version,
+            block.zero_extent_count,
             block.meta_checksum
         ],
     }
@@ -90,7 +92,8 @@ spec fn decode(encoded: EncodedSuperblock) -> Superblock
         page_table_offset: encoded.fields[16],
         page_count: encoded.fields[17],
         layout_version: encoded.fields[18],
-        meta_checksum: encoded.fields[19],
+        zero_extent_count: encoded.fields[19],
+        meta_checksum: encoded.fields[20],
     }
 }
 

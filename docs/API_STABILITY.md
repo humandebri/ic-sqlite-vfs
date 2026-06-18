@@ -11,9 +11,13 @@ Removing public items, changing public signatures, or changing documented
 semantics requires a breaking major release.
 
 `canister-api` is a reference canister implementation used by examples and
-PocketIC tests. Generated DID compatibility and private Candid method names in
-`src/api.rs` are not part of the `2.x` compatibility contract. The
-`canister-api-test-failpoints` feature is also outside the stable contract.
+PocketIC tests. Its management method names are reference-only except for the
+resource observation fields documented below: `db_meta.allocated_bytes`,
+`db_meta.orphan_bytes_estimate`, `db_meta.page_table_bytes`,
+`db_meta.zero_extent_count`, and `db_meta.compact_recommended` remain stable
+monitoring semantics for `2.x`. Generated DID compatibility for unrelated
+reference methods and the `canister-api-test-failpoints` feature are outside
+the stable contract.
 
 The frozen public Rust surface is tracked by
 `docs/PUBLIC_API_2_0.snapshot` and checked by
@@ -50,10 +54,13 @@ dedicated `MemoryId`; `DbHandle` does not provide a mount-id namespace inside a
 single SQLite image. Registering the same `MemoryId` twice in one Wasm instance
 returns `StableMemoryError::MemoryAlreadyRegistered`.
 
-Fresh initialization only occurs when the selected virtual memory has size
-`0`. Non-empty memory without the `ICSQLITE` superblock returns
-`StableMemoryError::ForeignStableMemoryImage` and is not rewritten. This
-protects existing `ic-rusqlite` raw SQLite images whose first bytes are
+Fresh initialization only occurs when the selected MemoryManager virtual memory
+has size `0`. Non-empty selected virtual memory without the `ICSQLITE`
+superblock returns `StableMemoryError::ForeignStableMemoryImage` and is not
+rewritten. This protection is scoped to the selected virtual memory; raw backing
+memory that is not already a MemoryManager image should use strict
+MemoryManager initialization in upgrade-sensitive code. The guard protects
+existing `ic-rusqlite` raw SQLite images whose first bytes are
 `SQLite format 3\0`; migrate those images through export/import only.
 
 The bundled MemoryManager-compatible `MemoryId` is `u8`-backed. Values
@@ -92,6 +99,11 @@ selected virtual memory:
 The superblock stores logical size, transaction id, last verified checksum,
 import state, and flags. Page-table fields remain encoded for metadata
 compatibility, but normal v8 operation sets `page_table_offset = 0`.
+The resource state exposed through `db_meta` is part of the layout contract:
+`db_size` is the logical image length, `db_base_offset` is the fixed physical
+base, `allocated_bytes` is the selected stable-memory high-water mark,
+`orphan_bytes_estimate` is high-water slack outside `SUPERBLOCK_SIZE + db_size`,
+and `page_table_bytes` is always `0` for v8.
 
 Logical SQLite page `n` lives at:
 
@@ -102,16 +114,61 @@ db_base_offset + n * SQLITE_PAGE_SIZE
 `checksum` is last verified checksum metadata. It is not a durability boundary.
 Update commits use a heap write overlay, write dirty logical pages to fixed
 stable-memory offsets, advance `last_tx_id`, and may set `checksum_stale`.
+Normal commits must not allocate a fresh append base, must keep
+`db_base_offset` stable, must write dirty page `n` at
+`db_base_offset + n * SQLITE_PAGE_SIZE`, and must publish `page_table_offset = 0`.
+When the final image fits in existing stable-memory capacity, repeated normal
+commits must not increase `allocated_bytes` or the high-water mark. When a
+normal commit exceeds current capacity, it may grow stable memory only to the
+stable-page-rounded end required by the final image and dirty page writes.
 Truncate stores whole-page tail ranges as v8 zero-mask extents. Dirty writes
 materialize pages by removing those ranges, and non-page-boundary truncate
 physically zeroes only the boundary page tail. This prevents stale physical
-bytes from becoming logical data without reintroducing page tables.
+bytes from becoming logical data without reintroducing page tables. Pathological
+truncate sequences that exceed the fixed zero-extent metadata limit fail with a
+zero-extent-limit error; they must not fall back to append-only rewriting.
 `db_refresh_checksum` and `db_refresh_checksum_chunk` are the only operations
 that persistently update the stored checksum after a normal commit.
 
-`compact()` is retained as a public API but is a no-op for v8. `db_meta`
-continues to expose `orphan_bytes_estimate` as high-water slack observation;
+`compact()` is retained as a public API but is a no-op for v8. Stable memory
+does not shrink, so compact does not lower `allocated_bytes`, the high-water
+mark, or `orphan_bytes_estimate`; it is not a reclaim operation in this layout.
 `compact_recommended` is always `false` for v8.
+
+The v8 resource proof obligations are:
+
+| Operation | Forbidden behavior | Required resource state |
+| --- | --- | --- |
+| normal commit within existing capacity | allocate a fresh append base or call the append-base path | `db_base_offset` stable, `allocated_bytes` stable, high-water mark stable |
+| normal commit requiring growth | grow beyond the stable-page-rounded required end | `db_base_offset` stable; growth is bounded by the computed physical write end |
+| dirty page write | write dirty page data to a newly appended image copy | physical offset is `db_base_offset + page_no * SQLITE_PAGE_SIZE` |
+| truncate | make truncated tail pages logically readable as stale physical data or fall back to append-only rewriting when zero extents are exhausted | inactive tail pages are masked by zero extents until a future write materializes them; zero-extent exhaustion returns an error |
+| compact | claim reclaim or lower stable-memory high water | no-op; `allocated_bytes`, high-water mark, `orphan_bytes_estimate`, and `db_base_offset` stay unchanged |
+| import or fresh base creation | reuse normal commit invariants while intentionally replacing the image base | append-base use is limited to import/fresh-base paths and must publish a complete logical image |
+| failed write/grow/import step | publish partially updated layout metadata as committed state | committed superblock remains the authority; `page_table_offset == 0` for v8 committed state |
+
+Design-review coverage for capacity-sensitive terms:
+
+| Term | Contract location | Proof or regression coverage |
+| --- | --- | --- |
+| `append-only` | normal commit must not allocate a fresh append base | Verus in-place resource proof, repeated-update Rust/PocketIC/local guard |
+| `compact` / `reclaim` | v8 compact is no-op, not reclaim | Verus compact no-op proof, repeated compact Rust test |
+| `orphan` | high-water slack observation only | operations monitoring spec, compact non-reclaim regression |
+| `fallback` | no alternate append path for normal commit | normal commit negative spec and capacity guard |
+| `page_table` | v8 committed state publishes no page table | Verus current-layout proof and resource-shape tests |
+| `base_offset` | normal commit preserves `db_base_offset` | Verus offset proof and local canister capacity guard |
+
+These obligations do not prove the absence of all bugs. They define the finite
+resource invariants that a `2.x` implementation must keep satisfying.
+`docs/CAPACITY_GROWTH_PROOF.md` gives the HackMD-style proof that connects
+these obligations to the Verus abstract models and the Rust/PocketIC/local
+capacity guards.
+
+Successful import replaces the logical SQLite image and resets the superblock
+schema-version cache to `0`; callers must run the configured migrations again to
+resynchronize the cache with the imported image's migration table. Failed or
+cancelled import keeps the committed image authoritative, but stable memory does
+not shrink, so staging bytes may remain as high-water slack.
 
 ## 2.0 Compatibility Contract
 

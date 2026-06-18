@@ -6,6 +6,10 @@ Canister `init` and `post_upgrade` must initialize one
 `MemoryManager<DefaultMemoryImpl>`, choose the SQLite `MemoryId`, and call
 `Db::init(memory)` before any DB operation. The same `MemoryId` must be used for
 the lifetime of the deployed canister.
+For upgrade-sensitive deployments, initialize preexisting raw stable memory
+through the strict MemoryManager path before selecting the SQLite virtual
+memory; `Db::init` only protects the selected virtual memory from foreign
+SQLite images.
 
 Public update APIs must be synchronous. `Db::update` accepts only
 `FnOnce(&mut UpdateConnection<'_>) -> Result<T, DbError>` and does not accept a
@@ -111,13 +115,19 @@ Import must run through controller-only APIs and must require checksum match.
 During import, the SQLite VFS rejects `/main.db` open, so normal DB APIs fail.
 On checksum mismatch, the staging area is discarded, the existing DB is kept,
 and the import flag is cleared. To abort an unfinished import, the controller
-calls `db_cancel_import`.
+calls `db_cancel_import`. Discarded staging bytes can still remain as
+high-water slack because stable memory does not shrink. Treat repeated failed
+imports as a capacity event, and prefer retrying large images on a fresh
+destination.
 
 Import restores the raw SQLite image, not application schema intent. If the
 target canister expects newer migrations than the imported image has, run the
-application migration path after import before exposing new-schema methods. The
-reference compatibility test verifies this by importing `0.2.2` and `1.0.0`
-logical SQLite images, then running the current `post_upgrade` migration path.
+application migration path after import before exposing new-schema methods.
+Successful import resets the superblock schema-version cache to `0`, so
+`db_meta.schema_version` cannot claim the old destination schema for the new
+image. The reference compatibility test verifies this by importing `0.2.2` and
+`1.0.0` logical SQLite images, then running the current `post_upgrade`
+migration path.
 
 Reference controller guard:
 
@@ -161,7 +171,10 @@ Normal commits publish safely by writing dirty pages in place before updating
 the superblock. Truncate and sparse re-extend paths zero-fill the logical gap
 with page writes and v8 zero-mask metadata, so stale physical bytes never become
 logical SQLite data. `db_compact` remains available but is a no-op for the v8
-layout, and `db_meta.compact_recommended` stays `false`.
+layout, and `db_meta.compact_recommended` stays `false`. `orphan_bytes_estimate`
+is a high-water slack observation, not a promise that compact can reclaim bytes.
+Stable memory does not shrink, so compact must not be used as an operational
+remedy for high-water growth.
 
 ## Integrity
 
@@ -178,3 +191,31 @@ Admin monitoring should check these values periodically:
 `db_meta.checksum` is the last verified checksum. `checksum_stale == true` can
 be normal after updates. When a fresh verified checksum is required, a
 controller should run `db_refresh_checksum_chunk` to completion.
+
+Capacity monitoring should also track repeated-operation shape, not only single
+updates:
+
+- many one-page updates should not make `db_meta.allocated_bytes` grow when the
+  image already fits in existing capacity
+- grow/truncate loops should keep `db_base_offset` stable and
+  `page_table_bytes == 0`
+- pathological truncate loops can exhaust the fixed zero-extent metadata limit;
+  that condition is an error, not a compact or append-only fallback trigger
+- repeated `db_compact` calls should preserve `allocated_bytes`,
+  `orphan_bytes_estimate`, and `compact_recommended == false`
+
+For the benchmark canister, `scripts/bench-kv-local.sh <rows> <writes>` runs
+`bench_capacity_growth_guard` after the normal read/write probes. The guard
+fails if existing-capacity updates move `db_base_offset`, publish page table
+metadata, grow stable pages, grow `allocated_bytes`, or call stable grow.
+
+The operational interpretation is strict:
+
+| Signal | Expected v8 behavior | Incident meaning |
+| --- | --- | --- |
+| `db_meta.allocated_bytes` during existing-capacity updates | unchanged | possible append-only regression or unexpected stable grow |
+| `db_meta.page_table_bytes` | `0` | obsolete page-table layout leaked into v8 state |
+| `db_meta.zero_extent_count` near the fixed metadata limit | bounded truncate metadata | pathological truncate sequence may start returning zero-extent-limit errors |
+| `db_meta.compact_recommended` | `false` | compact is being advertised as reclaim despite v8 no-op semantics |
+| repeated `db_compact` | no resource decrease is promised | do not treat compact success as capacity recovery |
+| `db_base_offset` after normal updates | unchanged | image base replacement escaped the import/fresh-base path |

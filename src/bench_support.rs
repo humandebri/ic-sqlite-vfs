@@ -5,6 +5,10 @@
 
 pub use crate::stable::meta::Superblock;
 
+pub mod stable_blob {
+    pub use crate::sqlite_vfs::stable_blob::storage_stats;
+}
+
 pub mod memory {
     pub use crate::stable::memory::size_pages;
 }

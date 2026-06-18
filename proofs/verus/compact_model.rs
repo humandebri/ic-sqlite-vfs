@@ -2,6 +2,9 @@
 //!
 //! The public compact API remains available, but the in-place layout does not
 //! rewrite page data or metadata beyond rejecting unsupported layout versions.
+//!
+//! Capacity proof mapping:
+//! - T6: compact is no-op, not reclaim, and preserves resource high water.
 
 use vstd::prelude::*;
 
@@ -10,7 +13,13 @@ verus! {
 struct Image {
     db_base_offset: nat,
     db_size: nat,
+    page_table_offset: nat,
+    page_table_bytes: nat,
     page_count: nat,
+    allocated_bytes: nat,
+    high_water_mark: nat,
+    orphan_bytes_estimate: nat,
+    compact_recommended: bool,
     checksum: nat,
     last_tx_id: nat,
 }
@@ -29,6 +38,30 @@ proof fn compact_preserves_logical_size(image: Image)
     ensures
         compact(image).db_size == image.db_size,
         compact(image).page_count == image.page_count,
+{
+}
+
+proof fn compact_preserves_page_table_absence(image: Image)
+    ensures
+        compact(image).page_table_offset == image.page_table_offset,
+        compact(image).page_table_bytes == image.page_table_bytes,
+{
+}
+
+proof fn compact_preserves_resource_high_water(image: Image)
+    ensures
+        compact(image).allocated_bytes == image.allocated_bytes,
+        compact(image).high_water_mark == image.high_water_mark,
+        compact(image).orphan_bytes_estimate == image.orphan_bytes_estimate,
+        compact(image).compact_recommended == image.compact_recommended,
+{
+}
+
+proof fn compact_never_recommends_reclaim(image: Image)
+    requires
+        image.compact_recommended == false,
+    ensures
+        compact(image).compact_recommended == false,
 {
 }
 

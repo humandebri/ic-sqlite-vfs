@@ -20,12 +20,24 @@ jobs:
       - name: Install WASI SDK
         run: |
           sudo apt-get update
-          sudo apt-get install -y ripgrep wasi-libc clang wabt
+          sudo apt-get install -y ripgrep wasi-libc clang wabt unzip
           sudo ln -sf "$(command -v clang)" /usr/local/bin/wasm32-wasi-clang
+      - name: Install Verus
+        env:
+          VERUS_VERSION: 0.2026.05.05.d03e906
+          VERUS_SHA256: 09c0ef9f59995a9c0e26c2a47ef6a6fc437d67816aca1685d05b872519af426c
+        run: |
+          curl -L -o "$RUNNER_TEMP/verus.zip" "https://github.com/verus-lang/verus/releases/download/release/${VERUS_VERSION}/verus-${VERUS_VERSION}-x86-linux.zip"
+          echo "${VERUS_SHA256}  $RUNNER_TEMP/verus.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/verus.zip" -d "$RUNNER_TEMP/verus"
+          verus_bin="$(find "$RUNNER_TEMP/verus" -type f -name verus -perm -111 | head -n 1)"
+          test -n "$verus_bin"
+          echo "$(dirname "$verus_bin")" >> "$GITHUB_PATH"
+          "$verus_bin" --version
       - run: npm ci
       - run: cargo fmt --check
       - run: bash scripts/check-release-version.sh
-      - run: bash scripts/sqlite-critical-check.sh
+      - run: VERUS_REQUIRED=1 bash scripts/sqlite-critical-check.sh
       - run: cargo build --target wasm32-unknown-unknown
       - run: cargo build --target wasm32-unknown-unknown --features canister-api
       - run: npm run test:pocketic:compat

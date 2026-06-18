@@ -5,7 +5,7 @@
 
 use candid::CandidType;
 use ic_cdk::{api::performance_counter, init, post_upgrade, query, update};
-use ic_sqlite_vfs::bench_support::{memory, read_metrics, Superblock};
+use ic_sqlite_vfs::bench_support::{memory, read_metrics, stable_blob, Superblock};
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::db::statement::{ExecuteTextTextProfile, QueryOptionalStringTextProfile};
 use ic_sqlite_vfs::{Db, DefaultMemoryImpl, MemoryId, MemoryManager};
@@ -176,6 +176,33 @@ pub struct BenchGrowthProfileReport {
     pub commit_capacity: u64,
     pub commit_page_write: u64,
     pub commit_superblock_store: u64,
+}
+
+#[derive(CandidType, Deserialize)]
+pub struct BenchCapacityGrowthReport {
+    pub rows: u64,
+    pub writes: u64,
+    pub instructions: u64,
+    pub checksum: u64,
+    pub db_size: u64,
+    pub stable_pages: u64,
+    pub stable_bytes: u64,
+    pub db_size_before: u64,
+    pub db_size_after: u64,
+    pub db_base_offset_before: u64,
+    pub db_base_offset_after: u64,
+    pub page_table_offset_before: u64,
+    pub page_table_offset_after: u64,
+    pub page_table_bytes_before: u64,
+    pub page_table_bytes_after: u64,
+    pub stable_pages_before: u64,
+    pub stable_pages_after: u64,
+    pub allocated_bytes_before: u64,
+    pub allocated_bytes_after: u64,
+    pub orphan_bytes_estimate_before: u64,
+    pub orphan_bytes_estimate_after: u64,
+    pub stable_grow_calls: u64,
+    pub stable_grow_pages: u64,
 }
 
 #[init]
@@ -887,6 +914,80 @@ fn bench_growth_profile(rows: u32, writes: u32) -> Result<BenchGrowthProfileRepo
     })
 }
 
+#[update]
+fn bench_capacity_growth_guard(
+    rows: u32,
+    writes: u32,
+) -> Result<BenchCapacityGrowthReport, String> {
+    if rows == 0 {
+        return Err("rows must be positive".to_string());
+    }
+    validate_fixed_bench_key_rows(rows)?;
+    validate_fixed_bench_key_rows(writes)?;
+    seed_growth_rows(rows).map_err(error_text)?;
+
+    let before_block = Superblock::load().map_err(|error| error.to_string())?;
+    let before_stats = stable_blob::storage_stats().map_err(|error| error.to_string())?;
+    let before_pages = memory::size_pages();
+    read_metrics::reset_read_metrics();
+
+    let start = performance_counter(0);
+    for index in 0..writes {
+        Db::update(|connection| {
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 14];
+            let key = prefixed_key(b'g', index % rows, &mut key);
+            let value = write_value(index, &mut value);
+            let mut statement =
+                connection.prepare_cached("UPDATE growth_bench SET value = ?1 WHERE key = ?2")?;
+            statement.execute_text_text(&value, &key)?;
+            if connection.changes() != 1 {
+                return Err(ic_sqlite_vfs::DbError::NotFound);
+            }
+            Ok(())
+        })
+        .map_err(error_text)?;
+    }
+    let instructions = performance_counter(0).saturating_sub(start);
+
+    let after_block = Superblock::load().map_err(|error| error.to_string())?;
+    let after_stats = stable_blob::storage_stats().map_err(|error| error.to_string())?;
+    let after_pages = memory::size_pages();
+    let metrics = read_metrics::read_metrics_snapshot();
+    read_metrics::disable_read_metrics();
+
+    let report = BenchCapacityGrowthReport {
+        rows: u64::from(rows),
+        writes: u64::from(writes),
+        instructions,
+        checksum: u64::from(writes),
+        db_size: after_block.db_size,
+        stable_pages: after_pages,
+        stable_bytes: after_pages
+            .checked_mul(ic_sqlite_vfs::config::STABLE_PAGE_SIZE)
+            .ok_or_else(|| "stable byte size overflow".to_string())?,
+        db_size_before: before_block.db_size,
+        db_size_after: after_block.db_size,
+        db_base_offset_before: before_block.db_base_offset,
+        db_base_offset_after: after_block.db_base_offset,
+        page_table_offset_before: before_block.page_table_offset,
+        page_table_offset_after: after_block.page_table_offset,
+        page_table_bytes_before: before_stats.page_table_bytes,
+        page_table_bytes_after: after_stats.page_table_bytes,
+        stable_pages_before: before_pages,
+        stable_pages_after: after_pages,
+        allocated_bytes_before: before_stats.allocated_bytes,
+        allocated_bytes_after: after_stats.allocated_bytes,
+        orphan_bytes_estimate_before: before_stats.orphan_bytes_estimate,
+        orphan_bytes_estimate_after: after_stats.orphan_bytes_estimate,
+        stable_grow_calls: metrics.stable_grow_calls,
+        stable_grow_pages: metrics.stable_grow_pages,
+    };
+
+    verify_capacity_growth_report(&report)?;
+    Ok(report)
+}
+
 fn reset_bench_table(connection: &ic_sqlite_vfs::db::connection::Connection) -> Result<(), ic_sqlite_vfs::DbError> {
     connection.execute_batch(
         "DROP TABLE IF EXISTS bench;
@@ -932,6 +1033,58 @@ fn seed_bench_rows(rows: u32) -> Result<(), ic_sqlite_vfs::DbError> {
         }
         Ok(())
     })
+}
+
+fn verify_capacity_growth_report(report: &BenchCapacityGrowthReport) -> Result<(), String> {
+    if report.db_base_offset_after != report.db_base_offset_before {
+        return Err(format!(
+            "db_base_offset changed: before={} after={}",
+            report.db_base_offset_before, report.db_base_offset_after
+        ));
+    }
+    if report.db_size_after != report.db_size_before {
+        return Err(format!(
+            "db_size changed during existing-capacity updates: before={} after={}",
+            report.db_size_before, report.db_size_after
+        ));
+    }
+    if report.page_table_offset_before != 0 || report.page_table_offset_after != 0 {
+        return Err(format!(
+            "page table offset published: before={} after={}",
+            report.page_table_offset_before, report.page_table_offset_after
+        ));
+    }
+    if report.page_table_bytes_before != 0 || report.page_table_bytes_after != 0 {
+        return Err(format!(
+            "page table bytes allocated: before={} after={}",
+            report.page_table_bytes_before, report.page_table_bytes_after
+        ));
+    }
+    if report.stable_pages_after != report.stable_pages_before {
+        return Err(format!(
+            "stable pages grew during existing-capacity updates: before={} after={}",
+            report.stable_pages_before, report.stable_pages_after
+        ));
+    }
+    if report.allocated_bytes_after != report.allocated_bytes_before {
+        return Err(format!(
+            "allocated bytes grew during existing-capacity updates: before={} after={}",
+            report.allocated_bytes_before, report.allocated_bytes_after
+        ));
+    }
+    if report.orphan_bytes_estimate_after != report.orphan_bytes_estimate_before {
+        return Err(format!(
+            "orphan bytes estimate changed during existing-capacity updates: before={} after={}",
+            report.orphan_bytes_estimate_before, report.orphan_bytes_estimate_after
+        ));
+    }
+    if report.stable_grow_calls != 0 || report.stable_grow_pages != 0 {
+        return Err(format!(
+            "stable grow called during existing-capacity updates: calls={} pages={}",
+            report.stable_grow_calls, report.stable_grow_pages
+        ));
+    }
+    Ok(())
 }
 
 fn multi_get_sql(count: u32) -> Result<String, ic_sqlite_vfs::DbError> {

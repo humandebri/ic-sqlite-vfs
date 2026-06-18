@@ -1,14 +1,15 @@
 //! Verus model for superblock byte-level field offsets.
 //!
 //! This models the concrete byte offsets used by production encode/decode and
-//! proves that fixed-width fields are non-overlapping inside the 152-byte image.
+//! proves that fixed-width header fields are non-overlapping inside the 160-byte
+//! prefix before variable zero-extent entries.
 
 use vstd::prelude::*;
 
 verus! {
 
 spec fn encoded_len() -> nat {
-    152
+    160
 }
 
 spec fn field_start(index: nat) -> nat {
@@ -68,7 +69,7 @@ proof fn version_and_page_size_offsets()
 proof fn u64_field_offsets_are_eight_byte_aligned(index: nat)
     by (nonlinear_arith)
     requires
-        3 <= index < 20,
+        3 <= index < 21,
     ensures
         field_width(index) == 8,
         field_start(index) % 8 == 0,
@@ -79,7 +80,7 @@ proof fn u64_field_offsets_are_eight_byte_aligned(index: nat)
 proof fn adjacent_fields_do_not_overlap(index: nat)
     by (nonlinear_arith)
     requires
-        index < 19,
+        index < 20,
     ensures
         field_end(index) <= field_start(index + 1),
 {
@@ -88,7 +89,9 @@ proof fn adjacent_fields_do_not_overlap(index: nat)
 proof fn last_field_ends_at_encoded_len()
     ensures
         field_start(19) == 144,
-        field_end(19) == encoded_len(),
+        field_end(19) == 152,
+        field_start(20) == 152,
+        field_end(20) == encoded_len(),
 {
 }
 

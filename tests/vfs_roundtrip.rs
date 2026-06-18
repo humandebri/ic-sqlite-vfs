@@ -1,6 +1,7 @@
 use ic_sqlite_vfs::config::{SQLITE_CACHE_SIZE_KIB, SQLITE_PAGE_SIZE};
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::test_support::memory;
+use ic_sqlite_vfs::test_support::stable_blob;
 use ic_sqlite_vfs::test_support::{ffi, lock, vfs, Memory, Superblock};
 use ic_sqlite_vfs::DefaultMemoryImpl;
 use ic_sqlite_vfs::{params, Db, DbError, DbHandle};
@@ -681,7 +682,53 @@ fn export_import_roundtrip_restores_database_image() {
 
 #[test]
 #[serial]
-fn single_update_appends_less_than_full_database_image() {
+fn import_resets_superblock_schema_version_until_migrations_resync() {
+    reset();
+    let imported_migrations = [Migration {
+        version: 1,
+        sql: "CREATE TABLE imported(k TEXT PRIMARY KEY, v TEXT NOT NULL);",
+    }];
+    Db::migrate(&imported_migrations).unwrap();
+    Db::update(|connection| {
+        connection.execute_batch("INSERT INTO imported(k, v) VALUES ('answer', '42')")?;
+        Ok(())
+    })
+    .unwrap();
+    let db_size = Superblock::load().unwrap().db_size;
+    let checksum = Db::refresh_checksum().unwrap();
+    let image = Db::export_chunk(0, db_size).unwrap();
+
+    reset();
+    Db::migrate(&[
+        Migration {
+            version: 1,
+            sql: "CREATE TABLE stale(k TEXT PRIMARY KEY, v TEXT NOT NULL);",
+        },
+        Migration {
+            version: 2,
+            sql: "ALTER TABLE stale ADD COLUMN note TEXT;",
+        },
+    ])
+    .unwrap();
+    assert_eq!(Superblock::load().unwrap().schema_version, 2);
+
+    Db::begin_import(db_size, checksum).unwrap();
+    Db::import_chunk(0, &image).unwrap();
+    Db::finish_import().unwrap();
+    assert_eq!(Superblock::load().unwrap().schema_version, 0);
+
+    Db::migrate(&imported_migrations).unwrap();
+    assert_eq!(Superblock::load().unwrap().schema_version, 1);
+    let value = Db::query(|connection| {
+        connection.query_scalar::<String>("SELECT v FROM imported WHERE k = 'answer'", params![])
+    })
+    .unwrap();
+    assert_eq!(value, "42");
+}
+
+#[test]
+#[serial]
+fn repeated_existing_page_updates_do_not_grow_allocated_bytes() {
     reset();
     Db::migrate(&[Migration {
         version: 1,
@@ -701,23 +748,95 @@ fn single_update_appends_less_than_full_database_image() {
     .unwrap();
 
     let before = Superblock::load().unwrap();
-    let before_pages = memory::size_pages();
+    let before_stats = stable_blob::storage_stats().unwrap();
+    for round in 0..128 {
+        let value = format!("updated-{round:04}");
+        Db::update(|connection| {
+            connection.execute(
+                "UPDATE growth SET v = ?1 WHERE k = ?2",
+                params![value, "k00000042"],
+            )
+        })
+        .unwrap();
+    }
+    let after = Superblock::load().unwrap();
+    let after_stats = stable_blob::storage_stats().unwrap();
+
+    assert!(before.db_size > ic_sqlite_vfs::config::STABLE_PAGE_SIZE);
+    assert_eq!(after.db_size, before.db_size);
+    assert_eq!(after.page_count, before.page_count);
+    assert_eq!(after.db_base_offset, before.db_base_offset);
+    assert_eq!(after.page_table_offset, 0);
+    assert_eq!(after_stats.page_table_bytes, 0);
+    assert_eq!(after_stats.allocated_bytes, before_stats.allocated_bytes);
+    assert_eq!(
+        after_stats.orphan_bytes_estimate,
+        before_stats.orphan_bytes_estimate
+    );
+    assert_eq!(
+        memory::size_pages(),
+        before_stats.allocated_bytes / ic_sqlite_vfs::config::STABLE_PAGE_SIZE
+    );
+    assert!(!after_stats.compact_recommended);
+}
+
+#[test]
+#[serial]
+fn grow_truncate_reupdate_keeps_in_place_resource_shape() {
+    reset();
+    Db::migrate(&[Migration {
+        version: 1,
+        sql: "CREATE TABLE resource_shape(k INTEGER PRIMARY KEY, v BLOB NOT NULL);",
+    }])
+    .unwrap();
     Db::update(|connection| {
         connection.execute(
-            "UPDATE growth SET v = ?1 WHERE k = ?2",
-            params!["updated", "k00000042"],
+            "INSERT INTO resource_shape(k, v) VALUES (1, zeroblob(?1))",
+            params![i64::from(SQLITE_PAGE_SIZE) * 12],
         )
     })
     .unwrap();
-    let after_pages = memory::size_pages();
-    let appended_bytes = after_pages
-        .checked_sub(before_pages)
-        .unwrap()
-        .checked_mul(ic_sqlite_vfs::config::STABLE_PAGE_SIZE)
-        .unwrap();
 
-    assert!(before.db_size > ic_sqlite_vfs::config::STABLE_PAGE_SIZE);
-    assert!(appended_bytes < before.db_size);
+    let initial = Superblock::load().unwrap();
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE resource_shape SET v = zeroblob(?1) WHERE k = 1",
+            params![1],
+        )
+    })
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE resource_shape SET v = zeroblob(?1) WHERE k = 1",
+            params![i64::from(SQLITE_PAGE_SIZE) * 12],
+        )
+    })
+    .unwrap();
+
+    let before_update = Superblock::load().unwrap();
+    let before_stats = stable_blob::storage_stats().unwrap();
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE resource_shape SET v = ?1 WHERE k = 1",
+            params![vec![7_u8; 256]],
+        )
+    })
+    .unwrap();
+    let after = Superblock::load().unwrap();
+    let after_stats = stable_blob::storage_stats().unwrap();
+
+    assert_eq!(before_update.db_base_offset, initial.db_base_offset);
+    assert_eq!(after.db_size, before_update.db_size);
+    assert_eq!(after.page_count, before_update.page_count);
+    assert_eq!(after.db_base_offset, initial.db_base_offset);
+    assert_eq!(after.page_table_offset, 0);
+    assert_eq!(after_stats.page_table_bytes, 0);
+    assert_eq!(after_stats.allocated_bytes, before_stats.allocated_bytes);
+    assert_eq!(
+        after_stats.orphan_bytes_estimate,
+        before_stats.orphan_bytes_estimate
+    );
+    assert!(!after_stats.compact_recommended);
 }
 
 #[test]
@@ -742,8 +861,12 @@ fn compact_preserves_logical_database_contents() {
 
     let checksum_before = Db::db_checksum().unwrap();
     let page_count_before = Superblock::load().unwrap().page_count;
-    Db::compact().unwrap();
+    let stats_before = stable_blob::storage_stats().unwrap();
+    for _ in 0..3 {
+        Db::compact().unwrap();
+    }
     let block = Superblock::load().unwrap();
+    let stats_after = stable_blob::storage_stats().unwrap();
     assert_eq!(block.page_table_offset, 0);
     let checksum_after = Db::db_checksum().unwrap();
     let value = Db::query(|connection| {
@@ -757,6 +880,13 @@ fn compact_preserves_logical_database_contents() {
 
     assert_eq!(checksum_after, checksum_before);
     assert_eq!(block.page_count, page_count_before);
+    assert_eq!(stats_after.page_table_bytes, 0);
+    assert_eq!(stats_after.allocated_bytes, stats_before.allocated_bytes);
+    assert_eq!(
+        stats_after.orphan_bytes_estimate,
+        stats_before.orphan_bytes_estimate
+    );
+    assert!(!stats_after.compact_recommended);
     assert_eq!(value, "value-0042");
     assert_eq!(count, 600);
     assert_eq!(Db::integrity_check().unwrap(), "ok");

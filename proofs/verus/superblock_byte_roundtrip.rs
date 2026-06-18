@@ -24,7 +24,7 @@ spec fn two32() -> nat {
 }
 
 spec fn encoded_len() -> nat {
-    152
+    160
 }
 
 spec fn field_start(index: nat) -> nat {
@@ -92,9 +92,9 @@ spec fn decode_u64(bytes: Seq<nat>) -> nat
 
 spec fn zero_meta_checksum(fields: Seq<nat>) -> Seq<nat>
     recommends
-        fields.len() == 20,
+        fields.len() == 21,
 {
-    fields.update(19, 0)
+    fields.update(20, 0)
 }
 
 proof fn encode_u32_has_four_bytes(value: nat)
@@ -177,7 +177,7 @@ proof fn u64_little_endian_round_trip(value: nat)
 proof fn field_ranges_do_not_overlap(left: nat, right: nat)
     by (nonlinear_arith)
     requires
-        left < right < 20,
+        left < right < 21,
     ensures
         field_end(left) <= field_start(right),
         field_end(right) <= encoded_len(),
@@ -186,12 +186,12 @@ proof fn field_ranges_do_not_overlap(left: nat, right: nat)
 
 proof fn zero_meta_checksum_changes_only_checksum_field(fields: Seq<nat>, index: nat)
     requires
-        fields.len() == 20,
-        index < 20,
-        index != 19,
+        fields.len() == 21,
+        index < 21,
+        index != 20,
     ensures
         zero_meta_checksum(fields)[index as int] == fields[index as int],
-        zero_meta_checksum(fields)[19] == 0,
+        zero_meta_checksum(fields)[20] == 0,
 {
 }
 

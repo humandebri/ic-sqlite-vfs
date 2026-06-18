@@ -98,6 +98,12 @@ impl Superblock {
         }
         let mut bytes = [0_u8; ENCODED_LEN];
         memory::read_preallocated(SUPERBLOCK_OFFSET, &mut bytes)?;
+        let Ok(zero_extent_count) = usize::try_from(u64::from_le_bytes(eight(&bytes, 144))) else {
+            return Err(StableMemoryError::MetaChecksumMismatch);
+        };
+        if zero_extent_count > MAX_ZERO_EXTENTS {
+            return Err(StableMemoryError::MetaChecksumMismatch);
+        }
         let block = Self::decode(&bytes);
         if block.magic != MAGIC {
             return Err(StableMemoryError::ForeignStableMemoryImage);
@@ -493,6 +499,24 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_rejects_raw_zero_extent_count_above_limit() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let block = Superblock::fresh();
+        let mut encoded = block.encode();
+        encoded[144..152].copy_from_slice(&((MAX_ZERO_EXTENTS as u64) + 1).to_le_bytes());
+        crate::stable::memory::write(SUPERBLOCK_OFFSET, &encoded).unwrap();
+        clear_superblock_cache();
+
+        assert!(matches!(
+            Superblock::load(),
+            Err(StableMemoryError::MetaChecksumMismatch)
+        ));
     }
 
     fn assert_u64_field_offsets(

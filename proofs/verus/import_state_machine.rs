@@ -2,6 +2,10 @@
 //!
 //! The model covers begin, sequential chunks, incomplete finish rejection,
 //! abort, and update rejection while importing.
+//!
+//! Capacity proof mapping:
+//! - T7: import is an explicit capacity exception; checksum mismatch preserves
+//!   the committed image instead of publishing staging bytes.
 
 use vstd::prelude::*;
 
@@ -15,6 +19,19 @@ struct ImportState {
     expected_checksum: nat,
 }
 
+struct CommittedImage {
+    db_base_offset: nat,
+    db_size: nat,
+    checksum: nat,
+    allocated_bytes: nat,
+    high_water_mark: nat,
+}
+
+struct ImportMachine {
+    committed: CommittedImage,
+    import: ImportState,
+}
+
 spec fn idle() -> ImportState {
     ImportState {
         importing: false,
@@ -22,6 +39,30 @@ spec fn idle() -> ImportState {
         total_size: 0,
         base_offset: 0,
         expected_checksum: 0,
+    }
+}
+
+spec fn finish_import_machine(machine: ImportMachine, actual_checksum: nat) -> Option<ImportMachine> {
+    if machine.import.importing && machine.import.written_until == machine.import.total_size {
+        if actual_checksum == machine.import.expected_checksum {
+            Some(ImportMachine {
+                committed: CommittedImage {
+                    db_base_offset: machine.import.base_offset,
+                    db_size: machine.import.total_size,
+                    checksum: actual_checksum,
+                    allocated_bytes: machine.committed.allocated_bytes,
+                    high_water_mark: machine.committed.high_water_mark,
+                },
+                import: idle(),
+            })
+        } else {
+            Some(ImportMachine {
+                committed: machine.committed,
+                import: idle(),
+            })
+        }
+    } else {
+        None
     }
 }
 
@@ -142,6 +183,38 @@ proof fn checksum_mismatch_finish_clears_importing(state: ImportState, actual_ch
         finish_import_checksum_mismatch(state, actual_checksum),
         finish_import_state(state, actual_checksum) == Some(idle()),
         !idle().importing,
+{
+}
+
+proof fn checksum_mismatch_preserves_committed_image(
+    machine: ImportMachine,
+    actual_checksum: nat,
+    next: ImportMachine,
+)
+    requires
+        machine.import.importing,
+        machine.import.written_until == machine.import.total_size,
+        actual_checksum != machine.import.expected_checksum,
+        finish_import_machine(machine, actual_checksum) == Some(next),
+    ensures
+        next.committed == machine.committed,
+        !next.import.importing,
+{
+}
+
+proof fn checksum_match_publishes_staging_image(
+    machine: ImportMachine,
+    next: ImportMachine,
+)
+    requires
+        machine.import.importing,
+        machine.import.written_until == machine.import.total_size,
+        finish_import_machine(machine, machine.import.expected_checksum) == Some(next),
+    ensures
+        next.committed.db_base_offset == machine.import.base_offset,
+        next.committed.db_size == machine.import.total_size,
+        next.committed.checksum == machine.import.expected_checksum,
+        !next.import.importing,
 {
 }
 

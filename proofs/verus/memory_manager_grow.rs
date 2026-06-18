@@ -8,7 +8,7 @@ use vstd::prelude::*;
 
 verus! {
 
-spec fn bucket_size_in_pages() -> nat {
+spec fn default_bucket_size_in_pages() -> nat {
     128
 }
 
@@ -24,6 +24,10 @@ spec fn u64_max() -> nat {
     18_446_744_073_709_551_615
 }
 
+spec fn u16_max() -> nat {
+    65_535
+}
+
 spec fn div_ceil(numerator: nat, denominator: nat) -> nat {
     if numerator == 0 {
         0
@@ -32,8 +36,8 @@ spec fn div_ceil(numerator: nat, denominator: nat) -> nat {
     }
 }
 
-spec fn num_buckets_needed(pages: nat) -> nat {
-    div_ceil(pages, bucket_size_in_pages())
+spec fn num_buckets_needed(pages: nat, bucket_size: nat) -> nat {
+    div_ceil(pages, bucket_size)
 }
 
 spec fn checked_add(left: nat, right: nat) -> Option<nat> {
@@ -52,44 +56,51 @@ spec fn checked_sub(left: nat, right: nat) -> Option<nat> {
     }
 }
 
-spec fn pages_needed_for_buckets(target_buckets: nat) -> nat {
-    buckets_offset_in_pages() + bucket_size_in_pages() * target_buckets
+spec fn pages_needed_for_buckets(target_buckets: nat, bucket_size: nat) -> nat {
+    buckets_offset_in_pages() + bucket_size * target_buckets
 }
 
-proof fn div_ceil_monotonic(left: nat, right: nat)
+proof fn div_ceil_monotonic(left: nat, right: nat, bucket_size: nat)
     by (nonlinear_arith)
     requires
         left <= right,
+        bucket_size > 0,
     ensures
-        div_ceil(left, bucket_size_in_pages()) <= div_ceil(right, bucket_size_in_pages()),
+        div_ceil(left, bucket_size) <= div_ceil(right, bucket_size),
 {
 }
 
-proof fn bucket_need_is_monotonic(old_size: nat, new_size: nat)
+proof fn bucket_need_is_monotonic(old_size: nat, new_size: nat, bucket_size: nat)
     requires
         old_size <= new_size,
+        bucket_size > 0,
     ensures
-        num_buckets_needed(old_size) <= num_buckets_needed(new_size),
+        num_buckets_needed(old_size, bucket_size) <= num_buckets_needed(new_size, bucket_size),
 {
-    div_ceil_monotonic(old_size, new_size);
+    div_ceil_monotonic(old_size, new_size, bucket_size);
 }
 
 proof fn checked_add_pages_implies_bucket_subtraction_safe(
     old_size: nat,
     pages: nat,
     new_size: nat,
+    bucket_size: nat,
 )
     requires
         checked_add(old_size, pages) == Some(new_size),
+        bucket_size > 0,
     ensures
         old_size <= new_size,
-        num_buckets_needed(old_size) <= num_buckets_needed(new_size),
+        num_buckets_needed(old_size, bucket_size) <= num_buckets_needed(new_size, bucket_size),
         matches!(
-            checked_sub(num_buckets_needed(new_size), num_buckets_needed(old_size)),
+            checked_sub(
+                num_buckets_needed(new_size, bucket_size),
+                num_buckets_needed(old_size, bucket_size),
+            ),
             Some(_),
         ),
 {
-    bucket_need_is_monotonic(old_size, new_size);
+    bucket_need_is_monotonic(old_size, new_size, bucket_size);
 }
 
 proof fn target_bucket_count_within_max(
@@ -110,8 +121,23 @@ proof fn pages_needed_for_max_buckets_fits_u64(target_allocated_buckets: nat)
     by (nonlinear_arith)
     requires
         target_allocated_buckets <= max_num_buckets(),
+        default_bucket_size_in_pages() <= u16_max(),
     ensures
-        pages_needed_for_buckets(target_allocated_buckets) <= u64_max(),
+        pages_needed_for_buckets(target_allocated_buckets, default_bucket_size_in_pages())
+            <= u64_max(),
+{
+}
+
+proof fn pages_needed_for_positive_bucket_size_fits_u64(
+    target_allocated_buckets: nat,
+    bucket_size: nat,
+)
+    by (nonlinear_arith)
+    requires
+        target_allocated_buckets <= max_num_buckets(),
+        0 < bucket_size <= u16_max(),
+    ensures
+        pages_needed_for_buckets(target_allocated_buckets, bucket_size) <= u64_max(),
 {
 }
 
@@ -123,10 +149,12 @@ proof fn backing_grow_delta_is_safe(current_pages: nat, pages_needed: nat)
 {
 }
 
-proof fn backing_pages_cover_target_buckets(target_allocated_buckets: nat)
+proof fn backing_pages_cover_target_buckets(target_allocated_buckets: nat, bucket_size: nat)
+    requires
+        bucket_size > 0,
     ensures
-        pages_needed_for_buckets(target_allocated_buckets)
-            == buckets_offset_in_pages() + bucket_size_in_pages() * target_allocated_buckets,
+        pages_needed_for_buckets(target_allocated_buckets, bucket_size)
+            == buckets_offset_in_pages() + bucket_size * target_allocated_buckets,
 {
 }
 

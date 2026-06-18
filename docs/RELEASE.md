@@ -27,8 +27,9 @@ wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm
 `wasm-objdump` の import は `ic0.*` のみ許可する。`env.*` が出た場合は release しない。
 GitHub Release artifact は `sqlite-precompiled,canister-api` の release profile
 で build した `target/pocketic/ic_sqlite_vfs.wasm` に統一する。
-`scripts/sqlite-critical-check.sh` は基礎検査と PocketIC regression に限定し、
-compat、perf、package contents は workflow と release gate で明示実行する。
+`scripts/sqlite-critical-check.sh` は基礎検査、Verus proof、PocketIC regression、
+PocketIC performance/capacity regression を実行する。compat と package
+contents は workflow と release gate で明示実行する。
 
 `cargo package --list` では `docs/PUBLIC_API_2_0.snapshot` と release
 check scripts を含め、`target/`、`node_modules/`、`package-lock.json` を

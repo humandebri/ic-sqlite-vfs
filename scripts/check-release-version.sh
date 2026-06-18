@@ -160,6 +160,22 @@ for workflow in .github/workflows/ci.yml .github/workflows/release.yml; do
     echo "$workflow does not run default-feature canister-api wasm build" >&2
     exit 1
   fi
+  if ! grep -Fxq "      - run: VERUS_REQUIRED=1 bash scripts/sqlite-critical-check.sh" "$workflow"; then
+    echo "$workflow does not require Verus proofs in sqlite-critical-check.sh" >&2
+    exit 1
+  fi
+  if ! grep -Fq "VERUS_VERSION: 0.2026.05.05.d03e906" "$workflow"; then
+    echo "$workflow does not install the pinned Verus version" >&2
+    exit 1
+  fi
+  if ! grep -Fq "VERUS_SHA256: 09c0ef9f59995a9c0e26c2a47ef6a6fc437d67816aca1685d05b872519af426c" "$workflow"; then
+    echo "$workflow does not pin the Verus x86-linux archive checksum" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'verus-${VERUS_VERSION}-x86-linux.zip' "$workflow"; then
+    echo "$workflow does not download the Verus x86-linux archive" >&2
+    exit 1
+  fi
   if ! grep -Fq "npm run test:pocketic:compat" "$workflow"; then
     echo "$workflow does not run npm run test:pocketic:compat" >&2
     exit 1

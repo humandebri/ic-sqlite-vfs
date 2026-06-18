@@ -12,7 +12,7 @@ spec fn wasm_page_size() -> nat {
     65_536
 }
 
-spec fn bucket_size_in_pages() -> nat {
+spec fn default_bucket_size_in_pages() -> nat {
     128
 }
 
@@ -28,12 +28,16 @@ spec fn u64_max() -> nat {
     18_446_744_073_709_551_615
 }
 
-spec fn bucket_size_in_bytes() -> nat {
-    bucket_size_in_pages() * wasm_page_size()
+spec fn u16_max() -> nat {
+    65_535
 }
 
-spec fn max_managed_pages() -> nat {
-    max_num_buckets() * bucket_size_in_pages()
+spec fn bucket_size_in_bytes(bucket_size: nat) -> nat {
+    bucket_size * wasm_page_size()
+}
+
+spec fn max_managed_pages(bucket_size: nat) -> nat {
+    max_num_buckets() * bucket_size
 }
 
 spec fn num_buckets_needed(pages: nat, bucket_size: nat) -> nat {
@@ -81,8 +85,8 @@ spec fn grow_pages_needed(target_allocated_buckets: nat, bucket_size: nat) -> na
     buckets_offset_in_pages() + bucket_size * target_allocated_buckets
 }
 
-spec fn bucket_address(bucket_id: nat) -> nat {
-    buckets_offset_in_pages() * wasm_page_size() + bucket_size_in_bytes() * bucket_id
+spec fn bucket_address(bucket_id: nat, bucket_size: nat) -> nat {
+    buckets_offset_in_pages() * wasm_page_size() + bucket_size_in_bytes(bucket_size) * bucket_id
 }
 
 spec fn range_end(address: nat, length: nat) -> Option<nat> {
@@ -107,35 +111,39 @@ spec fn virtual_segment_contains(
 
 proof fn bucket_size_is_8_mib()
     ensures
-        bucket_size_in_bytes() == 8_388_608,
+        bucket_size_in_bytes(default_bucket_size_in_pages()) == 8_388_608,
 {
 }
 
 proof fn max_managed_memory_is_4m_pages()
     ensures
-        max_managed_pages() == 4_194_304,
+        max_managed_pages(default_bucket_size_in_pages()) == 4_194_304,
 {
 }
 
 proof fn bucket_zero_starts_after_manager_page()
     ensures
-        bucket_address(0) == 65_536,
+        bucket_address(0, default_bucket_size_in_pages()) == 65_536,
 {
 }
 
-proof fn bucket_addresses_are_monotonic(left: nat, right: nat)
+proof fn bucket_addresses_are_monotonic(left: nat, right: nat, bucket_size: nat)
     by (nonlinear_arith)
     requires
         left <= right,
+        bucket_size > 0,
     ensures
-        bucket_address(left) <= bucket_address(right),
+        bucket_address(left, bucket_size) <= bucket_address(right, bucket_size),
 {
 }
 
-proof fn bucket_address_stride(bucket_id: nat)
+proof fn bucket_address_stride(bucket_id: nat, bucket_size: nat)
     by (nonlinear_arith)
+    requires
+        bucket_size > 0,
     ensures
-        bucket_address(bucket_id + 1) == bucket_address(bucket_id) + bucket_size_in_bytes(),
+        bucket_address(bucket_id + 1, bucket_size)
+            == bucket_address(bucket_id, bucket_size) + bucket_size_in_bytes(bucket_size),
 {
 }
 
@@ -197,17 +205,27 @@ proof fn segment_contains_implies_nonoverflowing_ends(
 {
 }
 
-proof fn managed_pages_fit_in_u64()
+proof fn default_managed_pages_fit_in_u64()
     by (nonlinear_arith)
     ensures
-        max_managed_pages() < u64_max(),
+        max_managed_pages(default_bucket_size_in_pages()) < u64_max(),
+{
+}
+
+proof fn bucket_count_covers_pages(pages: nat, bucket_size: nat)
+    by (nonlinear_arith)
+    requires
+        bucket_size > 0,
+    ensures
+        pages <= num_buckets_needed(pages, bucket_size) * bucket_size,
 {
 }
 
 proof fn default_bucket_count_covers_pages(pages: nat)
     by (nonlinear_arith)
     ensures
-        pages <= num_buckets_needed(pages, bucket_size_in_pages()) * bucket_size_in_pages(),
+        pages <= num_buckets_needed(pages, default_bucket_size_in_pages())
+            * default_bucket_size_in_pages(),
 {
 }
 
@@ -218,30 +236,44 @@ proof fn grow_success_keeps_target_within_max(
     target: nat,
 )
     requires
-        grow_target_allocated_buckets(old_size, pages, allocated_buckets, bucket_size_in_pages())
+        grow_target_allocated_buckets(
+            old_size,
+            pages,
+            allocated_buckets,
+            default_bucket_size_in_pages(),
+        )
             == Some(target),
     ensures
         target <= max_num_buckets(),
 {
 }
 
-proof fn grow_success_pages_needed_fit_u64(
-    target: nat,
-)
+proof fn grow_success_pages_needed_fit_u64(target: nat, bucket_size: nat)
+    by (nonlinear_arith)
+    requires
+        target <= max_num_buckets(),
+        bucket_size > 0,
+        bucket_size <= u16_max(),
+    ensures
+        grow_pages_needed(target, bucket_size) < u64_max(),
+{
+}
+
+proof fn default_grow_success_pages_needed_fit_u64(target: nat)
     by (nonlinear_arith)
     requires
         target <= max_num_buckets(),
     ensures
-        grow_pages_needed(target, bucket_size_in_pages()) < u64_max(),
+        grow_pages_needed(target, default_bucket_size_in_pages()) < u64_max(),
 {
 }
 
-proof fn grow_success_backing_pages_cover_target(
-    target: nat,
-)
+proof fn grow_success_backing_pages_cover_target(target: nat, bucket_size: nat)
+    requires
+        bucket_size > 0,
     ensures
-        grow_pages_needed(target, bucket_size_in_pages())
-            == buckets_offset_in_pages() + bucket_size_in_pages() * target,
+        grow_pages_needed(target, bucket_size)
+            == buckets_offset_in_pages() + bucket_size * target,
 {
 }
 
