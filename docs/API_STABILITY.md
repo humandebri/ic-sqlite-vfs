@@ -125,16 +125,17 @@ trap rollback. Dirty pages are written before the superblock is published; if a
 panic/trap occurs after those writes, the implementation relies on IC-compatible
 rollback of all stable-memory writes from the current message execution. A
 normal commit must therefore perform no inter-canister call, `await`, or
-`ic0.call_perform`. The grep-based await-free CI check is a guard for this
+`ic0.call_perform`. The grep-based runtime-contract CI check is a guard for this
 contract, not a standalone proof.
 When the final image fits in existing stable-memory capacity, repeated normal
 commits must not increase `allocated_bytes` or the high-water mark. When a
 normal commit exceeds current capacity, it may grow stable memory only to the
 stable-page-rounded end required by the final image and dirty page writes.
 Truncate stores whole-page tail ranges as v8 zero-mask extents. Dirty writes
-materialize pages by removing those ranges, and non-page-boundary truncate
-physically zeroes only the boundary page tail. This prevents stale physical
-bytes from becoming logical data without reintroducing page tables. Pathological
+materialize pages by removing those ranges. Non-page-boundary truncate marks the
+boundary page dirty, zero-fills its tail, and physically publishes that page at
+commit. This prevents stale physical bytes from becoming logical data without
+reintroducing page tables. Pathological
 truncate sequences that exceed the fixed zero-extent metadata limit fail with a
 zero-extent-limit error; they must not fall back to append-only rewriting.
 `db_refresh_checksum` and `db_refresh_checksum_chunk` are the only operations

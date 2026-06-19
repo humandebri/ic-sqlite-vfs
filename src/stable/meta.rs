@@ -108,6 +108,11 @@ impl Superblock {
         if block.magic != MAGIC {
             return Err(StableMemoryError::ForeignStableMemoryImage);
         }
+        if block.version != VERSION {
+            return Err(StableMemoryError::UnsupportedLayoutVersion(u64::from(
+                block.version,
+            )));
+        }
         if block.layout_version != CURRENT_LAYOUT_VERSION {
             return Err(StableMemoryError::UnsupportedLayoutVersion(
                 block.layout_version,
@@ -133,6 +138,9 @@ impl Superblock {
         block.version = VERSION;
         block.meta_checksum = block.compute_meta_checksum();
         let encoded = block.encode();
+        // The zero-extent count bounds the encoded metadata. Bytes from an older
+        // longer extent list may remain after this write, but load/checksum
+        // ignore everything past the current count.
         memory::write(SUPERBLOCK_OFFSET, &encoded[..block.encoded_len()])?;
         cache_superblock_owned(block);
         Ok(())
@@ -144,6 +152,9 @@ impl Superblock {
         block.version = VERSION;
         block.meta_checksum = block.compute_meta_checksum();
         let encoded = block.encode();
+        // The zero-extent count bounds the encoded metadata. Bytes from an older
+        // longer extent list may remain after this write, but load/checksum
+        // ignore everything past the current count.
         memory::write_prechecked(SUPERBLOCK_OFFSET, &encoded[..block.encoded_len()])?;
         cache_superblock_owned(block);
         Ok(())
@@ -529,6 +540,18 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn load_rejects_older_superblock_version() {
+        assert_rejects_superblock_version(7);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_rejects_newer_superblock_version() {
+        assert_rejects_superblock_version(9);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn commit_db_image_rejects_over_limit_zero_extents_without_publish() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
@@ -617,6 +640,23 @@ mod tests {
             prop_assert_eq!(actual, expected);
         }
         Ok(())
+    }
+
+    fn assert_rejects_superblock_version(version: u32) {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let mut block = Superblock::fresh();
+        block.version = version;
+        block.meta_checksum = block.compute_meta_checksum();
+        let encoded = block.encode();
+        crate::stable::memory::write(SUPERBLOCK_OFFSET, &encoded[..block.encoded_len()]).unwrap();
+        clear_superblock_cache();
+
+        assert!(matches!(
+            Superblock::load(),
+            Err(StableMemoryError::UnsupportedLayoutVersion(found)) if found == u64::from(version)
+        ));
     }
 
     fn block_from_fields(fields: [u64; 16]) -> Superblock {

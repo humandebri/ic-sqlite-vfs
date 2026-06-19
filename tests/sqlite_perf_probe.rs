@@ -3,9 +3,9 @@
 //! 通常CIからは除外し、DBサイズ増加時の更新・読取・checksum傾向を手元で確認する。
 
 use ic_sqlite_vfs::db::migrate::Migration;
-#[cfg(debug_assertions)]
 use ic_sqlite_vfs::test_support::lock;
 use ic_sqlite_vfs::test_support::memory;
+#[cfg(debug_assertions)]
 use ic_sqlite_vfs::test_support::read_metrics;
 use ic_sqlite_vfs::test_support::Superblock;
 use ic_sqlite_vfs::{params, Db};

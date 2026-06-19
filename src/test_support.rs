@@ -35,6 +35,7 @@ pub mod stable_blob {
     pub use crate::sqlite_vfs::stable_blob::{storage_stats, ChecksumRefresh, StorageStats};
 }
 
+#[cfg(any(test, debug_assertions, feature = "bench-profile"))]
 pub mod read_metrics {
     pub use crate::read_metrics::{
         disable_read_metrics, read_metrics_snapshot, reset_read_metrics,

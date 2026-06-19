@@ -175,7 +175,7 @@ run_verus_proofs() {
 
 trap cleanup_run_dir EXIT
 
-log "checking await-free canister API"
+log "checking runtime-contract canister API"
 bash scripts/check-no-await.sh
 
 log "checking bidi control characters"

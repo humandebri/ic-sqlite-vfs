@@ -16,9 +16,10 @@ Public update APIs must be synchronous. `Db::update` accepts only
 future. `await`, inter-canister calls, and `ic0.call_perform` inside a
 transaction are forbidden.
 
-CI rejects `.await` and `async fn` under `src` through
-`scripts/check-no-await.sh`. This is a guardrail, not a complete mechanical
-proof that no future code path can split commit across message executions.
+CI rejects `.await`, `async fn`, `call_perform`, `ic_cdk::call`, and `call_raw`
+under `src` through `scripts/check-no-await.sh`. This is a guardrail, not a
+complete mechanical proof that no future code path can split commit across
+message executions.
 
 SQLite `xWrite` and `xTruncate` calls inside a transaction do not write
 directly to stable memory. They accumulate page-sized changes in a heap overlay.

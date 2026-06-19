@@ -4,7 +4,6 @@
 //! coexist with other stable structures managed by the same MemoryManager.
 
 use crate::config::STABLE_PAGE_SIZE;
-#[cfg(any(test, debug_assertions))]
 use crate::stable::memory_manager::{MemoryId, MemoryManager};
 use crate::stable::memory_manager::{MemoryIdentity, VirtualMemory};
 use crate::stable::raw_memory::{DefaultMemoryImpl, Memory};
@@ -370,19 +369,16 @@ fn debug_assert_capacity(memory: &DbMemory, offset: u64, len: usize, operation: 
     }
 }
 
-#[cfg(any(test, debug_assertions))]
 pub fn reset_for_tests() {
     clear_initialization();
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
     clear_failpoint();
 }
 
-#[cfg(any(test, debug_assertions))]
 pub fn set_next_context_id_for_tests(value: u64) {
     NEXT_CONTEXT_ID.with(|next| next.set(value));
 }
 
-#[cfg(any(test, debug_assertions))]
 pub(crate) fn clear_initialization() {
     DB_MEMORY.with(|memory| memory.borrow_mut().clear());
     REGISTERED_MEMORY.with(|memory| memory.borrow_mut().clear());
@@ -422,7 +418,6 @@ pub(crate) fn clear_failed_initialization(context: ContextId) {
     crate::stable::meta::clear_superblock_cache();
 }
 
-#[cfg(debug_assertions)]
 pub fn snapshot_for_tests() -> Vec<u8> {
     let len = usize::try_from(size_pages().saturating_mul(STABLE_PAGE_SIZE))
         .expect("test memory size fits usize");
@@ -431,7 +426,6 @@ pub fn snapshot_for_tests() -> Vec<u8> {
     out
 }
 
-#[cfg(debug_assertions)]
 pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
     reset_for_tests();
     let memory = memory_for_tests();
@@ -446,7 +440,6 @@ pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
     memory
 }
 
-#[cfg(any(test, debug_assertions))]
 pub fn memory_for_tests() -> DbMemory {
     MemoryManager::init(DefaultMemoryImpl::default()).get(MemoryId::new(42))
 }

@@ -46,7 +46,8 @@ append boundary 以降へ書き、最後に superblock を publish する。旧�
 `allocated_bytes` 以下なら、commit は existing-capacity commit である。
 
 **D4: truncate zero mask.** truncate は非 active whole-page tail を
-`zero_extents` へ追加する。後続 dirty write は該当 page の mask を解除する。
+`zero_extents` へ追加する。非 page 境界 truncate は boundary page tail を dirty
+page 上で zero-fill し、commit 時に物理反映する。後続 dirty write は該当 page の mask を解除する。
 追加後の extent は正規化され、空 range、重複、隣接、逆順を持たない。
 上限判定は正規化後の extent 数で行う。上限超過はエラーであり、append-only
 fallback しない。
@@ -79,7 +80,8 @@ commit は新しい image copy や page table を append しない。
 `high_water_mark`、`page_table_bytes` は不変である。
 
 **T5: truncate tail is not stale logical data.** D4 により truncated whole-page
-tail は active page ではなく、zero mask により論理読取から隠される。後続
+tail は active page ではなく、zero mask により論理読取から隠される。boundary
+page tail は dirty page として zero-fill 後に publish される。後続
 write は mask を解除して materialize する。truncate tail が既存 extent と
 重複または隣接する場合は merge され、上限判定は merge 後の正規化済み列に
 対して行う。正規化後も zero extent 上限を超える場合は publish せずエラーに
@@ -99,7 +101,7 @@ committed image を維持し、staging bytes は high-water slack として残�
 `await`、`ic0.call_perform` を含まない場合、A3 と A4 により成功時は全 write
 が確定し、trap 時は当該 message の write が破棄される。したがって message
 境界の観測者に対して commit は全か無かに見える。この原子性は VFS 自前の
-shadow paging ではなく IC 基盤層に依存する。await-free grep は guard であり、
+shadow paging ではなく IC 基盤層に依存する。runtime-contract grep は guard であり、
 この原子性の完全証明ではない。
 
 ## 4. 証明対応
@@ -112,7 +114,7 @@ shadow paging ではなく IC 基盤層に依存する。await-free grep は gua
 | T5 | `truncate_zero_extents_are_normalized`, `truncate_zero_extents_mask_matches_model`, `truncate_zero_extents_publish_success`, `truncate_zero_extent_limit_error_blocks_publish`; zero extent external-body lemmas are trusted | `zero_extent_limit_is_rejected_without_fallback`, independent normalizer property tests, normalized truncate/limit tests, truncate/grow roundtrip tests |
 | T6 | `compact_preserves_resource_high_water`, `v8_storage_stats_never_recommend_compact` | `compact_preserves_logical_database_contents`, repeated compact resource checks |
 | T7 | `checksum_mismatch_preserves_committed_image`, `checksum_match_publishes_staging_image`, `successful_import_resets_schema_version`, `complete_import_may_increase_resource_high_water` | `failed_import_preserves_existing_database`, import checksum and cross-version tests |
-| T8 | 対象外。IC公式仕様を公理として採用 | await-free canister API check, failpoint rollback tests, PocketIC upgrade/regression |
+| T8 | 対象外。IC公式仕様を公理として採用 | runtime-contract canister API check, failpoint rollback tests, PocketIC upgrade/regression |
 
 ## 5. 境界
 
