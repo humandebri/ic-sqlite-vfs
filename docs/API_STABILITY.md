@@ -93,17 +93,20 @@ The `2.0` stable-memory image uses:
 ```text
 selected virtual memory:
   offset 0..64KiB      superblock
-  offset 64KiB..       in-place SQLite image bytes
+  offset 64KiB..       fresh/normal in-place SQLite image bytes
 ```
 
 The superblock stores logical size, transaction id, last verified checksum,
 import state, and flags. Page-table fields remain encoded for metadata
 compatibility, but normal v8 operation sets `page_table_offset = 0`.
 The resource state exposed through `db_meta` is part of the layout contract:
-`db_size` is the logical image length, `db_base_offset` is the fixed physical
-base, `allocated_bytes` is the selected stable-memory high-water mark,
-`orphan_bytes_estimate` is high-water slack outside `SUPERBLOCK_SIZE + db_size`,
-and `page_table_bytes` is always `0` for v8.
+`db_size` is the logical image length, `db_base_offset` is the current physical
+base, `active_bytes` is the logical active payload size
+`SUPERBLOCK_SIZE + db_size`, `allocated_bytes` is the selected stable-memory
+high-water mark, `orphan_bytes_estimate` is high-water slack outside
+`active_bytes`, and `page_table_bytes` is always `0` for v8. `active_bytes` is
+not the physical end offset `db_base_offset + db_size`; this matters after
+import, because import can publish an appended `db_base_offset`.
 
 Logical SQLite page `n` lives at:
 
@@ -117,6 +120,13 @@ stable-memory offsets, advance `last_tx_id`, and may set `checksum_stale`.
 Normal commits must not allocate a fresh append base, must keep
 `db_base_offset` stable, must write dirty page `n` at
 `db_base_offset + n * SQLITE_PAGE_SIZE`, and must publish `page_table_offset = 0`.
+The in-place atomicity contract depends on IC message execution atomicity and
+trap rollback. Dirty pages are written before the superblock is published; if a
+panic/trap occurs after those writes, the implementation relies on IC-compatible
+rollback of all stable-memory writes from the current message execution. A
+normal commit must therefore perform no inter-canister call, `await`, or
+`ic0.call_perform`. The grep-based await-free CI check is a guard for this
+contract, not a standalone proof.
 When the final image fits in existing stable-memory capacity, repeated normal
 commits must not increase `allocated_bytes` or the high-water mark. When a
 normal commit exceeds current capacity, it may grow stable memory only to the
@@ -164,11 +174,13 @@ resource invariants that a `2.x` implementation must keep satisfying.
 these obligations to the Verus abstract models and the Rust/PocketIC/local
 capacity guards.
 
-Successful import replaces the logical SQLite image and resets the superblock
-schema-version cache to `0`; callers must run the configured migrations again to
-resynchronize the cache with the imported image's migration table. Failed or
-cancelled import keeps the committed image authoritative, but stable memory does
-not shrink, so staging bytes may remain as high-water slack.
+Fresh images normally use `64KiB` as `db_base_offset`. Successful import
+replaces the logical SQLite image by setting `db_base_offset` to the appended
+`import_base_offset` and resets the superblock schema-version cache to `0`;
+callers must run the configured migrations again to resynchronize the cache with
+the imported image's migration table. Failed or cancelled import keeps the
+committed image authoritative, but stable memory does not shrink, so staging
+bytes may remain as high-water slack.
 
 ## 2.0 Compatibility Contract
 

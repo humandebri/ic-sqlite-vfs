@@ -13,16 +13,20 @@ SQLite images.
 
 Public update APIs must be synchronous. `Db::update` accepts only
 `FnOnce(&mut UpdateConnection<'_>) -> Result<T, DbError>` and does not accept a
-future. `await` inside a transaction is forbidden.
+future. `await`, inter-canister calls, and `ic0.call_perform` inside a
+transaction are forbidden.
 
 CI rejects `.await` and `async fn` under `src` through
-`scripts/check-no-await.sh`.
+`scripts/check-no-await.sh`. This is a guardrail, not a complete mechanical
+proof that no future code path can split commit across message executions.
 
 SQLite `xWrite` and `xTruncate` calls inside a transaction do not write
 directly to stable memory. They accumulate page-sized changes in a heap overlay.
 After SQLite `COMMIT` succeeds, the crate writes dirty logical pages to their
-fixed stable-memory offsets, then updates the superblock. Normal `Err` returns,
-SQL rollback, and panic do not change the active image.
+fixed stable-memory offsets, then updates the superblock. This ordering relies
+on IC message execution atomicity and trap rollback: panic/trap must discard all
+stable-memory writes from the current message. Normal `Err` returns, SQL
+rollback, and panic do not change the active image under that runtime contract.
 
 ## Query Policy
 
@@ -167,14 +171,16 @@ If growing the selected `VirtualMemory` fails, the error includes
 `current_pages` and `required_pages`. The caller should not retry blindly; check
 capacity limits, remaining cycles, and chunk size.
 
-Normal commits publish safely by writing dirty pages in place before updating
-the superblock. Truncate and sparse re-extend paths zero-fill the logical gap
-with page writes and v8 zero-mask metadata, so stale physical bytes never become
-logical SQLite data. `db_compact` remains available but is a no-op for the v8
-layout, and `db_meta.compact_recommended` stays `false`. `orphan_bytes_estimate`
-is a high-water slack observation, not a promise that compact can reclaim bytes.
-Stable memory does not shrink, so compact must not be used as an operational
-remedy for high-water growth.
+Normal commits publish safely on IC-compatible runtimes by writing dirty pages
+in place before updating the superblock. On runtimes without equivalent trap
+rollback, a failure after page writes and before superblock publish can leave
+new page bytes behind the old superblock. Truncate and sparse re-extend paths
+zero-fill the logical gap with page writes and v8 zero-mask metadata, so stale
+physical bytes never become logical SQLite data. `db_compact` remains available
+but is a no-op for the v8 layout, and `db_meta.compact_recommended` stays
+`false`. `orphan_bytes_estimate` is a high-water slack observation, not a
+promise that compact can reclaim bytes. Stable memory does not shrink, so
+compact must not be used as an operational remedy for high-water growth.
 
 ## Integrity
 

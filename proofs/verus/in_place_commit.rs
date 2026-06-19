@@ -92,6 +92,7 @@ spec fn current_layout(image: Image) -> bool {
         && image.page_count == page_count_for_size(image.db_size)
         && image.high_water_mark == image.allocated_bytes
         && normalized_zero_extents(image.zero_extents)
+        && zero_extent_limit_ok(image.zero_extents)
 }
 
 spec fn image_end(image: Image, final_size: nat) -> nat {
@@ -128,6 +129,18 @@ spec fn commit_image(before: Image, final_size: nat, zero_extents: Seq<ZeroExten
         allocated_bytes: before.allocated_bytes,
         high_water_mark: before.high_water_mark,
         zero_extents,
+    }
+}
+
+spec fn try_commit_image(
+    before: Image,
+    final_size: nat,
+    zero_extents: Seq<ZeroExtent>,
+) -> Option<Image> {
+    if normalized_zero_extents(zero_extents) && zero_extent_limit_ok(zero_extents) {
+        Some(commit_image(before, final_size, zero_extents))
+    } else {
+        None
     }
 }
 
@@ -273,6 +286,7 @@ proof fn commit_publishes_current_layout(
     requires
         before.high_water_mark == before.allocated_bytes,
         normalized_zero_extents(zero_extents),
+        zero_extent_limit_ok(zero_extents),
     ensures
         current_layout(commit_image(before, final_size, zero_extents)),
         commit_image(before, final_size, zero_extents).page_table_offset == 0,
@@ -483,11 +497,43 @@ proof fn truncate_zero_extents_preserve_limit(before: Image, final_size: nat)
 {
 }
 
+proof fn truncate_zero_extents_publish_success(
+    before: Image,
+    final_size: nat,
+    next: Image,
+)
+    requires
+        before.high_water_mark == before.allocated_bytes,
+        try_commit_image(before, final_size, truncate_zero_extents(before, final_size))
+            == Some(next),
+    ensures
+        current_layout(next),
+        normalized_zero_extents(truncate_zero_extents(before, final_size)),
+        zero_extent_limit_ok(truncate_zero_extents(before, final_size)),
+        next.zero_extents == truncate_zero_extents(before, final_size),
+        next.db_size == final_size,
+{
+}
+
+proof fn unnormalized_zero_extents_block_publish(
+    before: Image,
+    final_size: nat,
+    zero_extents: Seq<ZeroExtent>,
+)
+    requires
+        !normalized_zero_extents(zero_extents),
+    ensures
+        try_commit_image(before, final_size, zero_extents) == Option::<Image>::None,
+{
+}
+
 proof fn truncate_zero_extent_limit_error_blocks_publish(before: Image, final_size: nat)
     requires
         truncate_zero_extents(before, final_size).len() > max_zero_extents(),
     ensures
         !zero_extent_limit_ok(truncate_zero_extents(before, final_size)),
+        try_commit_image(before, final_size, truncate_zero_extents(before, final_size))
+            == Option::<Image>::None,
 {
 }
 

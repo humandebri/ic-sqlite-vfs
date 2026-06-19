@@ -67,8 +67,12 @@ virtual memory, this crate owns the full virtual address space:
 
 ```text
 virtual offset 0..64KiB      superblock
-virtual offset 64KiB..       in-place SQLite image bytes
+virtual offset 64KiB..       fresh/normal in-place SQLite image bytes
 ```
+
+Fresh images start the SQLite bytes at `64KiB`. After a successful import, the
+active image can instead start at the appended `db_base_offset` published in the
+superblock.
 
 The crate does not own the canister's raw stable memory. Raw stable memory is
 managed by a `MemoryManager<DefaultMemoryImpl>` with the same stable layout as
@@ -127,13 +131,15 @@ Stable memory layout:
 ```text
 selected virtual memory:
   offset 0..64KiB      superblock
-  offset 64KiB..       in-place SQLite image bytes
+  offset 64KiB..       fresh/normal in-place SQLite image bytes
 ```
 
 The superblock stores magic, schema version, logical DB size, transaction id,
 last verified checksum, import state, and flags. The SQLite database header is
 logical page 0; logical page `n` lives at
-`db_base_offset + n * SQLITE_PAGE_SIZE`.
+`db_base_offset + n * SQLITE_PAGE_SIZE`. `db_base_offset` is normally `64KiB`
+for a fresh image, but import publishes the appended image base as the new
+physical base.
 
 `checksum` is verification metadata. Normal update commits do not scan the full
 DB image. They advance `last_tx_id` and set `checksum_stale`. A controller can
@@ -167,15 +173,23 @@ PRAGMA foreign_keys = ON;
 PRAGMA temp_store = MEMORY;
 ```
 
-Durability is based on IC message atomicity and a heap write overlay, not
-`fsync`. During an update call, VFS writes stay in heap memory until SQLite
-`COMMIT` succeeds. Dirty logical pages are written to their fixed stable-memory
-offsets, then made active by the final superblock update.
+Durability is based on IC message execution atomicity, trap rollback, and a heap
+write overlay, not `fsync`. During an update call, VFS writes stay in heap
+memory until SQLite `COMMIT` succeeds. The in-place commit then writes dirty
+logical pages to their fixed stable-memory offsets before the final superblock
+update publishes the new image.
+
+This is a runtime contract. The layout is safe only when the whole commit runs
+inside one IC-compatible message execution, trap/panic rolls back stable-memory
+writes from that message, and commit performs no inter-canister call, `await`,
+or `ic0.call_perform`. On runtimes without equivalent rollback semantics, a
+failure after dirty page writes and before superblock publish can leave new page
+bytes behind an old superblock.
 
 Rules:
 
 - one update call is one DB transaction
-- no `await` inside a transaction
+- no `await`, inter-canister call, or `ic0.call_perform` inside a transaction
 - query calls use read-only, query-only connections
 - WAL is disabled
 - journal and temp data stay in heap memory
@@ -405,6 +419,9 @@ The reference canister exposes:
 - `db_compact`
 
 Admin import/export and integrity methods require the caller to be a controller.
+In `db_meta`, `active_bytes` is the logical active payload
+`SUPERBLOCK_SIZE + db_size`, not the physical end offset of the current image.
+After import, `db_base_offset` can move to the appended import base.
 
 Recommended export sequence:
 

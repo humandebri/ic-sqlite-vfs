@@ -95,11 +95,12 @@ write は mask を解除して materialize する。truncate tail が既存 exte
 committed image を維持し、staging bytes は high-water slack として残り得る。
 
 **T8: in-place atomicity depends on IC message atomicity.** v8 normal commit が
-単一 message execution 内で開始・完了し、commit 中に inter-canister call を
-含まない場合、A3 と A4 により成功時は全 write が確定し、trap 時は当該
-message の write が破棄される。したがって message 境界の観測者に対して
-commit は全か無かに見える。この原子性は VFS 自前の shadow paging ではなく
-IC 基盤層に依存する。
+単一 message execution 内で開始・完了し、commit 中に inter-canister call、
+`await`、`ic0.call_perform` を含まない場合、A3 と A4 により成功時は全 write
+が確定し、trap 時は当該 message の write が破棄される。したがって message
+境界の観測者に対して commit は全か無かに見える。この原子性は VFS 自前の
+shadow paging ではなく IC 基盤層に依存する。await-free grep は guard であり、
+この原子性の完全証明ではない。
 
 ## 4. 証明対応
 
@@ -108,9 +109,9 @@ IC 基盤層に依存する。
 | T1, T2 | 対象外。旧append-onlyの否定的設計分析 | `docs/API_STABILITY.md` の負の仕様 |
 | T3 | `dirty_page_write_offset_matches_in_place_layout` | `in_place_commit_keeps_dirty_page_offsets_stable` |
 | T4 | `normal_commit_within_capacity_does_not_grow_resources` | `repeated_existing_page_updates_do_not_grow_allocated_bytes`, `bench_capacity_growth_guard` |
-| T5 | `truncate_zero_extents_are_normalized`, `truncate_zero_extents_mask_matches_model`, `truncate_zero_extents_preserve_limit`, `truncate_zero_extent_limit_error_blocks_publish` | `zero_extent_limit_is_rejected_without_fallback`, normalized truncate/limit tests, truncate/grow roundtrip tests |
-| T6 | `compact_preserves_resource_high_water`, `compact_never_recommends_reclaim` | `compact_preserves_logical_database_contents`, repeated compact resource checks |
-| T7 | `checksum_mismatch_preserves_committed_image`, `checksum_match_publishes_staging_image` | `failed_import_preserves_existing_database`, import checksum tests |
+| T5 | `truncate_zero_extents_are_normalized`, `truncate_zero_extents_mask_matches_model`, `truncate_zero_extents_publish_success`, `truncate_zero_extent_limit_error_blocks_publish`; zero extent external-body lemmas are trusted | `zero_extent_limit_is_rejected_without_fallback`, independent normalizer property tests, normalized truncate/limit tests, truncate/grow roundtrip tests |
+| T6 | `compact_preserves_resource_high_water`, `v8_storage_stats_never_recommend_compact` | `compact_preserves_logical_database_contents`, repeated compact resource checks |
+| T7 | `checksum_mismatch_preserves_committed_image`, `checksum_match_publishes_staging_image`, `successful_import_resets_schema_version`, `complete_import_may_increase_resource_high_water` | `failed_import_preserves_existing_database`, import checksum and cross-version tests |
 | T8 | 対象外。IC公式仕様を公理として採用 | await-free canister API check, failpoint rollback tests, PocketIC upgrade/regression |
 
 ## 5. 境界
@@ -122,9 +123,14 @@ IC 基盤層に依存する。
 - C ABI / FFI 境界の正しさ。
 - IC stable memory system API と message execution atomicity。
 - Rust実装とVerus抽象モデルの完全一致。
-- `insert_zero_extent_normalized_*` の Verus lemma は `#[verifier::external_body]`
-  付きの trusted boundary。production の `normalize_zero_extents` との対応は
-  Rust の merge/split/limit property test で補う。
+- `insert_zero_extent_normalized_preserves_normalized`,
+  `insert_zero_extent_matches_zero_mask`,
+  `insert_zero_extent_len_no_grow_when_merge_exists` などの Verus zero extent
+  lemma は `#[verifier::external_body]` 付きの tracked trusted axiom。
+  production の `normalize_zero_extents` との対応は Rust の independent model
+  property test と merge/split/limit test で補う。
+- import の Verus モデルは staging 書込後の high-water を byte-level lower
+  bound として扱い、stable page rounding の厳密値は Rust / PocketIC 回帰で補う。
 - 論理 file extension gap の byte-level zero-fill は Verus の page-level
   zero extent モデルだけでは完結しない。旧 EOF / 新 EOF がページ途中にある
   場合の補正は Rust 実装と stale-byte sentinel test で検証する。

@@ -18,7 +18,7 @@ production code へ `verus!` macro は混入しない。
 - in-place commit offset and truncate invariants
 - in-place zero-extent mask invariants
 - in-place resource high-water invariants
-- import state-machine transitions
+- import state-machine transitions, schema-version reset, and staging high-water lower bound
 - abstract Superblock fixed-field encode/decode round-trip
 - Superblock byte offset / field-width layout
 - Superblock little-endian byte round-trip
@@ -35,6 +35,9 @@ production code へ `verus!` macro は混入しない。
 - `Rc<RefCell<_>>` runtime borrowing
 - `ic0.stable64_*` system API behavior
 - SQLite C core behavior
+- `#[verifier::external_body]` zero extent lemmas; these are tracked trusted
+  axioms and are covered by Rust property tests against an independent
+  normalizer model
 
 実行:
 
@@ -63,12 +66,14 @@ verus --crate-type=lib --out-dir target/verus proofs/verus/compact_model.rs
 ## Capacity proof mapping
 
 `docs/CAPACITY_GROWTH_PROOF.md` の手証明は、次の抽象モデルと回帰テストに対応する。
-IC message execution atomicity は外部公理であり、Verus 対象ではない。
+IC message execution atomicity と trap rollback は外部公理であり、Verus 対象では
+ない。commit 中に inter-canister call / `await` / `ic0.call_perform` がないことも
+Rust API 形状と CI guard で補う前提であり、Verus 単独では証明しない。
 
 | 手証明 | Verus proof | Regression coverage |
 | --- | --- | --- |
 | T3 dirty page fixed offset | `in_place_commit.rs` | stable blob dirty-offset tests |
 | T4 existing-capacity no growth | `in_place_commit.rs` | Rust repeated update, PocketIC/local `bench_capacity_growth_guard` |
-| T5 zero extent truncate | `in_place_commit.rs` normalized truncate model | zero extent limit, normalized merge, and truncate roundtrip tests |
-| T6 compact no-op | `compact_model.rs` | compact resource no-op tests |
-| T7 import exception / checksum mismatch | `import_state_machine.rs` | failed import and checksum mismatch tests |
+| T5 zero extent truncate | `in_place_commit.rs` normalized truncate and publish-failure model; external-body zero extent lemmas are trusted | zero extent limit, independent normalizer property tests, normalized merge, and truncate roundtrip tests |
+| T6 compact no-op | `compact_model.rs` no-op plus v8 stats false recommendation | compact resource no-op tests |
+| T7 import exception / checksum mismatch | `import_state_machine.rs` logical image, schema reset, and staging high-water model | failed import, checksum mismatch, and cross-version tests |

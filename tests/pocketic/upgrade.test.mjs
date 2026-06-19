@@ -120,6 +120,11 @@ async function stableWriteTrapRollsBackFailedUpdate(pic, name) {
 
   step(name, "write baseline value");
   assert.deepEqual(await actor.kv_put("trap", "before"), { Ok: null });
+  step(name, "snapshot committed image");
+  const beforeMeta = await actor.db_meta();
+  assert.equal("Ok" in beforeMeta, true);
+  const beforeImage = await actor.db_export_chunk(0n, beforeMeta.Ok.db_size);
+  assert.equal("Ok" in beforeImage, true);
   step(name, "enable stable write trap");
   assert.deepEqual(await actor.db_test_trap_after_stable_write(1n), { Ok: null });
   step(name, "trigger trapped update");
@@ -133,6 +138,10 @@ async function stableWriteTrapRollsBackFailedUpdate(pic, name) {
   step(name, "verify active image");
   assert.deepEqual(await actor.kv_get("trap"), { Ok: ["before"] });
   assert.deepEqual(await actor.db_integrity_check(), { Ok: "ok" });
+  const afterMeta = await actor.db_meta();
+  assert.deepEqual(afterMeta, beforeMeta);
+  const afterImage = await actor.db_export_chunk(0n, beforeMeta.Ok.db_size);
+  assert.deepEqual(afterImage, beforeImage);
 }
 
 async function precompiledSqliteArchiveHasExpectedFeatures(pic, name) {

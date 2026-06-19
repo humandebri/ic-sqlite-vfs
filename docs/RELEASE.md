@@ -30,6 +30,10 @@ GitHub Release artifact は `sqlite-precompiled,canister-api` の release profil
 `scripts/sqlite-critical-check.sh` は基礎検査、Verus proof、PocketIC regression、
 PocketIC performance/capacity regression を実行する。compat と package
 contents は workflow と release gate で明示実行する。
+Verus zero extent lemmas marked `#[verifier::external_body]` are tracked trusted
+axioms for this release. The release gate compensates with Rust property tests
+that compare the production normalizer against an independent model, but this is
+not a full mechanical proof of the production Rust implementation.
 
 `cargo package --list` では `docs/PUBLIC_API_2_0.snapshot` と release
 check scripts を含め、`target/`、`node_modules/`、`package-lock.json` を
@@ -43,6 +47,9 @@ tarballではなく git tag checkout 側のrelease gateで検証する。
 layout の直接 upgrade success は要求しない。旧 canister で logical SQLite
 image を export し、fresh v8 canister へ import する経路を release gate で
 検証する。
+In-place commit writes dirty pages before superblock publish and relies on IC
+message execution atomicity plus trap rollback. Commit must not perform
+inter-canister calls, `await`, or `ic0.call_perform`.
 
 公開Rust APIでは `PAGE_MAP_LAYOUT_VERSION` を削除し、
 `CURRENT_LAYOUT_VERSION` に改名する。v8 では page-table read cache がないため

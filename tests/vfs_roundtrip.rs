@@ -8,6 +8,7 @@ use ic_sqlite_vfs::{params, Db, DbError, DbHandle};
 use ic_sqlite_vfs::{MemoryId, MemoryManager};
 use serial_test::serial;
 use std::ffi::{c_void, CStr, CString};
+use std::mem::MaybeUninit;
 use std::ptr;
 
 struct RawConnection {
@@ -19,6 +20,103 @@ impl Drop for RawConnection {
         unsafe {
             ffi::sqlite3_close(self.raw);
         }
+    }
+}
+
+struct VfsMainFile {
+    storage: Vec<MaybeUninit<usize>>,
+    raw: *mut ffi::sqlite3_file,
+}
+
+impl VfsMainFile {
+    fn open() -> Self {
+        vfs::register();
+        let vfs_name = CString::new(ic_sqlite_vfs::config::VFS_NAME).unwrap();
+        let db_name = CString::new(ic_sqlite_vfs::config::MAIN_DB_PATH).unwrap();
+        let raw_vfs = unsafe { ffi::sqlite3_vfs_find(vfs_name.as_ptr()) };
+        assert!(!raw_vfs.is_null());
+
+        let file_size = usize::try_from(unsafe { (*raw_vfs).szOsFile }).unwrap();
+        let word_size = std::mem::size_of::<usize>();
+        let word_count = file_size.div_ceil(word_size);
+        let mut storage = vec![MaybeUninit::<usize>::uninit(); word_count];
+        let raw = storage.as_mut_ptr().cast::<ffi::sqlite3_file>();
+        let flags = ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_MAIN_DB;
+        let mut out_flags = 0;
+        let open = unsafe { (*raw_vfs).xOpen.unwrap() };
+        let rc = unsafe {
+            open(
+                raw_vfs,
+                db_name.as_ptr(),
+                raw,
+                flags,
+                ptr::addr_of_mut!(out_flags),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+
+        Self { storage, raw }
+    }
+
+    fn read(&mut self, offset: u64, len: usize) -> Vec<u8> {
+        let mut out = vec![0_u8; len];
+        let methods = unsafe { &*(*self.raw).pMethods };
+        let read = methods.xRead.unwrap();
+        let rc = unsafe {
+            read(
+                self.raw,
+                out.as_mut_ptr().cast::<c_void>(),
+                i32::try_from(out.len()).unwrap(),
+                i64::try_from(offset).unwrap(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        out
+    }
+
+    fn write(&mut self, offset: u64, bytes: &[u8]) {
+        let methods = unsafe { &*(*self.raw).pMethods };
+        let write = methods.xWrite.unwrap();
+        let rc = unsafe {
+            write(
+                self.raw,
+                bytes.as_ptr().cast::<c_void>(),
+                i32::try_from(bytes.len()).unwrap(),
+                i64::try_from(offset).unwrap(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+    }
+
+    fn truncate(&mut self, size: u64) {
+        let methods = unsafe { &*(*self.raw).pMethods };
+        let truncate = methods.xTruncate.unwrap();
+        let rc = unsafe { truncate(self.raw, i64::try_from(size).unwrap()) };
+        assert_eq!(rc, ffi::SQLITE_OK);
+    }
+
+    fn file_size(&mut self) -> u64 {
+        let methods = unsafe { &*(*self.raw).pMethods };
+        let file_size = methods.xFileSize.unwrap();
+        let mut size = 0_i64;
+        let rc = unsafe { file_size(self.raw, ptr::addr_of_mut!(size)) };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        u64::try_from(size).unwrap()
+    }
+}
+
+impl Drop for VfsMainFile {
+    fn drop(&mut self) {
+        if self.raw.is_null() {
+            return;
+        }
+        let methods = unsafe { &*(*self.raw).pMethods };
+        if let Some(close) = methods.xClose {
+            let rc = unsafe { close(self.raw) };
+            debug_assert_eq!(rc, ffi::SQLITE_OK);
+        }
+        let _ = self.storage.len();
+        self.raw = ptr::null_mut();
     }
 }
 
@@ -607,6 +705,94 @@ fn deterministic_blob(seed: u8, len: usize) -> Vec<u8> {
     (0..len)
         .map(|index| seed.wrapping_add(index as u8).wrapping_mul(17))
         .collect()
+}
+
+#[test]
+#[serial]
+fn vfs_sparse_write_zero_fills_same_partial_page_eof_gap() {
+    reset();
+    let mut file = VfsMainFile::open();
+
+    file.write(0, b"a");
+    file.write(5, b"z");
+
+    let expected = b"a\0\0\0\0z";
+    assert_eq!(file.file_size(), 6);
+    assert_eq!(file.read(0, 6), expected);
+    assert_export_matches(expected);
+}
+
+#[test]
+#[serial]
+fn vfs_sparse_write_zero_fills_cross_page_eof_gap() {
+    reset();
+    let page = u64::from(SQLITE_PAGE_SIZE);
+    let old_size = page + 17;
+    let write_offset = page * 2 + 33;
+    let gap_len = usize::try_from(write_offset - old_size).unwrap();
+    let expected_len = usize::try_from(write_offset + 1).unwrap();
+    let mut file = VfsMainFile::open();
+
+    file.write(old_size - 1, b"a");
+    file.write(write_offset, b"z");
+
+    let mut expected = vec![0_u8; expected_len];
+    expected[usize::try_from(old_size - 1).unwrap()] = b'a';
+    expected[usize::try_from(write_offset).unwrap()] = b'z';
+
+    assert_eq!(file.file_size(), write_offset + 1);
+    assert!(file.read(old_size, gap_len).iter().all(|byte| *byte == 0));
+    assert_eq!(file.read(write_offset, 1), b"z");
+    assert_export_matches(&expected);
+}
+
+#[test]
+#[serial]
+fn vfs_truncate_reextend_keeps_stale_bytes_hidden_after_export_checksum_import() {
+    reset();
+    let page = u64::from(SQLITE_PAGE_SIZE);
+    let write_offset = page + 12;
+    let expected_size = write_offset + 1;
+    let mut file = VfsMainFile::open();
+
+    file.write(0, b"a");
+    file.write(page + 1, b"stale");
+    file.truncate(1);
+    file.write(write_offset, b"z");
+
+    let before_import = file.read(0, usize::try_from(expected_size).unwrap());
+    assert_eq!(before_import[0], b'a');
+    assert!(before_import[1..usize::try_from(write_offset).unwrap()]
+        .iter()
+        .all(|byte| *byte == 0));
+    assert_eq!(before_import[usize::try_from(write_offset).unwrap()], b'z');
+    assert_export_matches(&before_import);
+
+    drop(file);
+    let checksum = Db::db_checksum().unwrap();
+    let image = Db::export_chunk(0, expected_size).unwrap();
+    Db::begin_import(expected_size, checksum).unwrap();
+    Db::import_chunk(0, &image).unwrap();
+    Db::finish_import().unwrap();
+
+    let mut reopened = VfsMainFile::open();
+    assert_eq!(reopened.file_size(), expected_size);
+    assert_eq!(
+        reopened.read(0, usize::try_from(expected_size).unwrap()),
+        before_import
+    );
+    assert_export_matches(&before_import);
+}
+
+fn assert_export_matches(expected: &[u8]) {
+    let db_size = Superblock::load().unwrap().db_size;
+    assert_eq!(db_size, u64::try_from(expected.len()).unwrap());
+    let image = Db::export_chunk(0, db_size).unwrap();
+    assert_eq!(image, expected);
+    assert_eq!(
+        Db::db_checksum().unwrap(),
+        ic_sqlite_vfs::test_support::meta::fnv1a64(expected)
+    );
 }
 
 #[test]

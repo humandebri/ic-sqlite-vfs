@@ -24,8 +24,24 @@ struct Image {
     last_tx_id: nat,
 }
 
+struct StorageStats {
+    allocated_bytes: nat,
+    high_water_mark: nat,
+    orphan_bytes_estimate: nat,
+    compact_recommended: bool,
+}
+
 spec fn compact(image: Image) -> Image {
     image
+}
+
+spec fn storage_stats_for_v8(image: Image) -> StorageStats {
+    StorageStats {
+        allocated_bytes: image.allocated_bytes,
+        high_water_mark: image.high_water_mark,
+        orphan_bytes_estimate: image.orphan_bytes_estimate,
+        compact_recommended: false,
+    }
 }
 
 proof fn compact_preserves_db_base_offset(image: Image)
@@ -62,6 +78,17 @@ proof fn compact_never_recommends_reclaim(image: Image)
         image.compact_recommended == false,
     ensures
         compact(image).compact_recommended == false,
+{
+}
+
+proof fn v8_storage_stats_never_recommend_compact(image: Image)
+    ensures
+        storage_stats_for_v8(image).compact_recommended == false,
+        storage_stats_for_v8(compact(image)).compact_recommended == false,
+        storage_stats_for_v8(compact(image)).allocated_bytes
+            == storage_stats_for_v8(image).allocated_bytes,
+        storage_stats_for_v8(compact(image)).orphan_bytes_estimate
+            == storage_stats_for_v8(image).orphan_bytes_estimate,
 {
 }
 

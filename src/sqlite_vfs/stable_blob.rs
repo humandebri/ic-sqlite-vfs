@@ -563,13 +563,8 @@ fn commit_overlay_in_place(
         panic!("failed to publish in-place commit after page writes: {error}");
     }
     let profile_start = commit_profile_start(profile_enabled);
-    let result = store_commit_db_image(
-        advance_tx,
-        block.db_base_offset,
-        overlay_size,
-        zero_extents,
-        profile_enabled,
-    );
+    let result =
+        store_commit_db_image(advance_tx, block.db_base_offset, overlay_size, zero_extents);
     commit_profile_record_superblock_store(profile_start);
     if let Err(error) = result {
         panic!("failed to publish in-place commit after page writes: {error}");
@@ -649,13 +644,10 @@ fn store_commit_db_image(
     db_base_offset: u64,
     overlay_size: u64,
     zero_extents: Vec<ZeroExtent>,
-    profile_enabled: bool,
 ) -> Result<(), StableMemoryError> {
-    match (advance_tx, profile_enabled) {
-        (true, _) => Superblock::commit_db_image(db_base_offset, overlay_size, zero_extents),
-        (false, _) => {
-            Superblock::store_db_image_without_tx(db_base_offset, overlay_size, zero_extents)
-        }
+    match advance_tx {
+        true => Superblock::commit_db_image(db_base_offset, overlay_size, zero_extents),
+        false => Superblock::store_db_image_without_tx(db_base_offset, overlay_size, zero_extents),
     }
 }
 
@@ -1552,6 +1544,86 @@ mod tests {
     }
 
     #[test]
+    fn pbt_zero_extent_normalizer_matches_independent_model() {
+        let mut runner = TestRunner::new(Config {
+            cases: 512,
+            ..Config::default()
+        });
+
+        runner
+            .run(&zero_extent_vec_strategy(), |mut extents| {
+                let expected = model_normalize_zero_extents(&extents);
+                let result = normalize_zero_extents(&mut extents);
+
+                if expected.len() > MAX_ZERO_EXTENTS {
+                    let rejected = matches!(
+                        result,
+                        Err(StableMemoryError::ZeroExtentLimitExceeded {
+                            limit: MAX_ZERO_EXTENTS
+                        })
+                    );
+                    prop_assert!(rejected);
+                } else {
+                    result.map_err(|error| TestCaseError::fail(error.to_string()))?;
+                    prop_assert_eq!(extents, expected);
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn pbt_zero_extent_add_subtract_matches_independent_model() {
+        let mut runner = TestRunner::new(Config {
+            cases: 256,
+            ..Config::default()
+        });
+
+        runner
+            .run(&zero_extent_operation_sequence(), |operations| {
+                let mut production = Vec::new();
+                let mut model = Vec::new();
+
+                for operation in operations {
+                    let result = match operation {
+                        ZeroExtentOp::Add {
+                            start_page,
+                            end_page,
+                        } => {
+                            model_add_zero_extent(&mut model, start_page, end_page);
+                            add_zero_extent(&mut production, start_page, end_page)
+                        }
+                        ZeroExtentOp::Subtract {
+                            start_page,
+                            end_page,
+                        } => {
+                            model_subtract_zero_extent(&mut model, start_page, end_page);
+                            subtract_zero_extent(&mut production, start_page, end_page)
+                        }
+                    };
+
+                    let expected = model_normalize_zero_extents(&model);
+                    if expected.len() > MAX_ZERO_EXTENTS {
+                        let rejected = matches!(
+                            result,
+                            Err(StableMemoryError::ZeroExtentLimitExceeded {
+                                limit: MAX_ZERO_EXTENTS
+                            })
+                        );
+                        prop_assert!(rejected);
+                        return Ok(());
+                    }
+
+                    result.map_err(|error| TestCaseError::fail(error.to_string()))?;
+                    prop_assert_eq!(&production, &expected);
+                    model = expected;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
     #[serial_test::serial]
     fn pbt_noop_compact_preserves_sparse_page_model() {
         let mut runner = TestRunner::new(Config {
@@ -1611,6 +1683,114 @@ mod tests {
         Write { offset: u64, len: usize, byte: u8 },
         Truncate { size: u64 },
         Compact,
+    }
+
+    #[derive(Clone, Debug)]
+    enum ZeroExtentOp {
+        Add { start_page: u64, end_page: u64 },
+        Subtract { start_page: u64, end_page: u64 },
+    }
+
+    fn zero_extent_vec_strategy() -> impl Strategy<Value = Vec<ZeroExtent>> {
+        let page_limit = zero_extent_model_page_limit();
+        proptest::collection::vec(
+            (0_u64..=page_limit, 0_u64..=page_limit).prop_map(|(left, right)| ZeroExtent {
+                start_page: left.min(right),
+                end_page: left.max(right),
+            }),
+            0..=MAX_ZERO_EXTENTS + 8,
+        )
+    }
+
+    fn zero_extent_operation_sequence() -> impl Strategy<Value = Vec<ZeroExtentOp>> {
+        let page_limit = zero_extent_model_page_limit();
+        let range = (0_u64..=page_limit, 0_u64..=page_limit)
+            .prop_map(|(left, right)| (left.min(right), left.max(right)));
+        proptest::collection::vec(
+            prop_oneof![
+                range
+                    .clone()
+                    .prop_map(|(start_page, end_page)| ZeroExtentOp::Add {
+                        start_page,
+                        end_page,
+                    }),
+                range.prop_map(|(start_page, end_page)| ZeroExtentOp::Subtract {
+                    start_page,
+                    end_page,
+                }),
+            ],
+            0..=96,
+        )
+    }
+
+    fn zero_extent_model_page_limit() -> u64 {
+        (u64::try_from(MAX_ZERO_EXTENTS).unwrap() + 8) * 2
+    }
+
+    fn model_add_zero_extent(extents: &mut Vec<ZeroExtent>, start_page: u64, end_page: u64) {
+        if start_page < end_page {
+            extents.push(ZeroExtent {
+                start_page,
+                end_page,
+            });
+        }
+    }
+
+    fn model_subtract_zero_extent(extents: &mut Vec<ZeroExtent>, start_page: u64, end_page: u64) {
+        if start_page >= end_page {
+            return;
+        }
+
+        let mut next = Vec::new();
+        for extent in extents.iter() {
+            if end_page <= extent.start_page || start_page >= extent.end_page {
+                next.push(extent.clone());
+                continue;
+            }
+            if extent.start_page < start_page {
+                next.push(ZeroExtent {
+                    start_page: extent.start_page,
+                    end_page: start_page,
+                });
+            }
+            if end_page < extent.end_page {
+                next.push(ZeroExtent {
+                    start_page: end_page,
+                    end_page: extent.end_page,
+                });
+            }
+        }
+        *extents = next;
+    }
+
+    fn model_normalize_zero_extents(extents: &[ZeroExtent]) -> Vec<ZeroExtent> {
+        let page_limit = usize::try_from(zero_extent_model_page_limit()).unwrap();
+        let mut mask = vec![false; page_limit + 1];
+        for extent in extents {
+            let start = usize::try_from(extent.start_page).unwrap().min(mask.len());
+            let end = usize::try_from(extent.end_page).unwrap().min(mask.len());
+            for page in &mut mask[start..end] {
+                *page = true;
+            }
+        }
+
+        let mut normalized = Vec::new();
+        let mut page = 0_usize;
+        while page < mask.len() {
+            if !mask[page] {
+                page += 1;
+                continue;
+            }
+            let start = page;
+            while page < mask.len() && mask[page] {
+                page += 1;
+            }
+            normalized.push(ZeroExtent {
+                start_page: u64::try_from(start).unwrap(),
+                end_page: u64::try_from(page).unwrap(),
+            });
+        }
+        normalized
     }
 
     #[test]
