@@ -21,6 +21,7 @@ mod read_metrics;
 mod sqlite_vfs;
 #[doc(hidden)]
 mod stable;
+#[cfg(any(test, debug_assertions))]
 #[doc(hidden)]
 pub mod test_support;
 
