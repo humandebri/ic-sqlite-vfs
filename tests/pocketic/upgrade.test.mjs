@@ -95,6 +95,29 @@ async function stableImageSurvivesUpgrade(pic, name) {
   const tooMany = await actor.kv_get_many(Array.from({ length: 1001 }, (_, index) => `k${index}`));
   assert.equal("Err" in tooMany, true);
   assert.match(tooMany.Err, /at most 1000 keys/);
+  step(name, "query input length guards");
+  const maxKey = "k".repeat(256);
+  const tooLongKey = "k".repeat(257);
+  const maxValue = "v".repeat(64 * 1024);
+  const tooLongValue = "v".repeat(64 * 1024 + 1);
+  const maxNote = "n".repeat(4 * 1024);
+  const tooLongNote = "n".repeat(4 * 1024 + 1);
+  assert.deepEqual(await actor.kv_put(maxKey, maxValue), { Ok: null });
+  assert.deepEqual(await actor.kv_get(maxKey), { Ok: [maxValue] });
+  assert.deepEqual(await actor.kv_set_note(maxKey, maxNote), { Ok: null });
+  assert.deepEqual(await actor.kv_get_note(maxKey), { Ok: [maxNote] });
+  for (const result of [
+    await actor.kv_put(tooLongKey, "value"),
+    await actor.kv_put("too-long-value", tooLongValue),
+    await actor.kv_get(tooLongKey),
+    await actor.kv_get_many(["other", tooLongKey]),
+    await actor.kv_set_note(tooLongKey, "note"),
+    await actor.kv_set_note("survives", tooLongNote),
+    await actor.kv_get_note(tooLongKey),
+  ]) {
+    assert.equal("Err" in result, true);
+    assert.match(result.Err, /at most/);
+  }
   step(name, "read metadata before upgrade");
   const before = await actor.db_meta();
   assert.equal("Ok" in before, true);

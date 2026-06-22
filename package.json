@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "npm run test:pocketic",
     "build:wasm": "cargo build --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs.wasm",
     "build:wasm:failpoints": "cargo build --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api-test-failpoints && mkdir -p target/pocketic && cp target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs_failpoints.wasm",
     "build:compat:0.2.2": "cd compat-fixtures/ic-sqlite-vfs-0-2-2 && cargo build --target wasm32-unknown-unknown --release && cd ../.. && mkdir -p target/pocketic && cp compat-fixtures/ic-sqlite-vfs-0-2-2/target/wasm32-unknown-unknown/release/ic_sqlite_vfs_compat_0_2_2.wasm target/pocketic/ic_sqlite_vfs_compat_0_2_2.wasm",

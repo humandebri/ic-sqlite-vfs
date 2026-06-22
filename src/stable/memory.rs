@@ -132,10 +132,6 @@ fn reject_registered_memory(identity: MemoryIdentity) -> Result<(), StableMemory
     })
 }
 
-pub fn is_initialized() -> bool {
-    DEFAULT_CONTEXT.with(|context| context.get().is_some())
-}
-
 pub fn default_context() -> Option<ContextId> {
     DEFAULT_CONTEXT.with(Cell::get)
 }

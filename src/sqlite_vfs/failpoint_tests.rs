@@ -216,24 +216,23 @@ fn zero_mask_superblock_store_failure_keeps_active_image_after_restart() {
 #[test]
 #[serial]
 fn zero_mask_write_traps_preserve_active_image_after_restart() {
-    for ordinal in [1_u64] {
-        reset();
-        blob::write_at(0, b"abcd").unwrap();
-        blob::truncate(1).unwrap();
-        let before = blob::export_chunk(0, 1).unwrap();
-        let block_before = Superblock::load().unwrap();
-        let memory_before = memory::snapshot_for_tests();
+    let ordinal = 1_u64;
+    reset();
+    blob::write_at(0, b"abcd").unwrap();
+    blob::truncate(1).unwrap();
+    let before = blob::export_chunk(0, 1).unwrap();
+    let block_before = Superblock::load().unwrap();
+    let memory_before = memory::snapshot_for_tests();
 
-        memory::set_failpoint(MemoryFailpoint::TrapAfterWrite { ordinal });
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let _ = blob::write_at(3, b"z");
-        }));
+    memory::set_failpoint(MemoryFailpoint::TrapAfterWrite { ordinal });
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = blob::write_at(3, b"z");
+    }));
 
-        assert!(result.is_err());
-        restart_after_failed_message(memory_before);
-        assert_eq!(blob::export_chunk(0, block_before.db_size).unwrap(), before);
-        assert_eq!(Superblock::load().unwrap(), block_before);
-    }
+    assert!(result.is_err());
+    restart_after_failed_message(memory_before);
+    assert_eq!(blob::export_chunk(0, block_before.db_size).unwrap(), before);
+    assert_eq!(Superblock::load().unwrap(), block_before);
 }
 
 #[test]

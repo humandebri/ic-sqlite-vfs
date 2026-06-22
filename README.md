@@ -212,6 +212,11 @@ bounded and measured:
 - unbounded `ORDER BY`
 - huge `BLOB` values
 
+SQLite `random()` and `randomblob()` are deterministic in this VFS so replicas
+can agree on state. Do not use them for secrets, tokens, nonces, password reset
+values, or cryptographic IDs. Fetch secure randomness outside SQLite and pass it
+into SQL as a bound value.
+
 An IC update or query has a finite instruction/cycles budget. Fetching many rows
 in one call can exhaust that budget and trap even when SQLite itself is working
 as designed. Prefer point reads, indexed range reads, and explicit page sizes.
@@ -608,6 +613,7 @@ cargo test --features canister-api
 cargo +nightly fuzz run state_ops -- -max_total_time=30
 cargo check --release
 cargo check --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled
+npm test
 npm run build:wasm
 icp build
 npm run test:pocketic

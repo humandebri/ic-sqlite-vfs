@@ -31,6 +31,9 @@ const MIGRATIONS: &[Migration] = &[
     },
 ];
 const MAX_KV_GET_MANY_KEYS: usize = 1_000;
+const MAX_KV_KEY_BYTES: usize = 256;
+const MAX_KV_VALUE_BYTES: usize = 64 * 1024;
+const MAX_KV_NOTE_BYTES: usize = 4 * 1024;
 const SQLITE_MEMORY_ID: MemoryId = MemoryId::new(120);
 
 thread_local! {
@@ -91,6 +94,8 @@ fn init_db() {
 
 #[ic_cdk::update]
 fn kv_put(key: String, value: String) -> Result<(), String> {
+    validate_text_len("key", &key, MAX_KV_KEY_BYTES)?;
+    validate_text_len("value", &value, MAX_KV_VALUE_BYTES)?;
     Db::update(|connection| {
         connection.execute_text_text(
             "INSERT INTO kv(key, value) VALUES (?1, ?2)
@@ -104,6 +109,7 @@ fn kv_put(key: String, value: String) -> Result<(), String> {
 
 #[ic_cdk::query]
 fn kv_get(key: String) -> Result<Option<String>, String> {
+    validate_text_len("key", &key, MAX_KV_KEY_BYTES)?;
     Db::query(|connection| {
         connection.query_optional_string_text("SELECT value FROM kv WHERE key = ?1", &key)
     })
@@ -120,6 +126,9 @@ fn kv_get_many(keys: Vec<String>) -> Result<Vec<Option<String>>, String> {
             "kv_get_many accepts at most {MAX_KV_GET_MANY_KEYS} keys"
         ));
     }
+    for key in &keys {
+        validate_text_len("key", key, MAX_KV_KEY_BYTES)?;
+    }
     let sql = values_lookup_sql(keys.len(), "value")?;
     Db::query(|connection| {
         let values = keys
@@ -133,6 +142,8 @@ fn kv_get_many(keys: Vec<String>) -> Result<Vec<Option<String>>, String> {
 
 #[ic_cdk::update]
 fn kv_set_note(key: String, note: String) -> Result<(), String> {
+    validate_text_len("key", &key, MAX_KV_KEY_BYTES)?;
+    validate_text_len("note", &note, MAX_KV_NOTE_BYTES)?;
     Db::update(|connection| {
         connection.execute_text_text("UPDATE kv SET note = ?1 WHERE key = ?2", &note, &key)
     })
@@ -141,6 +152,7 @@ fn kv_set_note(key: String, note: String) -> Result<(), String> {
 
 #[ic_cdk::query]
 fn kv_get_note(key: String) -> Result<Option<String>, String> {
+    validate_text_len("key", &key, MAX_KV_KEY_BYTES)?;
     Db::query(|connection| {
         connection.query_optional_string_text("SELECT note FROM kv WHERE key = ?1", &key)
     })
@@ -160,6 +172,17 @@ fn values_lookup_sql(count: usize, column: &str) -> Result<String, String> {
     sql.push_str(column);
     sql.push_str(" FROM lookup LEFT JOIN kv ON kv.key = lookup.key ORDER BY lookup.ord");
     Ok(sql)
+}
+
+fn validate_text_len(field: &str, value: &str, max_bytes: usize) -> Result<(), String> {
+    let len = value.len();
+    if len > max_bytes {
+        Err(format!(
+            "{field} accepts at most {max_bytes} bytes; got {len} bytes"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 #[ic_cdk::query]
@@ -314,5 +337,45 @@ fn require_controller() -> Result<(), String> {
         Ok(())
     } else {
         Err("caller is not a controller".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        validate_text_len, MAX_KV_GET_MANY_KEYS, MAX_KV_KEY_BYTES, MAX_KV_NOTE_BYTES,
+        MAX_KV_VALUE_BYTES,
+    };
+
+    #[test]
+    fn kv_input_limits_accept_boundary_values() {
+        let key = "k".repeat(MAX_KV_KEY_BYTES);
+        let value = "v".repeat(MAX_KV_VALUE_BYTES);
+        let note = "n".repeat(MAX_KV_NOTE_BYTES);
+
+        assert_eq!(validate_text_len("key", &key, MAX_KV_KEY_BYTES), Ok(()));
+        assert_eq!(
+            validate_text_len("value", &value, MAX_KV_VALUE_BYTES),
+            Ok(())
+        );
+        assert_eq!(validate_text_len("note", &note, MAX_KV_NOTE_BYTES), Ok(()));
+        assert_eq!(MAX_KV_GET_MANY_KEYS, 1_000);
+    }
+
+    #[test]
+    fn kv_input_limits_reject_one_byte_over_boundary() {
+        let key = "k".repeat(MAX_KV_KEY_BYTES + 1);
+        let value = "v".repeat(MAX_KV_VALUE_BYTES + 1);
+        let note = "n".repeat(MAX_KV_NOTE_BYTES + 1);
+
+        assert!(validate_text_len("key", &key, MAX_KV_KEY_BYTES)
+            .unwrap_err()
+            .contains("at most 256 bytes"));
+        assert!(validate_text_len("value", &value, MAX_KV_VALUE_BYTES)
+            .unwrap_err()
+            .contains("at most 65536 bytes"));
+        assert!(validate_text_len("note", &note, MAX_KV_NOTE_BYTES)
+            .unwrap_err()
+            .contains("at most 4096 bytes"));
     }
 }

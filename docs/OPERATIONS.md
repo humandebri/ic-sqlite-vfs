@@ -49,6 +49,11 @@ Treat these SQL patterns as unsafe for public APIs unless tightly bounded:
 - huge `BLOB`
 - filter without a primary key or index
 
+SQLite `random()` and `randomblob()` are deterministic in this VFS so replicas
+can agree on state. Do not use them for secrets, tokens, nonces, password reset
+values, or cryptographic IDs. Fetch secure randomness outside SQLite and pass it
+into SQL as a bound value.
+
 Fetching many rows in one call can exceed the IC cycles or instruction limit
 and trap. Public APIs should prefer point reads, indexed range reads, and
 explicit page sizes.

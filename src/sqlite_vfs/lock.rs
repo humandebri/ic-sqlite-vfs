@@ -12,6 +12,7 @@ thread_local! {
     static LOCK_LEVEL: RefCell<Vec<(ContextId, c_int)>> = const { RefCell::new(Vec::new()) };
 }
 
+#[cfg(test)]
 pub fn lock(level: c_int) {
     let Ok(context) = crate::stable::memory::active_context_id() else {
         return;
@@ -34,6 +35,7 @@ pub(crate) fn lock_for(context: ContextId, level: c_int) {
     });
 }
 
+#[cfg(test)]
 pub fn unlock(level: c_int) {
     let Ok(context) = crate::stable::memory::active_context_id() else {
         return;
@@ -54,6 +56,7 @@ pub(crate) fn unlock_for(context: ContextId, level: c_int) {
     });
 }
 
+#[cfg(test)]
 pub fn has_reserved() -> bool {
     level() >= crate::sqlite_vfs::ffi::SQLITE_LOCK_RESERVED
 }
@@ -62,6 +65,7 @@ pub(crate) fn has_reserved_for(context: ContextId) -> bool {
     level_for(context) >= crate::sqlite_vfs::ffi::SQLITE_LOCK_RESERVED
 }
 
+#[cfg(test)]
 pub fn level() -> c_int {
     let Ok(context) = crate::stable::memory::active_context_id() else {
         return 0;
@@ -91,7 +95,7 @@ pub fn reset_for_tests() {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_reserved, lock, reset_for_tests};
+    use super::{has_reserved, level, lock, reset_for_tests, unlock};
     use crate::sqlite_vfs::ffi;
     use crate::stable::memory;
     use crate::stable::memory_manager::{MemoryId, MemoryManager};
@@ -108,6 +112,10 @@ mod tests {
         memory::with_context(first, || {
             lock(ffi::SQLITE_LOCK_RESERVED);
             assert!(has_reserved());
+            assert_eq!(level(), ffi::SQLITE_LOCK_RESERVED);
+            unlock(ffi::SQLITE_LOCK_SHARED);
+            assert!(!has_reserved());
+            assert_eq!(level(), ffi::SQLITE_LOCK_SHARED);
         });
         memory::with_context(second, || {
             assert!(!has_reserved());
