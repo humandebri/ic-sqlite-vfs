@@ -44,7 +44,7 @@ jobs:
         run: bash scripts/check-release-version.sh --require-pushed-tag
       - run: cargo package --no-verify
       - run: scripts/check-release-package.sh
-      - run: npm run test:pocketic:compat
+      - run: npm run test:pocketic:regression
       - run: npm run test:pocketic:perf
       - run: npm run build:wasm
       - name: Check wasm imports

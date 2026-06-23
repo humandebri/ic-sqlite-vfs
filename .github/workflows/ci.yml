@@ -40,7 +40,7 @@ jobs:
       - run: VERUS_REQUIRED=1 bash scripts/sqlite-critical-check.sh
       - run: cargo build --target wasm32-unknown-unknown
       - run: cargo build --target wasm32-unknown-unknown --features canister-api
-      - run: npm run test:pocketic:compat
+      - run: npm run test:pocketic:regression
       - run: npm run test:pocketic:perf
       - run: scripts/check-release-package.sh
       - run: npm run build:wasm

@@ -176,8 +176,8 @@ for workflow in .github/workflows/ci.yml .github/workflows/release.yml; do
     echo "$workflow does not download the Verus x86-linux archive" >&2
     exit 1
   fi
-  if ! grep -Fq "npm run test:pocketic:compat" "$workflow"; then
-    echo "$workflow does not run npm run test:pocketic:compat" >&2
+  if ! grep -Fq "npm run test:pocketic:regression" "$workflow"; then
+    echo "$workflow does not run npm run test:pocketic:regression" >&2
     exit 1
   fi
   if ! grep -Fq "npm run test:pocketic:perf" "$workflow"; then
