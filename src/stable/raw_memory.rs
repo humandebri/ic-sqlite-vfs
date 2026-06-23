@@ -77,6 +77,7 @@ impl Memory for Ic0StableMemory {
     }
 }
 
+#[allow(dead_code)]
 pub type VectorMemory = Rc<RefCell<Vec<u8>>>;
 
 impl Memory for RefCell<Vec<u8>> {

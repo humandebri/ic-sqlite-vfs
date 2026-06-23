@@ -22,9 +22,9 @@ stable memory.
 
 Current public release: `2.0.0`.
 
-The core VFS, transaction facade, import/export flow, and upgrade persistence
-tests are in place. The repository carries the active `2.x` compatibility
-contract and release gates; production deployments should pin exact versions.
+The core VFS, transaction facade, checksum flow, and upgrade persistence tests
+are in place. The repository carries the active `2.x` compatibility contract
+and release gates; production deployments should pin exact versions.
 
 `0.2.0` is the first public MemoryManager-backed release. The current crate
 ships a minimal MemoryManager-compatible fork, so consumers no longer need a
@@ -70,9 +70,7 @@ virtual offset 0..64KiB      superblock
 virtual offset 64KiB..       fresh/normal in-place SQLite image bytes
 ```
 
-Fresh images start the SQLite bytes at `64KiB`. After a successful import, the
-active image can instead start at the appended `db_base_offset` published in the
-superblock.
+Fresh images start the SQLite bytes at `64KiB`.
 
 The crate does not own the canister's raw stable memory. Raw stable memory is
 managed by a `MemoryManager<DefaultMemoryImpl>` with the same stable layout as
@@ -80,8 +78,9 @@ the `ic-stable-structures` 0.7 MemoryManager.
 If the selected virtual memory is non-empty and does not start with the
 `ICSQLITE` superblock, initialization fails with
 `StableMemoryError::ForeignStableMemoryImage` without rewriting bytes. Existing
-`ic-rusqlite` raw SQLite images must be exported by the old canister and
-imported into a fresh v8 image.
+`ic-rusqlite` raw SQLite images are not directly migrated by the current
+release. A bounded staging import design is required before that path is
+reintroduced.
 
 `Db::init(memory)` is a single global initialization point for one SQLite
 database facade in the current Wasm instance. Calling it twice returns
@@ -103,9 +102,9 @@ must stay stable across upgrades.
 For compatibility-oriented layouts, use `MemoryId::new(120)` as the default
 SQLite destination slot anchor. A new single-database canister can use `120`
 directly. Do not point `Db::init` at an existing `ic-rusqlite` `120` image; use
-old-canister export and fresh v8 import. A per-slot archive can treat `120` as
-the imported/default slot, then allocate additional archive slots from an
-adjacent application-owned range.
+`120` only for a fresh image. A per-slot archive can treat `120` as the default
+slot, then allocate additional archive slots from an adjacent
+application-owned range.
 
 ## Project Positioning
 
@@ -135,11 +134,11 @@ selected virtual memory:
 ```
 
 The superblock stores magic, schema version, logical DB size, transaction id,
-last verified checksum, import state, and flags. The SQLite database header is
-logical page 0; logical page `n` lives at
-`db_base_offset + n * SQLITE_PAGE_SIZE`. `db_base_offset` is normally `64KiB`
-for a fresh image, but import publishes the appended image base as the new
-physical base.
+last verified checksum, import state, and flags. Import fields remain encoded
+for stable-layout compatibility, but no public import API uses them in the
+current release. The SQLite database header is logical page 0; logical page `n`
+lives at `db_base_offset + n * SQLITE_PAGE_SIZE`. `db_base_offset` is normally
+`64KiB` for a fresh image.
 
 `checksum` is verification metadata. Normal update commits do not scan the full
 DB image. They advance `last_tx_id` and set `checksum_stale`. A controller can
@@ -269,9 +268,10 @@ For migration from `ic-sqlite` or `ic-rusqlite`, see
 Minimal canister pattern:
 
 `Db::migrate` records applied migration versions, so migration SQL should be a
-versioned step rather than an idempotent `IF NOT EXISTS` schema initializer. The
-migration registry stores only versions and does not depend on SQLite date/time
-functions.
+strictly increasing, versioned step rather than an idempotent `IF NOT EXISTS`
+schema initializer. Migration SQL must be static trusted SQL; do not build it
+from user input. The migration registry stores only versions and does not
+depend on SQLite date/time functions.
 
 ```rust
 use ic_sqlite_vfs::db::migrate::Migration;
@@ -413,31 +413,30 @@ icp deploy
 
 The reference canister exposes:
 
-- `kv_put`, `kv_get`, `kv_get_many`, `kv_count`
+- public `kv_get`, `kv_get_many`, `kv_get_note`
+- controller-only `kv_put`, `kv_set_note`, `kv_count`
 - `db_meta`
 - `db_integrity_check`
 - `db_checksum`
 - `db_refresh_checksum`
 - `db_refresh_checksum_chunk`
-- `db_export_chunk`
-- `db_begin_import`, `db_import_chunk`, `db_finish_import`, `db_cancel_import`
-- `db_compact`
 
-Admin import/export and integrity methods require the caller to be a controller.
+Admin checksum, integrity, writes, and count methods require the caller to be a
+controller. `db_refresh_checksum` is present for DID compatibility but the
+reference canister returns `Err`; use
+`db_refresh_checksum_chunk` with bounded chunks instead.
 In `db_meta`, `active_bytes` is the logical active payload
 `SUPERBLOCK_SIZE + db_size`, not the physical end offset of the current image.
-After import, `db_base_offset` can move to the appended import base.
 
-Recommended export sequence:
+Import/export/compact are intentionally not exposed by the reference canister
+or Rust facade in the current release. There is no direct `ic-rusqlite`
+migration path. Migration/import can be reintroduced only after a bounded
+staging design is implemented and tested.
 
-1. run `db_refresh_checksum_chunk(max_bytes)` until it returns `complete = true`
-2. read `db_meta` and record `db_size`, `checksum`, and `last_tx_id`
-3. read all chunks with `db_export_chunk`
-4. read `db_meta` again and confirm `last_tx_id` did not change
-
-`db_refresh_checksum` still exists for small databases. Large databases should
-use the chunked API so checksum verification does not depend on one update
-message scanning the whole DB image.
+The Rust facade still provides `Db::refresh_checksum` for local or explicitly
+bounded use. Canister endpoints should prefer `db_refresh_checksum_chunk` so
+checksum verification does not depend on one update message scanning the whole
+DB image.
 
 ## Build Flags
 
@@ -617,7 +616,6 @@ npm test
 npm run build:wasm
 icp build
 npm run test:pocketic
-npm run test:pocketic:compat
 cargo package
 scripts/check-release-package.sh
 wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm
@@ -628,10 +626,8 @@ Current coverage:
 - VFS read/write/truncate/filesize behavior
 - rollback on SQL error
 - read-only query mode
-- read and write connection cache invalidation around updates, import, and compact
+- read and write connection cache invalidation around updates
 - reusable statements and 32-entry LRU cached prepared statements
-- chunked export/import with checksum verification
-- failed import preserving the existing database
 - capacity and sparse write bounds
 - failpoints for overlay write, truncate, commit capacity, page write, and superblock publish
 - in-place commit, truncate, and sparse-extend behavior
@@ -644,8 +640,8 @@ Current coverage:
 
 ## Operations
 
-See [docs/OPERATIONS.md](docs/OPERATIONS.md) for transaction rules, import
-recovery, capacity handling, and integrity checks.
+See [docs/OPERATIONS.md](docs/OPERATIONS.md) for transaction rules, capacity
+handling, and integrity checks.
 
 See [docs/RELEASE.md](docs/RELEASE.md) for release gates and publish-time
 version/tag checks.

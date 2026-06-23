@@ -14,10 +14,9 @@ semantics requires a breaking major release.
 PocketIC tests. Its management method names are reference-only except for the
 resource observation fields documented below: `db_meta.allocated_bytes`,
 `db_meta.orphan_bytes_estimate`, `db_meta.page_table_bytes`,
-`db_meta.zero_extent_count`, and `db_meta.compact_recommended` remain stable
-monitoring semantics for `2.x`. Generated DID compatibility for unrelated
-reference methods and the `canister-api-test-failpoints` feature are outside
-the stable contract.
+and `db_meta.zero_extent_count` remain stable monitoring semantics for `2.x`.
+Generated DID compatibility for unrelated reference methods and the
+`canister-api-test-failpoints` feature are outside the stable contract.
 
 The frozen public Rust surface is tracked by
 `docs/PUBLIC_API_2_0.snapshot` and checked by
@@ -35,7 +34,8 @@ The frozen public Rust surface is tracked by
   `CURRENT_LAYOUT_VERSION`
 - `stable_blob::invalidate_read_cache()` was removed because v8 no longer has
   a page-table read cache
-- `compact()` remains public but is a no-op for v8
+- import/export/compact are not exposed by the Rust facade or reference
+  canister in the current release
 
 Applications initialize a `MemoryManager<DefaultMemoryImpl>` from this crate,
 choose a dedicated `MemoryId`, and pass the resulting
@@ -44,7 +44,7 @@ The crate does not reserve a `MemoryId`; the application must choose one,
 persist that choice across upgrades, and never reuse it for another stable
 structure.
 
-`Db::update`, `Db::query`, migration, checksum, import/export, and compact APIs
+`Db::update`, `Db::query`, migration, and checksum APIs
 require successful `Db::init(memory)` first. Calling them before initialization
 returns `DbError::StableMemoryNotInitialized`. Calling `Db::init(memory)` twice
 in the same Wasm instance returns `DbError::StableMemoryAlreadyInitialized`.
@@ -61,7 +61,7 @@ rewritten. This protection is scoped to the selected virtual memory; raw backing
 memory that is not already a MemoryManager image should use strict
 MemoryManager initialization in upgrade-sensitive code. The guard protects
 existing `ic-rusqlite` raw SQLite images whose first bytes are
-`SQLite format 3\0`; migrate those images through export/import only.
+`SQLite format 3\0`; this release has no direct migration path for those images.
 
 The bundled MemoryManager-compatible `MemoryId` is `u8`-backed. Values
 `0..=254` are usable by applications. `MemoryId::new(255)` is invalid because
@@ -78,13 +78,9 @@ instead of implicit new-layout initialization or panic.
 ## Upgrade Contract
 
 `2.0.0` is a breaking stable-layout release. It does not read `1.x` / v6
-page-map images in place. A canister that still contains a v6 image must export
-the logical SQLite image with the old version, install or create a fresh v8
-canister, then import the exported image.
-
-Compatibility gates verify logical export/import from old fixtures into the
-current canister. Direct upgrade success from `0.2.x` or `1.x` stable memory is
-not a `2.x` requirement.
+page-map images in place. Cross-version import is not available in the current
+release. Direct upgrade success from `0.2.x` or `1.x` stable memory is not a
+`2.x` requirement.
 
 ## Stable Layout
 
@@ -104,9 +100,7 @@ The resource state exposed through `db_meta` is part of the layout contract:
 base, `active_bytes` is the logical active payload size
 `SUPERBLOCK_SIZE + db_size`, `allocated_bytes` is the selected stable-memory
 high-water mark, `orphan_bytes_estimate` is high-water slack outside
-`active_bytes`, and `page_table_bytes` is always `0` for v8. `active_bytes` is
-not the physical end offset `db_base_offset + db_size`; this matters after
-import, because import can publish an appended `db_base_offset`.
+`active_bytes`, and `page_table_bytes` is always `0` for v8.
 
 Logical SQLite page `n` lives at:
 
@@ -138,13 +132,10 @@ commit. This prevents stale physical bytes from becoming logical data without
 reintroducing page tables. Pathological
 truncate sequences that exceed the fixed zero-extent metadata limit fail with a
 zero-extent-limit error; they must not fall back to append-only rewriting.
-`db_refresh_checksum` and `db_refresh_checksum_chunk` are the only operations
-that persistently update the stored checksum after a normal commit.
-
-`compact()` is retained as a public API but is a no-op for v8. Stable memory
-does not shrink, so compact does not lower `allocated_bytes`, the high-water
-mark, or `orphan_bytes_estimate`; it is not a reclaim operation in this layout.
-`compact_recommended` is always `false` for v8.
+`db_refresh_checksum` and `db_refresh_checksum_chunk` are the only public
+operations that persistently update the stored checksum after a normal commit.
+Stable memory does not shrink. `orphan_bytes_estimate` is monitoring data, not
+a promise that a public reclaim operation exists.
 
 The v8 resource proof obligations are:
 
@@ -154,16 +145,14 @@ The v8 resource proof obligations are:
 | normal commit requiring growth | grow beyond the stable-page-rounded required end | `db_base_offset` stable; growth is bounded by the computed physical write end |
 | dirty page write | write dirty page data to a newly appended image copy | physical offset is `db_base_offset + page_no * SQLITE_PAGE_SIZE` |
 | truncate | make truncated tail pages logically readable as stale physical data or fall back to append-only rewriting when zero extents are exhausted | inactive tail pages are masked by zero extents until a future write materializes them; zero-extent exhaustion returns an error |
-| compact | claim reclaim or lower stable-memory high water | no-op; `allocated_bytes`, high-water mark, `orphan_bytes_estimate`, and `db_base_offset` stay unchanged |
-| import or fresh base creation | reuse normal commit invariants while intentionally replacing the image base | append-base use is limited to import/fresh-base paths and must publish a complete logical image |
-| failed write/grow/import step | publish partially updated layout metadata as committed state | committed superblock remains the authority; `page_table_offset == 0` for v8 committed state |
+| failed write/grow step | publish partially updated layout metadata as committed state | committed superblock remains the authority; `page_table_offset == 0` for v8 committed state |
 
 Design-review coverage for capacity-sensitive terms:
 
 | Term | Contract location | Proof or regression coverage |
 | --- | --- | --- |
 | `append-only` | normal commit must not allocate a fresh append base | Verus in-place resource proof, repeated-update Rust/PocketIC/local guard |
-| `compact` / `reclaim` | v8 compact is no-op, not reclaim | Verus compact no-op proof, repeated compact Rust test |
+| `compact` / `reclaim` | no public reclaim operation exists in the current release | resource monitoring and repeated-update guards |
 | `orphan` | high-water slack observation only | operations monitoring spec, compact non-reclaim regression |
 | `fallback` | no alternate append path for normal commit | normal commit negative spec and capacity guard |
 | `page_table` | v8 committed state publishes no page table | Verus current-layout proof and resource-shape tests |
@@ -175,13 +164,9 @@ resource invariants that a `2.x` implementation must keep satisfying.
 these obligations to the Verus abstract models and the Rust/PocketIC/local
 capacity guards.
 
-Fresh images normally use `64KiB` as `db_base_offset`. Successful import
-replaces the logical SQLite image by setting `db_base_offset` to the appended
-`import_base_offset` and resets the superblock schema-version cache to `0`;
-callers must run the configured migrations again to resynchronize the cache with
-the imported image's migration table. Failed or cancelled import keeps the
-committed image authoritative, but stable memory does not shrink, so staging
-bytes may remain as high-water slack.
+Fresh images normally use `64KiB` as `db_base_offset`. Superblock import fields
+remain encoded for stable-layout compatibility, but no public import API uses
+them in the current release.
 
 ## 2.0 Compatibility Contract
 
@@ -198,9 +183,6 @@ The `2.0` line freezes these surfaces for all `2.x` releases:
   `StableMemoryError::UnsupportedLayoutVersion(6)`
 - bundled MemoryManager-compatible layout for `MemoryId` values `0..=254`,
   matching the `ic-stable-structures` 0.7 memory-manager layout
-- logical export format: byte-for-byte SQLite image over `0..db_size`
-- import/export checksum format: FNV-1a 64-bit checksum over the logical SQLite
-  image bytes in ascending offset order
 - public Rust API: top-level re-exports, `config`, `db`, and documented
   `Db`/`DbHandle` facade types. Low-level `read_metrics`, `sqlite_vfs`, and
   `stable` modules are not public compatibility surface

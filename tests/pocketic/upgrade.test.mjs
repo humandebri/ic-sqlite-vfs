@@ -25,10 +25,6 @@ test("PocketIC stable write trap rolls back failed update", { timeout }, async (
   await withPocketIc("stableWriteTrapRollsBackFailedUpdate", stableWriteTrapRollsBackFailedUpdate);
 });
 
-test("PocketIC chunked import rejects wrong checksum", { timeout }, async () => {
-  await withPocketIc("chunkedImportRejectsWrongChecksum", chunkedImportRejectsWrongChecksum);
-});
-
 test("PocketIC management methods require controller", { timeout }, async () => {
   await withPocketIc("managementMethodsRequireController", managementMethodsRequireController);
 });
@@ -143,11 +139,9 @@ async function stableWriteTrapRollsBackFailedUpdate(pic, name) {
 
   step(name, "write baseline value");
   assert.deepEqual(await actor.kv_put("trap", "before"), { Ok: null });
-  step(name, "snapshot committed image");
+  step(name, "snapshot committed metadata");
   const beforeMeta = await actor.db_meta();
   assert.equal("Ok" in beforeMeta, true);
-  const beforeImage = await actor.db_export_chunk(0n, beforeMeta.Ok.db_size);
-  assert.equal("Ok" in beforeImage, true);
   step(name, "enable stable write trap");
   assert.deepEqual(await actor.db_test_trap_after_stable_write(1n), { Ok: null });
   step(name, "trigger trapped update");
@@ -163,8 +157,6 @@ async function stableWriteTrapRollsBackFailedUpdate(pic, name) {
   assert.deepEqual(await actor.db_integrity_check(), { Ok: "ok" });
   const afterMeta = await actor.db_meta();
   assert.deepEqual(afterMeta, beforeMeta);
-  const afterImage = await actor.db_export_chunk(0n, beforeMeta.Ok.db_size);
-  assert.deepEqual(afterImage, beforeImage);
 }
 
 async function precompiledSqliteArchiveHasExpectedFeatures(pic, name) {
@@ -175,59 +167,77 @@ async function precompiledSqliteArchiveHasExpectedFeatures(pic, name) {
   assert.deepEqual(await actor.db_test_sqlite_feature_probe(), { Ok: null });
 }
 
-async function chunkedImportRejectsWrongChecksum(pic, name) {
-  step(name, "setup canister");
-  const { actor } = await pic.setupCanister({ idlFactory, wasm });
-  step(name, "write source row");
-  assert.deepEqual(await actor.kv_put("key", "value"), { Ok: null });
-  step(name, "refresh checksum");
-  const refreshed = await actor.db_refresh_checksum();
-  assert.equal("Ok" in refreshed, true);
-
-  step(name, "export current image");
-  const meta = await actor.db_meta();
-  assert.equal("Ok" in meta, true);
-  assert.equal(meta.Ok.checksum, refreshed.Ok);
-  assert.equal(meta.Ok.checksum_stale, false);
-  const exported = await actor.db_export_chunk(0n, meta.Ok.db_size);
-  assert.equal("Ok" in exported, true);
-
-  step(name, "import with wrong checksum");
-  assert.deepEqual(await actor.db_begin_import(meta.Ok.db_size, refreshed.Ok + 1n), { Ok: null });
-  assert.deepEqual(await actor.db_import_chunk(0n, exported.Ok), { Ok: null });
-  step(name, "finish import and expect mismatch");
-  const finish = await actor.db_finish_import();
-
-  assert.equal("Err" in finish, true);
-  assert.match(finish.Err, /checksum mismatch/);
-}
-
 async function managementMethodsRequireController(pic, name) {
   step(name, "setup canister");
   const { actor, canisterId } = await pic.setupCanister({ idlFactory, wasm });
   step(name, "controller methods succeed");
+  assert.deepEqual(await actor.kv_put("controller", "value"), { Ok: null });
+  assert.deepEqual(await actor.kv_set_note("controller", "note"), { Ok: null });
+  assert.deepEqual(await actor.kv_count(), { Ok: 1n });
   assert.equal("Ok" in await actor.db_meta(), true);
-  assert.equal("Ok" in await actor.db_refresh_checksum(), true);
+  const oneShotRefresh = await actor.db_refresh_checksum();
+  assert.equal("Err" in oneShotRefresh, true);
+  assert.match(oneShotRefresh.Err, /use db_refresh_checksum_chunk/);
   const chunk = await actor.db_refresh_checksum_chunk(64n);
   assert.equal("Ok" in chunk, true);
+  step(name, "controller methods reject oversized work");
+  await expectErr(
+    "zero checksum refresh chunk",
+    actor.db_refresh_checksum_chunk(0n),
+    /greater than zero/,
+  );
+  await expectErr(
+    "large checksum refresh chunk",
+    actor.db_refresh_checksum_chunk(4n * 1024n * 1024n + 1n),
+    /at most/,
+  );
 
   step(name, "non-controller methods fail");
   const attacker = pic.createActor(idlFactory, canisterId);
   attacker.setIdentity(createIdentity("not-a-controller"));
-  const denied = await attacker.db_export_chunk(0n, 1n);
+  const deniedPut = await attacker.kv_put("attacker", "bad");
+  const deniedNote = await attacker.kv_set_note("controller", "bad");
+  const deniedCount = await attacker.kv_count();
   const deniedRefresh = await attacker.db_refresh_checksum();
   const deniedChunk = await attacker.db_refresh_checksum_chunk(64n);
-  assert.deepEqual(await actor.db_begin_import(1n, 0n), { Ok: null });
-  const deniedCancel = await attacker.db_cancel_import();
+  assert.deepEqual(await attacker.kv_get("controller"), { Ok: ["value"] });
+  assert.deepEqual(await attacker.kv_get_many(["controller", "missing"]), {
+    Ok: [["value"], []],
+  });
+  assert.deepEqual(await attacker.kv_get_note("controller"), { Ok: ["note"] });
 
-  assert.equal("Err" in denied, true);
-  assert.match(denied.Err, /not a controller/);
+  assert.equal("Err" in deniedPut, true);
+  assert.match(deniedPut.Err, /not a controller/);
+  assert.equal("Err" in deniedNote, true);
+  assert.match(deniedNote.Err, /not a controller/);
+  assert.equal("Err" in deniedCount, true);
+  assert.match(deniedCount.Err, /not a controller/);
   assert.equal("Err" in deniedRefresh, true);
   assert.match(deniedRefresh.Err, /not a controller/);
   assert.equal("Err" in deniedChunk, true);
   assert.match(deniedChunk.Err, /not a controller/);
-  assert.equal("Err" in deniedCancel, true);
-  assert.match(deniedCancel.Err, /not a controller/);
-  step(name, "controller cancels import");
-  assert.deepEqual(await actor.db_cancel_import(), { Ok: null });
+}
+
+async function refreshChecksumByChunks(actor, maxChunkSize) {
+  let refresh;
+  do {
+    refresh = await expectOk(
+      "refresh checksum chunk",
+      actor.db_refresh_checksum_chunk(maxChunkSize),
+    );
+  } while (!refresh.complete);
+  return refresh;
+}
+
+async function expectErr(name, promise, pattern) {
+  const result = await promise;
+  assert.equal("Err" in result, true, `${name} unexpectedly succeeded`);
+  assert.match(result.Err, pattern);
+  return result.Err;
+}
+
+async function expectOk(name, promise) {
+  const result = await promise;
+  assert.equal("Ok" in result, true, `${name} failed: ${result.Err}`);
+  return result.Ok;
 }

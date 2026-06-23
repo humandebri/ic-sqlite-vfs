@@ -14,8 +14,6 @@ export const idlFactory = ({ IDL }) => {
     checksum_stale: IDL.Bool,
     checksum_refreshing: IDL.Bool,
     checksum_refresh_offset: IDL.Nat64,
-    importing: IDL.Bool,
-    import_written_until: IDL.Nat64,
     layout_version: IDL.Nat64,
     page_count: IDL.Nat64,
     page_table_bytes: IDL.Nat64,
@@ -23,8 +21,7 @@ export const idlFactory = ({ IDL }) => {
     active_bytes: IDL.Nat64,
     allocated_bytes: IDL.Nat64,
     orphan_bytes_estimate: IDL.Nat64,
-    orphan_ratio_basis_points: IDL.Nat64,
-    compact_recommended: IDL.Bool
+    orphan_ratio_basis_points: IDL.Nat64
   });
   const ChecksumRefresh = IDL.Record({
     complete: IDL.Bool,
@@ -44,12 +41,6 @@ export const idlFactory = ({ IDL }) => {
     db_checksum: IDL.Func([], [result(IDL.Nat64)], ["query"]),
     db_refresh_checksum: IDL.Func([], [result(IDL.Nat64)], []),
     db_refresh_checksum_chunk: IDL.Func([IDL.Nat64], [result(ChecksumRefresh)], []),
-    db_export_chunk: IDL.Func([IDL.Nat64, IDL.Nat64], [result(IDL.Vec(IDL.Nat8))], ["query"]),
-    db_begin_import: IDL.Func([IDL.Nat64, IDL.Nat64], [result(IDL.Null)], []),
-    db_import_chunk: IDL.Func([IDL.Nat64, IDL.Vec(IDL.Nat8)], [result(IDL.Null)], []),
-    db_finish_import: IDL.Func([], [result(IDL.Null)], []),
-    db_cancel_import: IDL.Func([], [result(IDL.Null)], []),
-    db_compact: IDL.Func([], [result(IDL.Null)], []),
     db_test_sqlite_feature_probe: IDL.Func([], [result(IDL.Null)], []),
     db_test_trap_after_stable_write: IDL.Func([IDL.Nat64], [result(IDL.Null)], []),
     db_test_clear_failpoints: IDL.Func([], [result(IDL.Null)], [])

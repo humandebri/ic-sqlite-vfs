@@ -1,9 +1,8 @@
 #![no_main]
 
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
-use ic_sqlite_vfs::stable::memory;
-use ic_sqlite_vfs::stable::meta::Superblock;
+use ic_sqlite_vfs::test_support::lock;
+use ic_sqlite_vfs::test_support::memory;
 use ic_sqlite_vfs::{params, Db};
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
@@ -81,15 +80,7 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 
-    Db::compact().expect("compact should succeed");
-    assert_eq!(read_rows(), model);
-
-    let db_size = Superblock::load().expect("superblock should load").db_size;
-    let checksum = Db::refresh_checksum().expect("checksum refresh should succeed");
-    let image = Db::export_chunk(0, db_size).expect("export should succeed");
-    Db::begin_import(db_size, checksum).expect("import begin should succeed");
-    Db::import_chunk(0, &image).expect("import chunk should succeed");
-    Db::finish_import().expect("import finish should succeed");
+    Db::refresh_checksum().expect("checksum refresh should succeed");
     assert_eq!(read_rows(), model);
     assert_eq!(
         Db::integrity_check().expect("integrity check should run"),
@@ -98,7 +89,6 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn reset() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     Db::init(memory::memory_for_tests()).expect("test memory should initialize");

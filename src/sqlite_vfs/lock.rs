@@ -89,6 +89,7 @@ pub(crate) fn level_for(context: ContextId) -> c_int {
     })
 }
 
+#[allow(dead_code)]
 pub fn reset_for_tests() {
     LOCK_LEVEL.with(|levels| levels.borrow_mut().clear());
 }

@@ -33,7 +33,7 @@ rollback, and panic do not change the active image under that runtime contract.
 
 This library does not analyze arbitrary SQL for index use or query complexity.
 Its guarantee stops at synchronous transactions, `await` rejection, read-only
-and query-only query connections, and admin checksum/import/export consistency.
+and query-only query connections, and admin checksum consistency.
 
 The consuming canister must design `WHERE` clauses, indexes, `LIMIT`,
 pagination, and input length caps for each application query. The reference
@@ -75,11 +75,11 @@ unallocated-bucket marker and must not be used.
 
 `MemoryId::new(120)` is the default fresh destination slot anchor matching the
 `ic-rusqlite` default mounted DB. Do not call `Db::init` on an existing
-`ic-rusqlite` `120` image; export the logical SQLite image from the old
-canister and import it into a fresh v8 image. A new single-DB canister can use
-`120` directly. A per-slot archive can put the imported/default slot at `120`,
-or reserve `120` for the index/default DB and allocate adjacent
-application-owned IDs for archive slots.
+`ic-rusqlite` `120` image. The current release has no direct migration path
+from `ic-rusqlite`; import can return only after a bounded staging design. A
+new single-DB canister can use `120` directly. A per-slot archive can reserve
+`120` for the index/default DB and allocate adjacent application-owned IDs for
+archive slots.
 
 The slot catalog belongs to the consuming canister. Store
 `archive_id -> slot_id -> MemoryId` in stable state, then rebuild the same
@@ -91,14 +91,15 @@ DB to another `MemoryId` to free a slot. If deleted slots are reused, store a
 generation or tombstone so stale archive references cannot open the new
 occupant.
 
-Run admin operations per slot. `integrity_check`, checksum refresh,
-import/export, and compact must name the target `DbHandle`; backups should save
-the catalog snapshot and the matching image for each slot.
+Run admin operations per slot. `integrity_check` and checksum refresh must name
+the target `DbHandle`.
 
 ## Migration Failure Recovery
 
-Migrations run through `Db::migrate` in one transaction. On failure, SQL is
-rolled back and `superblock.schema_version` is not advanced.
+Migrations run through `Db::migrate` in one transaction. Versions must be
+strictly increasing, and SQL must be static trusted SQL rather than user-built
+text. On failure, SQL is rolled back and `superblock.schema_version` is not
+advanced.
 
 Recovery steps:
 
@@ -111,33 +112,10 @@ Recovery steps:
 
 ## Import
 
-Import must run through controller-only APIs and must require checksum match.
-
-1. On the source, run `db_refresh_checksum_chunk(max_bytes)` until
-   `complete == true`.
-2. Read `db_size`, `checksum`, and `last_tx_id` from `db_meta`.
-3. Read every byte through `db_export_chunk(offset, len)`.
-4. After export, confirm that `db_meta.last_tx_id` did not change.
-5. On the destination, call `db_begin_import(total_size, expected_checksum)`.
-6. Call `db_import_chunk` in order from offset 0.
-7. `db_finish_import` verifies checksum and clears the import flag.
-
-During import, the SQLite VFS rejects `/main.db` open, so normal DB APIs fail.
-On checksum mismatch, the staging area is discarded, the existing DB is kept,
-and the import flag is cleared. To abort an unfinished import, the controller
-calls `db_cancel_import`. Discarded staging bytes can still remain as
-high-water slack because stable memory does not shrink. Treat repeated failed
-imports as a capacity event, and prefer retrying large images on a fresh
-destination.
-
-Import restores the raw SQLite image, not application schema intent. If the
-target canister expects newer migrations than the imported image has, run the
-application migration path after import before exposing new-schema methods.
-Successful import resets the superblock schema-version cache to `0`, so
-`db_meta.schema_version` cannot claim the old destination schema for the new
-image. The reference compatibility test verifies this by importing `0.2.2` and
-`1.0.0` logical SQLite images, then running the current `post_upgrade`
-migration path.
+Import/export/compact are not exposed by the Rust facade or reference canister
+in the current release. There is no supported direct migration from
+`ic-rusqlite` or older `ic-sqlite-vfs` layouts. Reintroduction requires a
+bounded staging design with explicit capacity behavior.
 
 Reference controller guard:
 
@@ -151,23 +129,11 @@ fn require_controller() -> Result<(), String> {
     }
 }
 
-#[ic_cdk::query]
-fn db_export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, String> {
-    require_controller()?;
-    ic_sqlite_vfs::Db::export_chunk(offset, len).map_err(|error| error.to_string())
-}
-
 #[ic_cdk::update]
-fn db_begin_import(total_size: u64, checksum: u64) -> Result<(), String> {
+fn db_refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, String> {
     require_controller()?;
-    ic_sqlite_vfs::Db::begin_import(total_size, checksum)
+    ic_sqlite_vfs::Db::refresh_checksum_chunk(max_bytes)
         .map_err(|error| error.to_string())
-}
-
-#[ic_cdk::update]
-fn db_compact() -> Result<(), String> {
-    require_controller()?;
-    ic_sqlite_vfs::Db::compact().map_err(|error| error.to_string())
 }
 ```
 
@@ -182,23 +148,19 @@ in place before updating the superblock. On runtimes without equivalent trap
 rollback, a failure after page writes and before superblock publish can leave
 new page bytes behind the old superblock. Truncate and sparse re-extend paths
 zero-fill the logical gap with page writes and v8 zero-mask metadata, so stale
-physical bytes never become logical SQLite data. `db_compact` remains available
-but is a no-op for the v8 layout, and `db_meta.compact_recommended` stays
-`false`. `orphan_bytes_estimate` is a high-water slack observation, not a
-promise that compact can reclaim bytes. Stable memory does not shrink, so
-compact must not be used as an operational remedy for high-water growth.
+physical bytes never become logical SQLite data. `orphan_bytes_estimate` is a
+high-water slack observation, not a promise that a public reclaim operation
+exists. Stable memory does not shrink.
 
 ## Integrity
 
 Admin monitoring should check these values periodically:
 
 - `db_integrity_check == "ok"`
-- `db_meta.importing == false`
 - `db_meta.checksum_stale == false` or a controller checksum refresh job is in
   progress
 - `db_meta.checksum_refreshing == false`
 - `db_meta.orphan_ratio_basis_points`
-- `db_meta.compact_recommended == false`
 
 `db_meta.checksum` is the last verified checksum. `checksum_stale == true` can
 be normal after updates. When a fresh verified checksum is required, a
@@ -213,8 +175,6 @@ updates:
   `page_table_bytes == 0`
 - pathological truncate loops can exhaust the fixed zero-extent metadata limit;
   that condition is an error, not a compact or append-only fallback trigger
-- repeated `db_compact` calls should preserve `allocated_bytes`,
-  `orphan_bytes_estimate`, and `compact_recommended == false`
 
 For the benchmark canister, `scripts/bench-kv-local.sh <rows> <writes>` runs
 `bench_capacity_growth_guard` after the normal read/write probes. The guard
@@ -228,6 +188,4 @@ The operational interpretation is strict:
 | `db_meta.allocated_bytes` during existing-capacity updates | unchanged | possible append-only regression or unexpected stable grow |
 | `db_meta.page_table_bytes` | `0` | obsolete page-table layout leaked into v8 state |
 | `db_meta.zero_extent_count` near the fixed metadata limit | bounded truncate metadata | pathological truncate sequence may start returning zero-extent-limit errors |
-| `db_meta.compact_recommended` | `false` | compact is being advertised as reclaim despite v8 no-op semantics |
-| repeated `db_compact` | no resource decrease is promised | do not treat compact success as capacity recovery |
-| `db_base_offset` after normal updates | unchanged | image base replacement escaped the import/fresh-base path |
+| `db_base_offset` after normal updates | unchanged | image base replacement escaped normal in-place commit |

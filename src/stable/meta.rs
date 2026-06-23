@@ -160,12 +160,14 @@ impl Superblock {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn set_db_size(size: u64) -> Result<(), StableMemoryError> {
         let mut block = Self::load()?;
         block.db_size = size;
         block.store_preallocated()
     }
 
+    #[allow(dead_code)]
     pub fn record_committed_tx() -> Result<(), StableMemoryError> {
         let mut block = Self::load()?;
         block.last_tx_id = block.last_tx_id.saturating_add(1);
@@ -215,6 +217,7 @@ impl Superblock {
         self.flags & FLAG_IMPORTING != 0
     }
 
+    #[allow(dead_code)]
     pub fn is_checksum_stale(&self) -> bool {
         self.flags & FLAG_CHECKSUM_STALE != 0
     }
@@ -227,10 +230,12 @@ impl Superblock {
         &self.zero_extents
     }
 
+    #[allow(dead_code)]
     pub(crate) fn zero_extent_count(&self) -> usize {
         self.zero_extents.len()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn clear_zero_extents(&mut self) {
         self.zero_extents.clear();
     }

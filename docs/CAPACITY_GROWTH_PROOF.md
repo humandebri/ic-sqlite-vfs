@@ -52,12 +52,11 @@ page 上で zero-fill し、commit 時に物理反映する。後続 dirty write
 上限判定は正規化後の extent 数で行う。上限超過はエラーであり、append-only
 fallback しない。
 
-**D5: compact no-op.** v8 `compact()` は public API として残るが、stable memory
-高水位を下げず、page data も page table も再配置しない。
+**D5: no public reclaim.** 現行 release は public compact/reclaim API を公開しない。
+`orphan_bytes_estimate` は監視値であり、回収可能性の約束ではない。
 
-**D6: import/fresh base.** import と fresh base creation は通常 commit ではない。
-完全な logical image を別 base へ staging し、checksum 成功時だけ publish する。
-この経路は意図的に容量増加し得る。
+**D6: fresh base.** fresh base creation は通常 commit ではない。通常 commit の
+in-place 資源不変条件をこの経路に適用しない。
 
 ## 3. 定理
 
@@ -87,14 +86,12 @@ write は mask を解除して materialize する。truncate tail が既存 exte
 対して行う。正規化後も zero extent 上限を超える場合は publish せずエラーに
 するため、append-only fallback による資源退行はない。
 
-**T6: compact is not reclaim.** D5 と A1 により v8 `compact()` は
-`allocated_bytes`、`high_water_mark`、`orphan_bytes_estimate`、`db_base_offset`
-を下げない。`compact_recommended == false` は「回収不要」ではなく「この layout
-では compact が回収機構ではない」という意味である。
+**T6: public reclaim is unavailable.** D5 と A1 により、現行 release には
+`allocated_bytes`、`high_water_mark`、`orphan_bytes_estimate` を下げる public
+operation が存在しない。
 
-**T7: import is an explicit exception.** D6 は通常 commit ではなく、staging base
-へ image を書くため容量増加し得る。checksum mismatch または未完了 finish は
-committed image を維持し、staging bytes は high-water slack として残り得る。
+**T7: fresh base is an explicit exception.** D6 は通常 commit ではない。
+通常更新の容量不変条件から除外する。
 
 **T8: in-place atomicity depends on IC message atomicity.** v8 normal commit が
 単一 message execution 内で開始・完了し、commit 中に inter-canister call、
@@ -112,8 +109,8 @@ shadow paging ではなく IC 基盤層に依存する。runtime-contract grep �
 | T3 | `dirty_page_write_offset_matches_in_place_layout` | `in_place_commit_keeps_dirty_page_offsets_stable` |
 | T4 | `normal_commit_within_capacity_does_not_grow_resources` | `repeated_existing_page_updates_do_not_grow_allocated_bytes`, `bench_capacity_growth_guard` |
 | T5 | `truncate_zero_extents_are_normalized`, `truncate_zero_extents_mask_matches_model`, `truncate_zero_extents_publish_success`, `truncate_zero_extent_limit_error_blocks_publish`; zero extent external-body lemmas are trusted | `zero_extent_limit_is_rejected_without_fallback`, independent normalizer property tests, normalized truncate/limit tests, truncate/grow roundtrip tests |
-| T6 | `compact_preserves_resource_high_water`, `v8_storage_stats_never_recommend_compact` | `compact_preserves_logical_database_contents`, repeated compact resource checks |
-| T7 | `checksum_mismatch_preserves_committed_image`, `checksum_match_publishes_staging_image`, `successful_import_resets_schema_version`, `complete_import_may_increase_resource_high_water` | `failed_import_preserves_existing_database`, import checksum and cross-version tests |
+| T6 | public reclaimなしの負の仕様 | `docs/API_STABILITY.md`, `docs/OPERATIONS.md` |
+| T7 | fresh base は通常 commit と別経路 | fresh initialization tests |
 | T8 | 対象外。IC公式仕様を公理として採用 | runtime-contract canister API check, failpoint rollback tests, PocketIC upgrade/regression |
 
 ## 5. 境界
@@ -131,8 +128,6 @@ shadow paging ではなく IC 基盤層に依存する。runtime-contract grep �
   lemma は `#[verifier::external_body]` 付きの tracked trusted axiom。
   production の `normalize_zero_extents` との対応は Rust の independent model
   property test と merge/split/limit test で補う。
-- import の Verus モデルは staging 書込後の high-water を byte-level lower
-  bound として扱い、stable page rounding の厳密値は Rust / PocketIC 回帰で補う。
 - 論理 file extension gap の byte-level zero-fill は Verus の page-level
   zero extent モデルだけでは完結しない。旧 EOF / 新 EOF がページ途中にある
   場合の補正は Rust 実装と stale-byte sentinel test で検証する。

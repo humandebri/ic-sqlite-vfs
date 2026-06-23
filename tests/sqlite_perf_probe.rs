@@ -126,7 +126,7 @@ fn batch_insert_update_and_checksum_scale() {
 #[test]
 #[ignore]
 #[serial]
-fn indexed_read_scan_and_export_scale() {
+fn indexed_read_scan_and_checksum_scale() {
     reset();
     let rows = 20_000_u64;
     Db::update(|connection| {
@@ -183,15 +183,15 @@ fn indexed_read_scan_and_export_scale() {
     );
     assert_eq!(count, i64::try_from(rows).unwrap());
 
-    reset_read_metrics();
     let start = Instant::now();
-    let exported = Db::export_chunk(0, db_size).unwrap();
-    print_read_metric(
-        "export_full_image",
+    let checksum = Db::refresh_checksum().unwrap();
+    let (db_size, _page_count, pages) = meta();
+    print_metric(
+        "refresh_checksum_after_reads",
         rows,
         start.elapsed().as_millis(),
         db_size,
         pages,
     );
-    assert_eq!(exported.len(), usize::try_from(db_size).unwrap());
+    assert_ne!(checksum, 0);
 }

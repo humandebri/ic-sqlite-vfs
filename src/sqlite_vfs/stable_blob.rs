@@ -31,6 +31,7 @@ pub struct ChecksumRefresh {
     pub db_size: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageStats {
     pub layout_version: u64,
@@ -291,6 +292,7 @@ pub(crate) fn file_size() -> Result<u64, StableMemoryError> {
     Ok(Superblock::load()?.db_size)
 }
 
+#[allow(dead_code)]
 pub fn export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, StableMemoryError> {
     reject_during_update()?;
     let block = Superblock::load()?;
@@ -304,6 +306,7 @@ pub fn export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, StableMemoryError>
     Ok(out)
 }
 
+#[allow(dead_code)]
 pub fn import_chunk(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -331,6 +334,7 @@ pub fn import_chunk(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> 
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn begin_import(total_size: u64, expected_checksum: u64) -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -349,6 +353,7 @@ pub fn begin_import(total_size: u64, expected_checksum: u64) -> Result<(), Stabl
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn finish_import() -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -389,6 +394,7 @@ pub fn finish_import() -> Result<(), StableMemoryError> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn cancel_import() -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -467,12 +473,14 @@ pub fn checksum() -> Result<u64, StableMemoryError> {
     checksum_logical_range(&block, block.db_size)
 }
 
+#[allow(dead_code)]
 pub fn compact() -> Result<(), StableMemoryError> {
     reject_during_update()?;
     ensure_current_layout()?;
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn storage_stats() -> Result<StorageStats, StableMemoryError> {
     let block = Superblock::load()?;
     ensure_current_layout()?;
@@ -941,6 +949,7 @@ fn checksum_logical_range(block: &Superblock, len: u64) -> Result<u64, StableMem
     Ok(hash)
 }
 
+#[allow(dead_code)]
 fn checksum_physical_range(base_offset: u64, len: u64) -> Result<u64, StableMemoryError> {
     let mut offset = 0_u64;
     let mut hash = fnv1a64(&[]);
@@ -956,6 +965,7 @@ fn checksum_physical_range(base_offset: u64, len: u64) -> Result<u64, StableMemo
     Ok(hash)
 }
 
+#[allow(dead_code)]
 fn clear_import(block: &mut Superblock) -> Result<(), StableMemoryError> {
     block.flags &= !FLAG_IMPORTING;
     block.import_expected_checksum = 0;
@@ -966,6 +976,7 @@ fn clear_import(block: &mut Superblock) -> Result<(), StableMemoryError> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn import_offset(block: &Superblock, offset: u64) -> Result<u64, StableMemoryError> {
     checked_add(block.import_base_offset, offset)
 }
@@ -974,6 +985,7 @@ fn active_page_count(block: &Superblock) -> Result<u64, StableMemoryError> {
     page_count_for_size(block.db_size)
 }
 
+#[allow(dead_code)]
 fn append_base() -> Result<u64, StableMemoryError> {
     // Fresh bases must append at the high-water mark; never reuse stale physical gaps.
     memory::size_pages()

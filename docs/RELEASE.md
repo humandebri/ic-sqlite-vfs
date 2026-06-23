@@ -18,7 +18,6 @@ cargo build --target wasm32-unknown-unknown --features canister-api
 cargo package --no-verify --allow-dirty
 cargo package --list --allow-dirty
 scripts/check-release-package.sh
-npm run test:pocketic:compat
 npm run test:pocketic:perf
 npm run build:wasm
 wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm
@@ -28,8 +27,8 @@ wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm
 GitHub Release artifact は `sqlite-precompiled,canister-api` の release profile
 で build した `target/pocketic/ic_sqlite_vfs.wasm` に統一する。
 `scripts/sqlite-critical-check.sh` は基礎検査、Verus proof、PocketIC regression、
-PocketIC performance/capacity regression を実行する。compat と package
-contents は workflow と release gate で明示実行する。
+PocketIC performance/capacity regression を実行する。package contents は workflow
+と release gate で明示実行する。
 Verus zero extent lemmas marked `#[verifier::external_body]` are tracked trusted
 axioms for this release. The release gate compensates with Rust property tests
 that compare the production normalizer against an independent model, but this is
@@ -44,20 +43,18 @@ tarballではなく git tag checkout 側のrelease gateで検証する。
 
 2.0.0 は breaking stable-layout release。v8 は SQLite image を
 `db_base_offset` 以降に in-place 保存する。v6 segmented page-map stable
-layout の直接 upgrade success は要求しない。旧 canister で logical SQLite
-image を export し、fresh v8 canister へ import する経路を release gate で
-検証する。
+layout の直接 upgrade success は要求しない。cross-version import は現行
+release から外す。
 In-place commit writes dirty pages before superblock publish and relies on IC
 message execution atomicity plus trap rollback. Commit must not perform
 inter-canister calls, `await`, or `ic0.call_perform`.
 
 公開Rust APIでは `PAGE_MAP_LAYOUT_VERSION` を削除し、
 `CURRENT_LAYOUT_VERSION` に改名する。v8 では page-table read cache がないため
-`stable_blob::invalidate_read_cache()` も削除する。`compact()` は public API として
-維持するが、v8 では no-op。
+`stable_blob::invalidate_read_cache()` も削除する。`compact()` は公開しない。
 `read_metrics`、`sqlite_vfs`、`stable` は public compatibility surface から外す。
 既存 `ic-rusqlite` raw SQLite image を直接 `Db::init` する経路は拒否し、
-旧 canister export から fresh v8 import だけを正式移行経路にする。
+正式移行経路は bounded staging 設計後に再導入する。
 
 ## Toolchain
 
@@ -78,12 +75,6 @@ release workflow も `Cargo.toml` の `rust-version` と同じ `1.95.0` を使�
 toolchain、同じマシン種別、同じ PocketIC version で3回以上実行し、最悪値が
 新閾値内に収まる場合だけ行う。ローカル単発の高速化・低速化は advisory として
 扱い、単独では閾値を変更しない。
-
-## Compatibility Fixtures
-
-`npm run test:pocketic:compat` は `0.2.2` と `1.0.0` の旧 canister から
-logical SQLite image を export し、current fresh canister へ import できることを
-検証する。2.0 では旧 stable layout の直接 upgrade success は要求しない。
 
 tag は `Cargo.toml` の version と一致させる。例: `version = "0.2.0"` なら tag は `v0.2.0`。
 crates.io publish は GitHub Actions では行わない。tag push と GitHub

@@ -58,7 +58,7 @@ fn snapshot() -> Snapshot {
         db_size: block.db_size,
         last_tx_id: block.last_tx_id,
         checksum: Db::db_checksum().unwrap(),
-        image: Db::export_chunk(0, block.db_size).unwrap(),
+        image: blob::export_chunk(0, block.db_size).unwrap(),
     }
 }
 
@@ -349,7 +349,7 @@ fn compact_is_noop_and_does_not_hit_write_failpoint() {
     let before = snapshot();
 
     memory::set_failpoint(MemoryFailpoint::TrapAfterWrite { ordinal: 1 });
-    Db::compact().unwrap();
+    blob::compact().unwrap();
     memory::clear_failpoint();
     assert_database_unchanged(&before);
 }

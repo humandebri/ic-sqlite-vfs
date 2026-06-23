@@ -45,20 +45,8 @@ src/db/migrate.rs:pub sql: &'static str,
 src/db/migrate.rs:pub struct Migration {
 src/db/migrate.rs:pub version: u64,
 src/db/mod.rs:pub enum DbError {
-src/db/mod.rs:pub fn begin_import(self, total_size: u64, expected_checksum: u64) -> Result<(), DbError> {
-src/db/mod.rs:pub fn begin_import(total_size: u64, expected_checksum: u64) -> Result<(), DbError> {
-src/db/mod.rs:pub fn cancel_import() -> Result<(), DbError> {
-src/db/mod.rs:pub fn cancel_import(self) -> Result<(), DbError> {
-src/db/mod.rs:pub fn compact() -> Result<(), DbError> {
-src/db/mod.rs:pub fn compact(self) -> Result<(), DbError> {
 src/db/mod.rs:pub fn db_checksum() -> Result<u64, DbError> {
 src/db/mod.rs:pub fn db_checksum(self) -> Result<u64, DbError> {
-src/db/mod.rs:pub fn export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, DbError> {
-src/db/mod.rs:pub fn export_chunk(self, offset: u64, len: u64) -> Result<Vec<u8>, DbError> {
-src/db/mod.rs:pub fn finish_import() -> Result<(), DbError> {
-src/db/mod.rs:pub fn finish_import(self) -> Result<(), DbError> {
-src/db/mod.rs:pub fn import_chunk(offset: u64, bytes: &[u8]) -> Result<(), DbError> {
-src/db/mod.rs:pub fn import_chunk(self, offset: u64, bytes: &[u8]) -> Result<(), DbError> {
 src/db/mod.rs:pub fn init(memory: DbMemory) -> Result<(), DbError> {
 src/db/mod.rs:pub fn init(memory: DbMemory) -> Result<Self, DbError> {
 src/db/mod.rs:pub fn integrity_check() -> Result<String, DbError> {

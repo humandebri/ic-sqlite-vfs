@@ -184,6 +184,7 @@ pub fn ensure_capacity(end_offset: u64) -> Result<(), StableMemoryError> {
     with_memory(|memory| ensure_memory_capacity(memory, end_offset))?
 }
 
+#[allow(dead_code)]
 pub fn read(offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
     if dst.is_empty() {
         return Ok(());
@@ -365,16 +366,19 @@ fn debug_assert_capacity(memory: &DbMemory, offset: u64, len: usize, operation: 
     }
 }
 
+#[allow(dead_code)]
 pub fn reset_for_tests() {
     clear_initialization();
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
     clear_failpoint();
 }
 
+#[allow(dead_code)]
 pub fn set_next_context_id_for_tests(value: u64) {
     NEXT_CONTEXT_ID.with(|next| next.set(value));
 }
 
+#[allow(dead_code)]
 pub(crate) fn clear_initialization() {
     DB_MEMORY.with(|memory| memory.borrow_mut().clear());
     REGISTERED_MEMORY.with(|memory| memory.borrow_mut().clear());
@@ -414,6 +418,7 @@ pub(crate) fn clear_failed_initialization(context: ContextId) {
     crate::stable::meta::clear_superblock_cache();
 }
 
+#[allow(dead_code)]
 pub fn snapshot_for_tests() -> Vec<u8> {
     let len = usize::try_from(size_pages().saturating_mul(STABLE_PAGE_SIZE))
         .expect("test memory size fits usize");
@@ -422,6 +427,7 @@ pub fn snapshot_for_tests() -> Vec<u8> {
     out
 }
 
+#[allow(dead_code)]
 pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
     reset_for_tests();
     let memory = memory_for_tests();
@@ -436,6 +442,7 @@ pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
     memory
 }
 
+#[allow(dead_code)]
 pub fn memory_for_tests() -> DbMemory {
     MemoryManager::init(DefaultMemoryImpl::default()).get(MemoryId::new(42))
 }
