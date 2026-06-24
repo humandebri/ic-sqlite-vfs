@@ -98,12 +98,6 @@ impl Superblock {
         }
         let mut bytes = [0_u8; ENCODED_LEN];
         memory::read_preallocated(SUPERBLOCK_OFFSET, &mut bytes)?;
-        let Ok(zero_extent_count) = usize::try_from(u64::from_le_bytes(eight(&bytes, 144))) else {
-            return Err(StableMemoryError::MetaChecksumMismatch);
-        };
-        if zero_extent_count > MAX_ZERO_EXTENTS {
-            return Err(StableMemoryError::MetaChecksumMismatch);
-        }
         let block = Self::decode(&bytes);
         if block.magic != MAGIC {
             return Err(StableMemoryError::ForeignStableMemoryImage);
@@ -117,6 +111,12 @@ impl Superblock {
             return Err(StableMemoryError::UnsupportedLayoutVersion(
                 block.layout_version,
             ));
+        }
+        let Ok(zero_extent_count) = usize::try_from(u64::from_le_bytes(eight(&bytes, 144))) else {
+            return Err(StableMemoryError::MetaChecksumMismatch);
+        };
+        if zero_extent_count > MAX_ZERO_EXTENTS {
+            return Err(StableMemoryError::MetaChecksumMismatch);
         }
         if !block.verify_checksum() {
             return Err(StableMemoryError::MetaChecksumMismatch);
@@ -540,6 +540,45 @@ mod tests {
         assert!(matches!(
             Superblock::load(),
             Err(StableMemoryError::MetaChecksumMismatch)
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_classifies_foreign_magic_before_v8_zero_extent_count() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let block = Superblock::fresh();
+        let mut encoded = block.encode();
+        encoded[0..8].copy_from_slice(b"NOTSQLIT");
+        encoded[144..152].copy_from_slice(&((MAX_ZERO_EXTENTS as u64) + 1).to_le_bytes());
+        crate::stable::memory::write(SUPERBLOCK_OFFSET, &encoded).unwrap();
+        clear_superblock_cache();
+
+        assert!(matches!(
+            Superblock::load(),
+            Err(StableMemoryError::ForeignStableMemoryImage)
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_classifies_older_layout_before_v8_zero_extent_count() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let mut block = Superblock::fresh();
+        block.layout_version = 6;
+        block.meta_checksum = block.compute_meta_checksum();
+        let mut encoded = block.encode();
+        encoded[144..152].copy_from_slice(&0xDEAD_BEEF_DEAD_BEEFu64.to_le_bytes());
+        crate::stable::memory::write(SUPERBLOCK_OFFSET, &encoded).unwrap();
+        clear_superblock_cache();
+
+        assert!(matches!(
+            Superblock::load(),
+            Err(StableMemoryError::UnsupportedLayoutVersion(6))
         ));
     }
 
