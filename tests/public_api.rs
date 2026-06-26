@@ -17,9 +17,33 @@ use ic_sqlite_vfs::db::statement::{
 use ic_sqlite_vfs::db::transaction::UpdateConnection;
 use ic_sqlite_vfs::db::value::{to_sql_ref, Null, ToSql, Value, NULL};
 use ic_sqlite_vfs::{
-    named_params, params, Db, DbError, DbHandle, DbMemory, DefaultMemoryImpl, MemoryId,
-    MemoryManager, MemoryManagerInitError, StableMemoryError,
+    named_params, params, Db, DbError, DbHandle, DbMemory, DefaultMemoryImpl, Memory, MemoryId,
+    MemoryIdentity, MemoryManager, MemoryManagerInitError, StableMemoryError,
 };
+
+struct DownstreamMemory;
+
+impl Memory for DownstreamMemory {
+    fn identity(&self) -> MemoryIdentity {
+        MemoryIdentity::custom("public-api-test/downstream-memory", 1)
+    }
+
+    fn size(&self) -> u64 {
+        0
+    }
+
+    fn grow(&self, _pages: u64) -> i64 {
+        -1
+    }
+
+    fn read(&self, _offset: u64, _dst: &mut [u8]) {
+        panic!("compile-only memory is not used at runtime");
+    }
+
+    fn write(&self, _offset: u64, _src: &[u8]) {
+        panic!("compile-only memory is not used at runtime");
+    }
+}
 
 #[test]
 fn documented_public_api_surface_compiles() {
@@ -29,8 +53,10 @@ fn documented_public_api_surface_compiles() {
         sql: "CREATE TABLE kv(key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);",
     }];
 
-    let _init: fn(DbMemory) -> Result<(), DbError> = Db::init;
-    let _handle_init: fn(DbMemory) -> Result<DbHandle, DbError> = DbHandle::init;
+    let _init: fn(DbMemory) -> Result<(), DbError> = Db::init::<DbMemory>;
+    let _handle_init: fn(DbMemory) -> Result<DbHandle, DbError> = DbHandle::init::<DbMemory>;
+    let _custom_identity = MemoryIdentity::custom("public-api-test", 1);
+    let _downstream_handle_init = DbHandle::init::<DownstreamMemory>;
     let _manager: MemoryManager<DefaultMemoryImpl> =
         MemoryManager::init(DefaultMemoryImpl::default());
     let _first_memory = MemoryManager::init(DefaultMemoryImpl::default()).get(MemoryId::new(121));

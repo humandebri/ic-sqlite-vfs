@@ -12,15 +12,9 @@ use crate::stable::memory_layout::{
     UNALLOCATED_BUCKET_MARKER,
 };
 use crate::stable::memory_manager_validation::{load_validated_layout, try_load_validated_layout};
-use crate::stable::raw_memory::{Memory, MemoryBackendIdentity};
+use crate::stable::raw_memory::{Memory, MemoryIdentity};
 use std::cell::RefCell;
 use std::rc::Rc;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct MemoryIdentity {
-    backend: MemoryBackendIdentity,
-    id: MemoryId,
-}
 
 #[derive(Clone)]
 pub struct MemoryManager<M: Memory> {
@@ -88,16 +82,18 @@ pub struct VirtualMemory<M: Memory> {
     cache: BucketCache,
 }
 impl<M: Memory> VirtualMemory<M> {
-    pub(crate) fn identity(&self) -> MemoryIdentity {
+    fn virtual_identity(&self) -> MemoryIdentity {
         let inner = self.memory_manager.borrow();
-        MemoryIdentity {
-            backend: inner.memory.identity(),
-            id: self.id,
-        }
+        let MemoryId(id) = self.id;
+        MemoryIdentity::virtual_memory(inner.memory.identity(), id)
     }
 }
 
 impl<M: Memory> Memory for VirtualMemory<M> {
+    fn identity(&self) -> MemoryIdentity {
+        self.virtual_identity()
+    }
+
     fn size(&self) -> u64 {
         self.memory_manager.borrow().memory_size(self.id)
     }

@@ -2,10 +2,10 @@
 
 ## Transaction Rule
 
-Canister `init` and `post_upgrade` must initialize one
-`MemoryManager<DefaultMemoryImpl>`, choose the SQLite `MemoryId`, and call
-`Db::init(memory)` before any DB operation. The same `MemoryId` must be used for
-the lifetime of the deployed canister.
+Canister `init` and `post_upgrade` must initialize a stable `Memory` backend and
+call `Db::init(memory)` before any DB operation. The default backend initializes
+one `MemoryManager<DefaultMemoryImpl>`, chooses the SQLite `MemoryId`, and uses
+the same `MemoryId` for the lifetime of the deployed canister.
 For upgrade-sensitive deployments, initialize preexisting raw stable memory
 through the strict MemoryManager path before selecting the SQLite virtual
 memory; `Db::init` only protects the selected virtual memory from foreign
@@ -68,10 +68,10 @@ constraints, or ad-hoc queries are worth the extra storage complexity.
 
 ## Per-slot Databases
 
-In a per-archive or per-slot layout, one slot maps to one dedicated `MemoryId`,
-one `DbHandle`, and one SQLite image. The consuming canister reserves
-`MemoryId` values in the `0..=254` range. `255` is the internal
-unallocated-bucket marker and must not be used.
+In a default-backend per-archive or per-slot layout, one slot maps to one
+dedicated `MemoryId`, one `DbHandle`, and one SQLite image. The consuming
+canister reserves `MemoryId` values in the `0..=254` range. `255` is the
+internal unallocated-bucket marker and must not be used.
 
 `MemoryId::new(120)` is the default fresh destination slot anchor matching the
 `ic-rusqlite` default mounted DB. Do not call `Db::init` on an existing
@@ -90,6 +90,11 @@ When slots are exhausted, reject new archive creation. Do not move an existing
 DB to another `MemoryId` to free a slot. If deleted slots are reused, store a
 generation or tombstone so stale archive references cannot open the new
 occupant.
+
+Pool allocators, extent maps, free lists, tombstones, trap injection,
+fragmentation benchmarks, and integrity checkers are outside this crate's VFS
+responsibility. Put that storage policy in a separate crate that implements
+`Memory`, then pass per-DB handles to `DbHandle::init`.
 
 Run admin operations per slot. `integrity_check` and checksum refresh must name
 the target `DbHandle`.
@@ -139,7 +144,7 @@ fn db_refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, String> 
 
 ## Capacity
 
-If growing the selected `VirtualMemory` fails, the error includes
+If growing the selected `Memory` backend fails, the error includes
 `current_pages` and `required_pages`. The caller should not retry blindly; check
 capacity limits, remaining cycles, and chunk size.
 

@@ -2,17 +2,72 @@ use ic_sqlite_vfs::config::{SQLITE_CACHE_SIZE_KIB, SQLITE_PAGE_SIZE};
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::test_support::memory;
 use ic_sqlite_vfs::test_support::stable_blob;
-use ic_sqlite_vfs::test_support::{ffi, lock, vfs, Memory, Superblock};
+use ic_sqlite_vfs::test_support::{ffi, lock, vfs, Memory, MemoryIdentity, Superblock};
 use ic_sqlite_vfs::DefaultMemoryImpl;
 use ic_sqlite_vfs::{params, Db, DbError, DbHandle};
 use ic_sqlite_vfs::{MemoryId, MemoryManager};
 use serial_test::serial;
+use std::cell::RefCell;
 use std::ffi::{c_void, CStr, CString};
 use std::mem::MaybeUninit;
 use std::ptr;
+use std::rc::Rc;
 
 struct RawConnection {
     raw: *mut ffi::sqlite3,
+}
+
+#[derive(Clone)]
+struct CustomMemory {
+    identity: MemoryIdentity,
+    bytes: Rc<RefCell<Vec<u8>>>,
+}
+
+impl CustomMemory {
+    fn new(id: u128) -> Self {
+        Self {
+            identity: MemoryIdentity::custom("vfs-roundtrip/custom-memory", id),
+            bytes: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+}
+
+impl Memory for CustomMemory {
+    fn identity(&self) -> MemoryIdentity {
+        self.identity.clone()
+    }
+
+    fn size(&self) -> u64 {
+        u64::try_from(self.bytes.borrow().len()).unwrap() / ic_sqlite_vfs::config::STABLE_PAGE_SIZE
+    }
+
+    fn grow(&self, pages: u64) -> i64 {
+        let current_pages = self.size();
+        let Some(next_pages) = current_pages.checked_add(pages) else {
+            return -1;
+        };
+        let Some(next_bytes) = next_pages.checked_mul(ic_sqlite_vfs::config::STABLE_PAGE_SIZE)
+        else {
+            return -1;
+        };
+        let Ok(next_len) = usize::try_from(next_bytes) else {
+            return -1;
+        };
+        self.bytes.borrow_mut().resize(next_len, 0);
+        i64::try_from(current_pages).unwrap_or(-1)
+    }
+
+    fn read(&self, offset: u64, dst: &mut [u8]) {
+        let start = usize::try_from(offset).expect("offset fits usize");
+        let end = start.checked_add(dst.len()).expect("read end fits usize");
+        dst.copy_from_slice(&self.bytes.borrow()[start..end]);
+    }
+
+    fn write(&self, offset: u64, src: &[u8]) {
+        let start = usize::try_from(offset).expect("offset fits usize");
+        let end = start.checked_add(src.len()).expect("write end fits usize");
+        self.bytes.borrow_mut()[start..end].copy_from_slice(src);
+    }
 }
 
 impl Drop for RawConnection {
@@ -385,6 +440,93 @@ fn db_handle_allows_same_memory_id_on_distinct_backing_memories() {
 
     first.query(|_| Ok::<_, DbError>(())).unwrap();
     second.query(|_| Ok::<_, DbError>(())).unwrap();
+}
+
+#[test]
+#[serial]
+fn db_handle_accepts_custom_memory_backend() {
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let handle = DbHandle::init(CustomMemory::new(1)).unwrap();
+
+    handle
+        .migrate(&[Migration {
+            version: 1,
+            sql: "CREATE TABLE custom(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+        }])
+        .unwrap();
+    handle
+        .update(|connection| {
+            connection.execute("INSERT INTO custom(k, v) VALUES ('k', 'value')", params![])
+        })
+        .unwrap();
+
+    let value = handle
+        .query(|connection| {
+            connection.query_scalar::<String>("SELECT v FROM custom WHERE k = 'k'", params![])
+        })
+        .unwrap();
+    assert_eq!(value, "value");
+}
+
+#[test]
+#[serial]
+fn custom_memory_handles_keep_database_images_separate() {
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let first = DbHandle::init(CustomMemory::new(2)).unwrap();
+    let second = DbHandle::init(CustomMemory::new(3)).unwrap();
+    let migrations = [Migration {
+        version: 1,
+        sql: "CREATE TABLE custom_split(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+    }];
+
+    first.migrate(&migrations).unwrap();
+    second.migrate(&migrations).unwrap();
+    first
+        .update(|connection| {
+            connection.execute(
+                "INSERT INTO custom_split(k, v) VALUES ('k', 'first')",
+                params![],
+            )
+        })
+        .unwrap();
+    second
+        .update(|connection| {
+            connection.execute(
+                "INSERT INTO custom_split(k, v) VALUES ('k', 'second')",
+                params![],
+            )
+        })
+        .unwrap();
+
+    let first_value = first
+        .query(|connection| {
+            connection.query_scalar::<String>("SELECT v FROM custom_split WHERE k = 'k'", params![])
+        })
+        .unwrap();
+    let second_value = second
+        .query(|connection| {
+            connection.query_scalar::<String>("SELECT v FROM custom_split WHERE k = 'k'", params![])
+        })
+        .unwrap();
+    assert_eq!(first_value, "first");
+    assert_eq!(second_value, "second");
+}
+
+#[test]
+#[serial]
+fn db_handle_rejects_duplicate_custom_memory_identity() {
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let first = DbHandle::init(CustomMemory::new(4)).unwrap();
+
+    let error = DbHandle::init(CustomMemory::new(4)).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::MemoryAlreadyRegistered)
+    ));
+    first.query(|_| Ok::<_, DbError>(())).unwrap();
 }
 
 #[test]

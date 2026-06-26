@@ -47,8 +47,8 @@ src/db/migrate.rs:pub version: u64,
 src/db/mod.rs:pub enum DbError {
 src/db/mod.rs:pub fn db_checksum() -> Result<u64, DbError> {
 src/db/mod.rs:pub fn db_checksum(self) -> Result<u64, DbError> {
-src/db/mod.rs:pub fn init(memory: DbMemory) -> Result<(), DbError> {
-src/db/mod.rs:pub fn init(memory: DbMemory) -> Result<Self, DbError> {
+src/db/mod.rs:pub fn init<M: Memory + 'static>(memory: M) -> Result<(), DbError> {
+src/db/mod.rs:pub fn init<M: Memory + 'static>(memory: M) -> Result<Self, DbError> {
 src/db/mod.rs:pub fn integrity_check() -> Result<String, DbError> {
 src/db/mod.rs:pub fn integrity_check(self) -> Result<String, DbError> {
 src/db/mod.rs:pub fn migrate(migrations: &[migrate::Migration]) -> Result<(), DbError> {
@@ -140,7 +140,7 @@ src/lib.rs:pub mod db;
 src/lib.rs:pub use db::{Db, DbError, DbHandle};
 src/lib.rs:pub use stable::memory::{DbMemory, StableMemoryError};
 src/lib.rs:pub use stable::memory_manager::{MemoryId, MemoryManager, MemoryManagerInitError};
-src/lib.rs:pub use stable::raw_memory::DefaultMemoryImpl;
+src/lib.rs:pub use stable::raw_memory::{DefaultMemoryImpl, Memory, MemoryIdentity};
 src/stable/memory.rs:AlreadyInitialized,
 src/stable/memory.rs:ChecksumMismatch { expected: u64, actual: u64 },
 src/stable/memory.rs:ChecksumRefreshChunkEmpty,
@@ -178,3 +178,21 @@ src/stable/memory_manager.rs:pub fn init_with_bucket_size(memory: M, bucket_size
 src/stable/memory_manager.rs:pub struct MemoryManager<M: Memory> {
 src/stable/memory_manager.rs:pub struct VirtualMemory<M: Memory> {
 src/stable/memory_manager.rs:pub use crate::stable::memory_layout::MemoryId;
+src/stable/raw_memory.rs:Address(*const ()),
+src/stable/raw_memory.rs:Custom {
+src/stable/raw_memory.rs:Ic0StableMemory,
+src/stable/raw_memory.rs:VirtualMemory {
+src/stable/raw_memory.rs:backend: Box<MemoryIdentity>,
+src/stable/raw_memory.rs:fn grow(&self, pages: u64) -> i64;
+src/stable/raw_memory.rs:fn identity(&self) -> MemoryIdentity {
+src/stable/raw_memory.rs:fn read(&self, offset: u64, dst: &mut [u8]);
+src/stable/raw_memory.rs:fn size(&self) -> u64;
+src/stable/raw_memory.rs:fn write(&self, offset: u64, src: &[u8]);
+src/stable/raw_memory.rs:id: u128,
+src/stable/raw_memory.rs:id: u8,
+src/stable/raw_memory.rs:namespace: &'static str,
+src/stable/raw_memory.rs:pub const fn custom(namespace: &'static str, id: u128) -> Self {
+src/stable/raw_memory.rs:pub enum MemoryIdentity {
+src/stable/raw_memory.rs:pub fn virtual_memory(backend: MemoryIdentity, id: u8) -> Self {
+src/stable/raw_memory.rs:pub trait Memory {
+src/stable/raw_memory.rs:unsafe fn read_unsafe(&self, offset: u64, dst: *mut u8, count: usize) {

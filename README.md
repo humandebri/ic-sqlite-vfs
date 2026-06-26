@@ -5,13 +5,13 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 SQLite VFS for the Internet Computer that stores the SQLite database image
-inside a dedicated MemoryManager-compatible virtual memory.
+inside a byte-addressed stable-memory backend.
 
 ```text
 SQLite pager
   -> custom sqlite3_vfs: icstable
-  -> ic-sqlite-vfs VirtualMemory
-  -> selected MemoryId pages
+  -> ic-sqlite-vfs Memory
+  -> stable memory pages
 ```
 
 `ic-sqlite-vfs` does not use POSIX files, WASI files, stable-fs, or wasi2ic.
@@ -49,7 +49,7 @@ SQLite -> WASI fd/read/write/seek -> wasi2ic -> file abstraction -> stable memor
 This crate uses the shorter path:
 
 ```text
-SQLite -> sqlite3_io_methods xRead/xWrite -> selected VirtualMemory
+SQLite -> sqlite3_io_methods xRead/xWrite -> selected Memory backend
 ```
 
 Why not wasi2ic? In the local KV benchmark, the direct VFS path uses 7.8x fewer
@@ -57,13 +57,15 @@ instructions for reset + insert and 6.5x fewer for insert/update.
 
 ## Stable Memory Ownership
 
-`ic-sqlite-vfs` does not reserve a `MemoryId`. The consuming canister chooses
-one `MemoryId` for SQLite and must keep it stable forever. The examples use
-`MemoryId::new(120)` as the fresh destination slot convention matching
-`ic-rusqlite`'s default mounted DB memory ID.
+`ic-sqlite-vfs` accepts any backend that implements `Memory`. The default path
+uses `MemoryManager<DefaultMemoryImpl>` and a selected `MemoryId`; the
+consuming canister chooses that `MemoryId` and must keep it stable forever.
+The examples use `MemoryId::new(120)` as the fresh destination slot convention
+matching `ic-rusqlite`'s default mounted DB memory ID.
 
-Do not reuse that `MemoryId` for any other stable structure. Inside the selected
-virtual memory, this crate owns the full virtual address space:
+Do not reuse that default-backend `MemoryId` for any other stable structure.
+Inside the selected memory backend, this crate owns the full virtual address
+space:
 
 ```text
 virtual offset 0..64KiB      superblock
@@ -72,9 +74,9 @@ virtual offset 64KiB..       fresh/normal in-place SQLite image bytes
 
 Fresh images start the SQLite bytes at `64KiB`.
 
-The crate does not own the canister's raw stable memory. Raw stable memory is
-managed by a `MemoryManager<DefaultMemoryImpl>` with the same stable layout as
-the `ic-stable-structures` 0.7 MemoryManager.
+The crate does not own the canister's raw stable memory. In the default path,
+raw stable memory is managed by a `MemoryManager<DefaultMemoryImpl>` with the
+same stable layout as the `ic-stable-structures` 0.7 MemoryManager.
 Use `MemoryManager::init_strict` for upgrade-sensitive deployments. The
 non-strict `MemoryManager::init` compatibility path may initialize MemoryManager
 metadata on non-empty raw stable memory that does not already contain a
@@ -98,19 +100,20 @@ reintroduced.
 `Db::init(memory)` is a single global initialization point for one SQLite
 database facade in the current Wasm instance. Calling it twice returns
 `DbError::StableMemoryAlreadyInitialized`. Use `DbHandle::init(memory)` for
-multiple simultaneous SQLite databases, with a distinct stable `MemoryId` per
+multiple simultaneous SQLite databases, with one distinct `Memory` identity per
 handle. Each handle owns one independent SQLite image. This is not a mount-id
 or filename namespace inside one image; SQLite still opens `/main.db` for each
-handle, and the active context selects the backing `VirtualMemory`. Registering
-the same `MemoryId` twice in one Wasm instance returns
+handle, and the active context selects the backing `Memory`. Registering the
+same memory identity twice in one Wasm instance returns
 `StableMemoryError::MemoryAlreadyRegistered`.
 
 The bundled MemoryManager-compatible layout supports `MemoryId` values
 `0..=254`; `255` is reserved internally as the unallocated marker.
-Per-archive or per-slot databases are therefore a bounded design: one slot uses
-one `MemoryId`, one `DbHandle`, and one SQLite image. The slot catalog
-(`archive_id -> slot_id -> MemoryId`) belongs to the consuming canister and
-must stay stable across upgrades.
+With the default MemoryManager backend, per-archive or per-slot databases are a
+bounded design: one slot uses one `MemoryId`, one `DbHandle`, and one SQLite
+image. A custom `Memory` implementation can provide a different storage policy,
+for example a pool allocator, but that allocator and its integrity checks belong
+outside this crate.
 
 For compatibility-oriented layouts, use `MemoryId::new(120)` as the default
 SQLite destination slot anchor. A new single-database canister can use `120`
@@ -126,7 +129,7 @@ application-owned range.
 | `froghub-io/rusqlite` / `rusqlite-ic` | Rust `rusqlite` wrapper fork | Not the VFS/storage layer by itself | Lets `rusqlite` compile in IC-oriented Wasm builds |
 | `froghub-io/ic-sqlite` | SDK using `rusqlite-ic` + VFS | Simple stable-memory-backed SQLite file | Early IC SQLite SDK |
 | `wasm-forge/ic-rusqlite` | Convenience SDK | WASI/stable-fs via `wasi2ic` | Easy migration path and familiar `rusqlite` API |
-| `humandebri/ic-sqlite-vfs` | SQLite VFS + DB facade | Direct SQLite image inside a chosen `VirtualMemory` | Lower overhead, no WASI, IC-native transaction model |
+| `humandebri/ic-sqlite-vfs` | SQLite VFS + DB facade | Direct SQLite image inside a chosen `Memory` backend | Lower overhead, no WASI, IC-native transaction model |
 
 ## Design
 
@@ -359,13 +362,15 @@ fn get(key: String) -> Result<Option<String>, String> {
 ```
 
 For multiple SQLite databases in one Wasm instance, use `DbHandle::init(memory)`
-with one dedicated `MemoryId` per handle. The global `Db` facade remains a
+with one distinct `Memory` identity per handle. The global `Db` facade remains a
 single default database for compatibility. `DbHandle` models independent
-SQLite images, not multiple mounted filenames inside one image. Archive and
-restore flows therefore operate per handle through that handle's logical
-database image. A per-archive or per-slot design should keep a stable external
-slot catalog and reject new archive creation when the chosen `MemoryId` range is
-exhausted instead of moving existing slots.
+SQLite images, not multiple mounted filenames inside one image. With the
+default MemoryManager backend, a per-archive or per-slot design should keep a
+stable external slot catalog and reject new archive creation when the chosen
+`MemoryId` range is exhausted instead of moving existing slots. Pool allocators,
+extent maps, free lists, tombstones, trap injection, fragmentation benchmarks,
+and integrity checkers should live in a separate storage-policy crate and pass
+their per-DB handle as a `Memory`.
 
 For repeated operations in one message, reuse a prepared statement:
 

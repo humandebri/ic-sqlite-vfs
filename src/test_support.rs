@@ -6,7 +6,7 @@
 pub use crate::sqlite_vfs::ffi;
 pub use crate::stable::memory::{ContextId, StableMemoryError};
 pub use crate::stable::meta::Superblock;
-pub use crate::stable::raw_memory::{Memory, VectorMemory};
+pub use crate::stable::raw_memory::{Memory, MemoryIdentity, VectorMemory};
 
 pub mod meta {
     pub use crate::stable::meta::{fnv1a64, CURRENT_LAYOUT_VERSION};

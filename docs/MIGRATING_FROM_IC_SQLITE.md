@@ -1,15 +1,15 @@
 # Migrating from ic-sqlite or ic-rusqlite
 
 `ic-sqlite-vfs` is not a drop-in `rusqlite` wrapper. It stores SQLite directly
-inside a MemoryManager-compatible virtual memory, then exposes database access
-through synchronous `Db::update` and `Db::query` closures.
+inside a byte-addressed `Memory` backend, then exposes database access through
+synchronous `Db::update` and `Db::query` closures.
 
 ## Initialization
 
-Choose one stable `MemoryId` for SQLite and keep it unchanged across upgrades.
-Do not reuse that `MemoryId` for another stable structure. For migrations from
-`ic-rusqlite`, this is the fresh destination slot, not direct reuse of the old
-stable-memory image.
+The default backend uses one stable `MemoryId` for SQLite. Choose it before
+deployment and keep it unchanged across upgrades. Do not reuse that `MemoryId`
+for another stable structure. For migrations from `ic-rusqlite`, this is the
+fresh destination slot, not direct reuse of the old stable-memory image.
 
 ```rust
 use ic_sqlite_vfs::{Db, DefaultMemoryImpl, MemoryId, MemoryManager};
@@ -38,13 +38,13 @@ then run `Db::migrate(...)`.
 ## Multiple databases / mount IDs
 
 `DbHandle::init(memory)` supports several independent SQLite images in one Wasm
-instance. Give each handle its own dedicated `MemoryId` and keep that mapping
-stable across upgrades.
+instance. Give each handle its own distinct `Memory` identity and keep that
+mapping stable across upgrades.
 
 This is not a replacement for a mount-id or filename namespace inside one
-SQLite image. Existing `index DB + user DB slots` designs should map each slot
-to a stable `MemoryId`, then recreate the same handles after upgrade from the
-stored slot catalog.
+SQLite image. With the default MemoryManager backend, existing
+`index DB + user DB slots` designs should map each slot to a stable `MemoryId`,
+then recreate the same handles after upgrade from the stored slot catalog.
 
 The consuming canister owns that slot catalog. Store
 `archive_id -> slot_id -> MemoryId` in stable state, choose the usable
@@ -63,16 +63,18 @@ for the index/default DB or a future migration destination, then allocate
 neighboring slot IDs from an application-owned range. Record the choice in the
 slot catalog; the crate does not reserve the range.
 
-Per-slot archives are therefore a bounded design. If no free slot remains,
-reject archive creation. Reuse deleted slots only when the application tracks a
-generation number or tombstone state so stale archive references cannot open the
-new occupant's SQLite image.
+Per-slot archives using the default backend are therefore a bounded design. If
+no free slot remains, reject archive creation. Reuse deleted slots only when the
+application tracks a generation number or tombstone state so stale archive
+references cannot open the new occupant's SQLite image. Pool allocators,
+extent maps, free lists, tombstones, trap injection, fragmentation benchmarks,
+and integrity checkers should live in a separate crate that implements
+`Memory`.
 
 Archive and restore are not provided by the current public API. A future
 bounded staging design must operate on one logical SQLite image at a time and
-preserve the slot catalog. Do not pack several independent SQLite databases
-into one `VirtualMemory`, and do not depend on a forked `u16` `MemoryId` layout
-for this crate.
+preserve the slot catalog. Do not depend on a forked `u16` `MemoryId` layout for
+this crate.
 
 ## `ic-rusqlite` migration boundary
 

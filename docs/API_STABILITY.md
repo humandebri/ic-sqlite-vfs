@@ -37,12 +37,13 @@ The frozen public Rust surface is tracked by
 - import/export/compact are not exposed by the Rust facade or reference
   canister in the current release
 
-Applications initialize a `MemoryManager<DefaultMemoryImpl>` from this crate,
-choose a dedicated `MemoryId`, and pass the resulting
-`VirtualMemory<DefaultMemoryImpl>` to `Db::init(memory)`.
-The crate does not reserve a `MemoryId`; the application must choose one,
-persist that choice across upgrades, and never reuse it for another stable
-structure.
+Applications can pass any `Memory + 'static` backend to `Db::init(memory)` or
+`DbHandle::init(memory)`. The default backend initializes a
+`MemoryManager<DefaultMemoryImpl>`, chooses a dedicated `MemoryId`, and passes
+the resulting `VirtualMemory<DefaultMemoryImpl>` to `Db::init(memory)`.
+The crate does not reserve a default-backend `MemoryId`; the application must
+choose one, persist that choice across upgrades, and never reuse it for another
+stable structure.
 
 `Db::update`, `Db::query`, migration, and checksum APIs
 require successful `Db::init(memory)` first. Calling them before initialization
@@ -50,9 +51,17 @@ returns `DbError::StableMemoryNotInitialized`. Calling `Db::init(memory)` twice
 in the same Wasm instance returns `DbError::StableMemoryAlreadyInitialized`.
 `DbHandle::init(memory)` is the multi-database API for advanced users that need
 several independent SQLite images in one Wasm instance. Each handle must use a
-dedicated `MemoryId`; `DbHandle` does not provide a mount-id namespace inside a
-single SQLite image. Registering the same `MemoryId` twice in one Wasm instance
-returns `StableMemoryError::MemoryAlreadyRegistered`.
+distinct `Memory` identity; `DbHandle` does not provide a mount-id namespace
+inside a single SQLite image. Registering the same memory identity twice in one
+Wasm instance returns `StableMemoryError::MemoryAlreadyRegistered`.
+Custom memory adapters that can create several handles for the same logical DB
+must override `Memory::identity`; the default identity is the backend object
+address.
+
+Pool allocators, extent manifests, free lists, tombstones, trap injection,
+fragmentation benchmarks, and integrity checkers are storage-policy code. They
+belong in a separate crate that implements `Memory` and passes per-DB handles to
+this crate.
 
 Fresh initialization only occurs when the selected MemoryManager virtual memory
 has size `0`. Non-empty selected virtual memory without the `ICSQLITE`
@@ -64,12 +73,12 @@ existing `ic-rusqlite` raw SQLite images whose first bytes are
 `SQLite format 3\0`; this release has no direct migration path for those images.
 
 The bundled MemoryManager-compatible `MemoryId` is `u8`-backed. Values
-`0..=254` are usable by applications. `MemoryId::new(255)` is invalid because
-`255` is the internal unallocated-bucket marker. This crate keeps the
-`ic-stable-structures` 0.7 MemoryManager stable-memory layout. If an existing
-MemoryManager-compatible image is corrupt, internally inconsistent, or
-physically truncated, initialization rejects it by panic/trap rather than a
-recoverable DB migration.
+`0..=254` are usable by applications that use the default MemoryManager backend.
+`MemoryId::new(255)` is invalid because `255` is the internal
+unallocated-bucket marker. This crate keeps the `ic-stable-structures` 0.7
+MemoryManager stable-memory layout. If an existing MemoryManager-compatible
+image is corrupt, internally inconsistent, or physically truncated,
+initialization rejects it by panic/trap rather than a recoverable DB migration.
 
 `MemoryManager::init_strict(memory)` is the safe initializer for callers that
 want non-empty / non-MemoryManager memory and invalid layouts as typed errors

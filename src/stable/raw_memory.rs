@@ -8,15 +8,42 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MemoryBackendIdentity {
+/// Stable identity for a `Memory` backend registered with a DB handle.
+///
+/// The default `Memory::identity` uses the backend object's address. Custom
+/// memory adapters that can create several handles for the same logical DB
+/// should override `identity` and return the same value for the same logical
+/// storage. This lets `DbHandle::init` reject accidental double registration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemoryIdentity {
     Ic0StableMemory,
     Address(*const ()),
+    VirtualMemory {
+        backend: Box<MemoryIdentity>,
+        id: u8,
+    },
+    Custom {
+        namespace: &'static str,
+        id: u128,
+    },
+}
+
+impl MemoryIdentity {
+    pub fn virtual_memory(backend: MemoryIdentity, id: u8) -> Self {
+        Self::VirtualMemory {
+            backend: Box::new(backend),
+            id,
+        }
+    }
+
+    pub const fn custom(namespace: &'static str, id: u128) -> Self {
+        Self::Custom { namespace, id }
+    }
 }
 
 pub trait Memory {
-    fn identity(&self) -> MemoryBackendIdentity {
-        MemoryBackendIdentity::Address(std::ptr::from_ref(self).cast::<()>())
+    fn identity(&self) -> MemoryIdentity {
+        MemoryIdentity::Address(std::ptr::from_ref(self).cast::<()>())
     }
 
     fn size(&self) -> u64;
@@ -52,8 +79,8 @@ extern "C" {
 
 #[cfg(target_arch = "wasm32")]
 impl Memory for Ic0StableMemory {
-    fn identity(&self) -> MemoryBackendIdentity {
-        MemoryBackendIdentity::Ic0StableMemory
+    fn identity(&self) -> MemoryIdentity {
+        MemoryIdentity::Ic0StableMemory
     }
 
     fn size(&self) -> u64 {
@@ -81,8 +108,8 @@ impl Memory for Ic0StableMemory {
 pub type VectorMemory = Rc<RefCell<Vec<u8>>>;
 
 impl Memory for RefCell<Vec<u8>> {
-    fn identity(&self) -> MemoryBackendIdentity {
-        MemoryBackendIdentity::Address(std::ptr::from_ref(self).cast::<()>())
+    fn identity(&self) -> MemoryIdentity {
+        MemoryIdentity::Address(std::ptr::from_ref(self).cast::<()>())
     }
 
     fn size(&self) -> u64 {
@@ -122,7 +149,7 @@ impl Memory for RefCell<Vec<u8>> {
 }
 
 impl<M: Memory> Memory for Rc<M> {
-    fn identity(&self) -> MemoryBackendIdentity {
+    fn identity(&self) -> MemoryIdentity {
         self.deref().identity()
     }
 

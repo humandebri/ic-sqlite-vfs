@@ -28,7 +28,7 @@ pub mod test_support;
 pub use db::{Db, DbError, DbHandle};
 pub use stable::memory::{DbMemory, StableMemoryError};
 pub use stable::memory_manager::{MemoryId, MemoryManager, MemoryManagerInitError};
-pub use stable::raw_memory::DefaultMemoryImpl;
+pub use stable::raw_memory::{DefaultMemoryImpl, Memory, MemoryIdentity};
 
 #[macro_export]
 macro_rules! params {

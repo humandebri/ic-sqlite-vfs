@@ -55,6 +55,54 @@ generate_core_snapshot() {
 }
 
 generate_reexported_snapshot() {
+  awk -v file="src/stable/raw_memory.rs" '
+    function normalize(text) {
+      gsub(/[[:space:]]+/, " ", text)
+      sub(/^ /, "", text)
+      sub(/ $/, "", text)
+      gsub(/ :/, ":", text)
+      return text
+    }
+    function count_char(text, char, tmp) {
+      tmp = text
+      return gsub(char, char, tmp)
+    }
+    {
+      line = $0
+      if (line ~ /^[[:space:]]*pub[[:space:]]+enum[[:space:]]+MemoryIdentity[[:space:]]*/) {
+        in_identity = 1
+        depth = 0
+        print file ":" normalize(line)
+      } else if (in_identity && line !~ /^[[:space:]]*(#|"|\)?\]|$|})/) {
+        print file ":" normalize(line)
+      }
+      if (in_identity) {
+        depth += count_char(line, "{") - count_char(line, "}")
+        if (depth <= 0 && line ~ /}/) {
+          in_identity = 0
+          depth = 0
+        }
+      }
+
+      if (line ~ /^[[:space:]]*pub[[:space:]]+trait[[:space:]]+Memory[[:space:]]*/) {
+        in_trait = 1
+        depth = 0
+        print file ":" normalize(line)
+      } else if (in_trait && line ~ /^[[:space:]]*(unsafe[[:space:]]+)?fn[[:space:]]+/) {
+        print file ":" normalize(line)
+      } else if (line ~ /^[[:space:]]*pub[[:space:]]+(const[[:space:]]+)?fn[[:space:]]+(custom|virtual_memory)[[:space:]]*\(/) {
+        print file ":" normalize(line)
+      }
+      if (in_trait) {
+        depth += count_char(line, "{") - count_char(line, "}")
+        if (depth <= 0 && line ~ /}/) {
+          in_trait = 0
+          depth = 0
+        }
+      }
+    }
+  ' src/stable/raw_memory.rs
+
   awk -v file="src/stable/memory.rs" '
     function normalize(text) {
       gsub(/[[:space:]]+/, " ", text)

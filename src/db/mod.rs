@@ -12,8 +12,9 @@ pub mod transaction;
 pub mod value;
 
 use crate::sqlite_vfs::stable_blob;
-use crate::stable::memory::{self, ContextId, DbMemory};
+use crate::stable::memory::{self, ContextId};
 use crate::stable::meta::Superblock;
+use crate::stable::raw_memory::Memory;
 use connection::Connection;
 pub use row::{FromColumn, Row, TextLen};
 pub use stable_blob::ChecksumRefresh;
@@ -88,7 +89,7 @@ pub struct DbHandle {
 }
 
 impl Db {
-    pub fn init(memory: DbMemory) -> Result<(), DbError> {
+    pub fn init<M: Memory + 'static>(memory: M) -> Result<(), DbError> {
         let context = memory::init(memory).map_err(|error| match error {
             crate::stable::memory::StableMemoryError::AlreadyInitialized => {
                 DbError::StableMemoryAlreadyInitialized
@@ -152,7 +153,7 @@ impl Db {
 }
 
 impl DbHandle {
-    pub fn init(memory: DbMemory) -> Result<Self, DbError> {
+    pub fn init<M: Memory + 'static>(memory: M) -> Result<Self, DbError> {
         let handle = Self::from_context(memory::init_context(memory)?);
         clear_read_connection(handle.context);
         clear_write_connection(handle.context);

@@ -4,9 +4,8 @@
 //! coexist with other stable structures managed by the same MemoryManager.
 
 use crate::config::STABLE_PAGE_SIZE;
-use crate::stable::memory_manager::{MemoryId, MemoryManager};
-use crate::stable::memory_manager::{MemoryIdentity, VirtualMemory};
-use crate::stable::raw_memory::{DefaultMemoryImpl, Memory};
+use crate::stable::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
+use crate::stable::raw_memory::{DefaultMemoryImpl, Memory, MemoryIdentity};
 use std::cell::{Cell, RefCell};
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
 use std::collections::BTreeMap;
@@ -85,11 +84,11 @@ thread_local! {
     static NEXT_CONTEXT_ID: Cell<u64> = const { Cell::new(1) };
     static DEFAULT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
     static CURRENT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
-    static DB_MEMORY: RefCell<Vec<(ContextId, DbMemory)>> = const { RefCell::new(Vec::new()) };
+    static DB_MEMORY: RefCell<Vec<(ContextId, Box<dyn Memory>)>> = const { RefCell::new(Vec::new()) };
     static REGISTERED_MEMORY: RefCell<Vec<(ContextId, MemoryIdentity)>> = const { RefCell::new(Vec::new()) };
 }
 
-pub fn init(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
+pub fn init<M: Memory + 'static>(memory: M) -> Result<ContextId, StableMemoryError> {
     DEFAULT_CONTEXT.with(|default| {
         if default.get().is_some() {
             return Err(StableMemoryError::AlreadyInitialized);
@@ -100,9 +99,10 @@ pub fn init(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
     })
 }
 
-pub fn init_context(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
+pub fn init_context<M: Memory + 'static>(memory: M) -> Result<ContextId, StableMemoryError> {
+    let memory: Box<dyn Memory> = Box::new(memory);
     let identity = memory.identity();
-    reject_registered_memory(identity)?;
+    reject_registered_memory(&identity)?;
     let context = NEXT_CONTEXT_ID.with(|next| {
         let current = next.get();
         let context = ContextId(current);
@@ -118,12 +118,12 @@ pub fn init_context(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
     Ok(context)
 }
 
-fn reject_registered_memory(identity: MemoryIdentity) -> Result<(), StableMemoryError> {
+fn reject_registered_memory(identity: &MemoryIdentity) -> Result<(), StableMemoryError> {
     REGISTERED_MEMORY.with(|slot| {
         if slot
             .borrow()
             .iter()
-            .any(|(_, registered)| *registered == identity)
+            .any(|(_, registered)| registered == identity)
         {
             Err(StableMemoryError::MemoryAlreadyRegistered)
         } else {
@@ -302,7 +302,7 @@ pub(crate) fn write_prechecked_unmetered(
     Ok(())
 }
 
-fn ensure_memory_capacity(memory: &DbMemory, end_offset: u64) -> Result<(), StableMemoryError> {
+fn ensure_memory_capacity(memory: &dyn Memory, end_offset: u64) -> Result<(), StableMemoryError> {
     let current_pages = memory.size();
     let current_bytes = current_pages
         .checked_mul(STABLE_PAGE_SIZE)
@@ -344,7 +344,7 @@ fn ensure_memory_capacity(memory: &DbMemory, end_offset: u64) -> Result<(), Stab
 }
 
 #[inline(always)]
-fn debug_assert_capacity(memory: &DbMemory, offset: u64, len: usize, operation: &str) {
+fn debug_assert_capacity(memory: &dyn Memory, offset: u64, len: usize, operation: &str) {
     #[cfg(debug_assertions)]
     {
         let Ok(end) = checked_end(offset, len) else {
@@ -448,18 +448,18 @@ pub fn memory_for_tests() -> DbMemory {
 }
 
 #[inline(always)]
-fn with_memory<T>(f: impl FnOnce(&DbMemory) -> T) -> Result<T, StableMemoryError> {
+fn with_memory<T>(f: impl FnOnce(&dyn Memory) -> T) -> Result<T, StableMemoryError> {
     let context = active_context_id()?;
     DB_MEMORY.with(|slot| {
         let slot = slot.borrow();
         if let Some((stored_context, memory)) = slot.first() {
             if *stored_context == context {
-                return Ok(f(memory));
+                return Ok(f(memory.as_ref()));
             }
         }
         for (stored_context, memory) in slot.iter().skip(1) {
             if *stored_context == context {
-                return Ok(f(memory));
+                return Ok(f(memory.as_ref()));
             }
         }
         Err(StableMemoryError::NotInitialized)
