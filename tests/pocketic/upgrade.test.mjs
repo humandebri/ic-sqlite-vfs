@@ -21,8 +21,11 @@ test("PocketIC precompiled SQLite archive exposes expected features", { timeout 
   );
 });
 
-test("PocketIC stable write trap rolls back failed update", { timeout }, async () => {
-  await withPocketIc("stableWriteTrapRollsBackFailedUpdate", stableWriteTrapRollsBackFailedUpdate);
+test("PocketIC trap after dirty page write rolls back before superblock publish", { timeout }, async () => {
+  await withPocketIc(
+    "dirtyPageWriteTrapRollsBackBeforeSuperblockPublish",
+    dirtyPageWriteTrapRollsBackBeforeSuperblockPublish,
+  );
 });
 
 test("PocketIC management methods require controller", { timeout }, async () => {
@@ -133,7 +136,7 @@ async function stableImageSurvivesUpgrade(pic, name) {
   assert.equal(after.Ok.checksum_refreshing, false);
 }
 
-async function stableWriteTrapRollsBackFailedUpdate(pic, name) {
+async function dirtyPageWriteTrapRollsBackBeforeSuperblockPublish(pic, name) {
   step(name, "setup failpoint canister");
   const { actor } = await pic.setupCanister({ idlFactory, wasm: failpointWasm });
 

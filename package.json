@@ -12,6 +12,7 @@
     "test:pocketic:regression": "npm run build:wasm && npm run build:wasm:failpoints && node --test tests/pocketic/upgrade.test.mjs",
     "test:pocketic:perf": "npm run build:bench:wasm && node --test tests/pocketic/perf_regression.test.mjs",
     "test:pocketic:ic-rusqlite-perf": "npm run build:bench:ic-rusqlite && node --test tests/pocketic/ic_rusqlite_perf.test.mjs",
+    "test:pocketic:churn-capacity": "npm run build:bench:wasm && npm run build:bench:ic-rusqlite && node --test tests/pocketic/churn_capacity.test.mjs",
     "test:pocketic": "npm run test:pocketic:regression && npm run test:pocketic:perf"
   },
   "devDependencies": {

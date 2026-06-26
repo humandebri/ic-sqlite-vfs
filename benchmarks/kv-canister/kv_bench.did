@@ -152,6 +152,19 @@ type DbStatsReport = record {
   sqlite_page_count : nat64;
   sqlite_freelist_count : nat64;
 };
+type BenchChurnStepReport = record {
+  cycle : nat64;
+  phase : text;
+  rows : nat64;
+  instructions : nat64;
+  row_count : nat64;
+  db_size : nat64;
+  stable_pages : nat64;
+  stable_bytes : nat64;
+  sqlite_page_size : nat64;
+  sqlite_page_count : nat64;
+  sqlite_freelist_count : nat64;
+};
 
 service : {
   bench_reset : (nat32) -> (variant { Ok : BenchReport; Err : text });
@@ -173,5 +186,8 @@ service : {
   bench_growth : (nat32, nat32) -> (variant { Ok : BenchReport; Err : text });
   bench_growth_profile : (nat32, nat32) -> (variant { Ok : BenchGrowthProfileReport; Err : text });
   bench_capacity_growth_guard : (nat32, nat32) -> (variant { Ok : BenchCapacityGrowthReport; Err : text });
+  bench_churn_reset : (nat32) -> (variant { Ok : BenchChurnStepReport; Err : text });
+  bench_churn_delete : (nat32, nat32, nat32) -> (variant { Ok : BenchChurnStepReport; Err : text });
+  bench_churn_insert : (nat32, nat32, nat32) -> (variant { Ok : BenchChurnStepReport; Err : text });
   db_stats : () -> (variant { Ok : DbStatsReport; Err : text }) query;
 }

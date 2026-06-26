@@ -29,6 +29,11 @@ GitHub Release artifact は `sqlite-precompiled,canister-api` の release profil
 `scripts/sqlite-critical-check.sh` は基礎検査、Verus proof、PocketIC regression、
 PocketIC performance/capacity regression を実行する。package contents は workflow
 と release gate で明示実行する。
+PocketIC regression の
+`PocketIC trap after dirty page write rolls back before superblock publish` は
+in-place commit の rollback 契約を確認する release blocker とする。このテストは
+dirty page write 後、superblock publish 前に trap した failed update が旧 active
+image と metadata を残すことを検証する。
 Verus zero extent lemmas marked `#[verifier::external_body]` are tracked trusted
 axioms for this release. The release gate compensates with Rust property tests
 that compare the production normalizer against an independent model, but this is
@@ -48,6 +53,8 @@ release から外す。
 In-place commit writes dirty pages before superblock publish and relies on IC
 message execution atomicity plus trap rollback. Commit must not perform
 inter-canister calls, `await`, or `ic0.call_perform`.
+Native/custom stable memory backends are not crash-atomic unless they provide
+equivalent rollback.
 
 公開Rust APIでは `PAGE_MAP_LAYOUT_VERSION` を削除し、
 `CURRENT_LAYOUT_VERSION` に改名する。v8 では page-table read cache がないため

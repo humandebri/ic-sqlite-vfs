@@ -1637,6 +1637,60 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn zero_extent_limit_error_keeps_active_image_and_metadata() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let mut block = Superblock::fresh();
+        let max_zero_extents = u64::try_from(MAX_ZERO_EXTENTS).unwrap();
+        block.db_size = max_zero_extents * 2 * page_size();
+        block.page_count = page_count_for_size(block.db_size).unwrap();
+        block.last_tx_id = 41;
+        block.flags = FLAG_CHECKSUM_STALE | FLAG_CHECKSUM_REFRESHING;
+        block.checksum = 0xA5A5;
+        block.checksum_refresh_offset = 17;
+        block.checksum_refresh_hash = 0x5A5A;
+        block.checksum_refresh_tx_id = 40;
+        block.zero_extents = (0..MAX_ZERO_EXTENTS)
+            .map(|index| ZeroExtent {
+                start_page: u64::try_from(index).unwrap() * 2,
+                end_page: u64::try_from(index).unwrap() * 2 + 1,
+            })
+            .collect();
+
+        let sample_page_no = 1_u64;
+        let sample_offset = page_physical_offset(&block, sample_page_no).unwrap();
+        let sample = b"active-before";
+        let sample_len = u64::try_from(sample.len()).unwrap();
+        crate::stable::memory::ensure_capacity(checked_add(sample_offset, sample_len).unwrap())
+            .unwrap();
+        crate::stable::memory::write(sample_offset, sample).unwrap();
+        block.store().unwrap();
+
+        let before_block = Superblock::load().unwrap();
+        let mut before_sample = vec![0_u8; sample.len()];
+        read_base_at(sample_page_no * page_size(), &mut before_sample).unwrap();
+        assert_eq!(before_sample, sample);
+
+        begin_update().unwrap();
+        truncate(block.db_size + page_size()).unwrap();
+        let result = commit_update();
+
+        assert!(matches!(
+            result,
+            Err(StableMemoryError::ZeroExtentLimitExceeded {
+                limit: MAX_ZERO_EXTENTS
+            })
+        ));
+        assert_eq!(Superblock::load().unwrap(), before_block);
+
+        let mut after_sample = vec![0_u8; sample.len()];
+        read_base_at(sample_page_no * page_size(), &mut after_sample).unwrap();
+        assert_eq!(after_sample, before_sample);
+    }
+
+    #[test]
     fn zero_extent_temporary_limit_allows_only_dirty_page_slack() {
         let extents = (0..=MAX_ZERO_EXTENTS)
             .map(|index| ZeroExtent {

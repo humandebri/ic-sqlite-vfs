@@ -58,6 +58,21 @@ pub struct DbStatsReport {
 }
 
 #[derive(CandidType, Deserialize)]
+pub struct BenchChurnStepReport {
+    pub cycle: u64,
+    pub phase: String,
+    pub rows: u64,
+    pub instructions: u64,
+    pub row_count: u64,
+    pub db_size: u64,
+    pub stable_pages: u64,
+    pub stable_bytes: u64,
+    pub sqlite_page_size: u64,
+    pub sqlite_page_count: u64,
+    pub sqlite_freelist_count: u64,
+}
+
+#[derive(CandidType, Deserialize)]
 pub struct BenchReadProfileReport {
     pub rows: u64,
     pub instructions: u64,
@@ -455,27 +470,92 @@ fn bench_get_many_in_profile(rows: u32) -> Result<BenchGetManyProfileReport, Str
 fn db_stats() -> Result<DbStatsReport, String> {
     let block = Superblock::load().map_err(|error| error.to_string())?;
     let stable_pages = memory::size_pages();
-    let (sqlite_page_size, sqlite_page_count, sqlite_freelist_count) = Db::query(|connection| {
-        Ok((
-            connection.query_scalar::<i64>("PRAGMA page_size", ic_sqlite_vfs::params![])?,
-            connection.query_scalar::<i64>("PRAGMA page_count", ic_sqlite_vfs::params![])?,
-            connection.query_scalar::<i64>("PRAGMA freelist_count", ic_sqlite_vfs::params![])?,
-        ))
-    })
-    .map_err(error_text)?;
+    let (sqlite_page_size, sqlite_page_count, sqlite_freelist_count) = sqlite_stats()?;
     Ok(DbStatsReport {
         db_size: block.db_size,
         stable_pages,
         stable_bytes: stable_pages
             .checked_mul(ic_sqlite_vfs::config::STABLE_PAGE_SIZE)
             .ok_or_else(|| "stable byte size overflow".to_string())?,
-        sqlite_page_size: u64::try_from(sqlite_page_size)
-            .map_err(|_| "negative page_size".to_string())?,
-        sqlite_page_count: u64::try_from(sqlite_page_count)
-            .map_err(|_| "negative page_count".to_string())?,
-        sqlite_freelist_count: u64::try_from(sqlite_freelist_count)
-            .map_err(|_| "negative freelist_count".to_string())?,
+        sqlite_page_size,
+        sqlite_page_count,
+        sqlite_freelist_count,
     })
+}
+
+#[update]
+fn bench_churn_reset(base_rows: u32) -> Result<BenchChurnStepReport, String> {
+    validate_fixed_bench_key_rows(base_rows)?;
+    let start = performance_counter(0);
+    Db::update(|connection| {
+        reset_churn_table(connection)?;
+        let mut statement =
+            connection.prepare("INSERT INTO churn_bench(key, value) VALUES (?1, ?2)")?;
+        for index in 0..base_rows {
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 25];
+            let key = prefixed_key(b'c', index, &mut key);
+            let value = bench_value(index, &mut value);
+            statement.execute_text_text(&key, &value)?;
+        }
+        Ok(())
+    })
+    .map_err(error_text)?;
+    churn_report(0, "reset", base_rows, start)
+}
+
+#[update]
+fn bench_churn_delete(
+    start_index: u32,
+    rows: u32,
+    cycle: u32,
+) -> Result<BenchChurnStepReport, String> {
+    validate_churn_range(start_index, rows)?;
+    let start = performance_counter(0);
+    Db::update(|connection| {
+        let mut statement = connection.prepare("DELETE FROM churn_bench WHERE key = ?1")?;
+        for offset in 0..rows {
+            let index = start_index
+                .checked_add(offset)
+                .ok_or(ic_sqlite_vfs::DbError::TooManyParameters)?;
+            let mut key = [0_u8; 9];
+            let key = prefixed_key(b'c', index, &mut key);
+            statement.execute(ic_sqlite_vfs::params![key])?;
+            if connection.changes() != 1 {
+                return Err(ic_sqlite_vfs::DbError::NotFound);
+            }
+        }
+        Ok(())
+    })
+    .map_err(error_text)?;
+    churn_report(cycle, "delete", rows, start)
+}
+
+#[update]
+fn bench_churn_insert(
+    start_index: u32,
+    rows: u32,
+    cycle: u32,
+) -> Result<BenchChurnStepReport, String> {
+    validate_churn_range(start_index, rows)?;
+    let start = performance_counter(0);
+    Db::update(|connection| {
+        let mut statement =
+            connection.prepare("INSERT INTO churn_bench(key, value) VALUES (?1, ?2)")?;
+        for offset in 0..rows {
+            let index = start_index
+                .checked_add(offset)
+                .ok_or(ic_sqlite_vfs::DbError::TooManyParameters)?;
+            let mut key = [0_u8; 9];
+            let mut value = [0_u8; 25];
+            let key = prefixed_key(b'c', index, &mut key);
+            let value = bench_value(index, &mut value);
+            statement.execute_text_text(&key, &value)?;
+        }
+        Ok(())
+    })
+    .map_err(error_text)?;
+    churn_report(cycle, "insert", rows, start)
 }
 
 #[query]
@@ -998,6 +1078,18 @@ fn reset_bench_table(connection: &ic_sqlite_vfs::db::connection::Connection) -> 
     )
 }
 
+fn reset_churn_table(
+    connection: &ic_sqlite_vfs::db::connection::Connection,
+) -> Result<(), ic_sqlite_vfs::DbError> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS churn_bench;
+         CREATE TABLE churn_bench (
+            key TEXT PRIMARY KEY NOT NULL,
+            value TEXT NOT NULL
+         ) WITHOUT ROWID;",
+    )
+}
+
 fn seed_growth_rows(rows: u32) -> Result<(), ic_sqlite_vfs::DbError> {
     Db::update(|connection| {
         connection.execute_batch(
@@ -1085,6 +1177,60 @@ fn verify_capacity_growth_report(report: &BenchCapacityGrowthReport) -> Result<(
         ));
     }
     Ok(())
+}
+
+fn validate_churn_range(start: u32, rows: u32) -> Result<(), String> {
+    if rows == 0 {
+        return Err("rows must be positive".to_string());
+    }
+    validate_fixed_bench_key_range(start, rows)
+}
+
+fn sqlite_stats() -> Result<(u64, u64, u64), String> {
+    let (sqlite_page_size, sqlite_page_count, sqlite_freelist_count) = Db::query(|connection| {
+        Ok((
+            connection.query_scalar::<i64>("PRAGMA page_size", ic_sqlite_vfs::params![])?,
+            connection.query_scalar::<i64>("PRAGMA page_count", ic_sqlite_vfs::params![])?,
+            connection.query_scalar::<i64>("PRAGMA freelist_count", ic_sqlite_vfs::params![])?,
+        ))
+    })
+    .map_err(error_text)?;
+    Ok((
+        u64::try_from(sqlite_page_size).map_err(|_| "negative page_size".to_string())?,
+        u64::try_from(sqlite_page_count).map_err(|_| "negative page_count".to_string())?,
+        u64::try_from(sqlite_freelist_count)
+            .map_err(|_| "negative freelist_count".to_string())?,
+    ))
+}
+
+fn churn_report(
+    cycle: u32,
+    phase: &str,
+    rows: u32,
+    start: u64,
+) -> Result<BenchChurnStepReport, String> {
+    let block = Superblock::load().map_err(|error| error.to_string())?;
+    let stable_pages = memory::size_pages();
+    let (sqlite_page_size, sqlite_page_count, sqlite_freelist_count) = sqlite_stats()?;
+    let row_count = Db::query(|connection| {
+        connection.query_scalar::<i64>("SELECT COUNT(*) FROM churn_bench", ic_sqlite_vfs::params![])
+    })
+    .map_err(error_text)?;
+    Ok(BenchChurnStepReport {
+        cycle: u64::from(cycle),
+        phase: phase.to_string(),
+        rows: u64::from(rows),
+        instructions: performance_counter(0).saturating_sub(start),
+        row_count: u64::try_from(row_count).map_err(|_| "negative row count".to_string())?,
+        db_size: block.db_size,
+        stable_pages,
+        stable_bytes: stable_pages
+            .checked_mul(ic_sqlite_vfs::config::STABLE_PAGE_SIZE)
+            .ok_or_else(|| "stable byte size overflow".to_string())?,
+        sqlite_page_size,
+        sqlite_page_count,
+        sqlite_freelist_count,
+    })
 }
 
 fn multi_get_sql(count: u32) -> Result<String, ic_sqlite_vfs::DbError> {
