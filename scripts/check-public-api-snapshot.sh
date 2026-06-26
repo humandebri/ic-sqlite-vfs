@@ -5,9 +5,9 @@ export LC_ALL=C
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-SNAPSHOT="docs/PUBLIC_API_1_0.snapshot"
+SNAPSHOT="docs/PUBLIC_API_2_0.snapshot"
 
-generate_snapshot() {
+generate_core_snapshot() {
   while IFS= read -r file; do
     awk -v file="$file" '
       function normalize(text) {
@@ -46,7 +46,75 @@ generate_snapshot() {
         }
       }
     ' "$file"
-  done < <(rg --files src -g '*.rs' | rg -v '^src/api/sqlite_feature_probe\.rs$' | sort) \
+  done < <(
+    {
+      printf '%s\n' src/lib.rs src/config.rs src/stable/memory_manager.rs
+      rg --files src/db -g '*.rs'
+    } | sort
+  )
+}
+
+generate_reexported_snapshot() {
+  awk -v file="src/stable/memory.rs" '
+    function normalize(text) {
+      gsub(/[[:space:]]+/, " ", text)
+      sub(/^ /, "", text)
+      sub(/ $/, "", text)
+      gsub(/ :/, ":", text)
+      return text
+    }
+    function count_char(text, char, tmp) {
+      tmp = text
+      return gsub(char, char, tmp)
+    }
+    {
+      line = $0
+      if (line ~ /^[[:space:]]*pub[[:space:]]+type[[:space:]]+DbMemory[[:space:]]*=/) {
+        print file ":" normalize(line)
+      }
+      if (line ~ /^[[:space:]]*pub[[:space:]]+enum[[:space:]]+StableMemoryError[[:space:]]*/) {
+        in_error = 1
+        depth = 0
+        print file ":" normalize(line)
+      } else if (in_error && line !~ /^[[:space:]]*(#|"|\)?\]|$|})/) {
+        print file ":" normalize(line)
+      }
+      if (in_error) {
+        depth += count_char(line, "{") - count_char(line, "}")
+        if (depth <= 0 && line ~ /}/) {
+          in_error = 0
+          depth = 0
+        }
+      }
+    }
+  ' src/stable/memory.rs
+
+  awk -v file="src/stable/memory_layout.rs" '
+    function normalize(text) {
+      gsub(/[[:space:]]+/, " ", text)
+      sub(/^ /, "", text)
+      sub(/ $/, "", text)
+      gsub(/ :/, ":", text)
+      return text
+    }
+    {
+      line = $0
+      if (line ~ /^[[:space:]]*pub[[:space:]]+struct[[:space:]]+MemoryId/) {
+        print file ":" normalize(line)
+      }
+      if (line ~ /^[[:space:]]*pub[[:space:]]+const[[:space:]]+fn[[:space:]]+new[[:space:]]*\(/) {
+        print file ":" normalize(line)
+      }
+    }
+  ' src/stable/memory_layout.rs
+}
+
+generate_snapshot() {
+  {
+    generate_core_snapshot
+    generate_reexported_snapshot
+  } \
+    | rg -v '^src/lib\.rs:pub mod (api|bench_support|test_support);$' \
     | rg -v '(StepFailpoint|set_step_failpoint|clear_step_failpoint|MemoryFailpoint|set_failpoint|clear_failpoint)' \
     | sort
 }
@@ -68,6 +136,6 @@ generate_snapshot > "$TMP"
 
 if ! diff -u "$SNAPSHOT" "$TMP"; then
   echo "public API snapshot changed"
-  echo "If this is intentional for 1.0, update $SNAPSHOT and docs/API_STABILITY.md."
+  echo "If this is intentional for 2.0, update $SNAPSHOT and docs/API_STABILITY.md."
   exit 1
 fi

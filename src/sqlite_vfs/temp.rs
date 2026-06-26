@@ -52,8 +52,4 @@ impl TempFile {
     pub fn len(&self) -> u64 {
         u64::try_from(self.bytes.len()).expect("usize fits in u64")
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
 }

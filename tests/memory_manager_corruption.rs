@@ -1,5 +1,6 @@
-use ic_sqlite_vfs::stable::memory_manager::{MemoryId, MemoryManager};
-use ic_sqlite_vfs::stable::raw_memory::{DefaultMemoryImpl, Memory};
+use ic_sqlite_vfs::test_support::Memory;
+use ic_sqlite_vfs::DefaultMemoryImpl;
+use ic_sqlite_vfs::{MemoryId, MemoryManager};
 
 const MAGIC: &[u8; 3] = b"MGR";
 const LAYOUT_VERSION: u8 = 1;

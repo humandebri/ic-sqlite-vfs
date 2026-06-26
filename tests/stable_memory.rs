@@ -1,6 +1,6 @@
-use ic_sqlite_vfs::stable::memory::{self, StableMemoryError};
-use ic_sqlite_vfs::stable::memory_manager::{MemoryId, MemoryManager};
-use ic_sqlite_vfs::stable::raw_memory::DefaultMemoryImpl;
+use ic_sqlite_vfs::test_support::memory;
+use ic_sqlite_vfs::DefaultMemoryImpl;
+use ic_sqlite_vfs::{MemoryId, MemoryManager, StableMemoryError};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 

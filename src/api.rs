@@ -31,6 +31,10 @@ const MIGRATIONS: &[Migration] = &[
     },
 ];
 const MAX_KV_GET_MANY_KEYS: usize = 1_000;
+const MAX_KV_KEY_BYTES: usize = 256;
+const MAX_KV_VALUE_BYTES: usize = 64 * 1024;
+const MAX_KV_NOTE_BYTES: usize = 4 * 1024;
+const MAX_CHECKSUM_REFRESH_BYTES: u64 = 4 * 1024 * 1024;
 const SQLITE_MEMORY_ID: MemoryId = MemoryId::new(120);
 
 thread_local! {
@@ -50,16 +54,14 @@ pub struct DbMeta {
     pub checksum_stale: bool,
     pub checksum_refreshing: bool,
     pub checksum_refresh_offset: u64,
-    pub importing: bool,
-    pub import_written_until: u64,
     pub layout_version: u64,
     pub page_count: u64,
     pub page_table_bytes: u64,
+    pub zero_extent_count: u64,
     pub active_bytes: u64,
     pub allocated_bytes: u64,
     pub orphan_bytes_estimate: u64,
     pub orphan_ratio_basis_points: u64,
-    pub compact_recommended: bool,
 }
 
 #[derive(CandidType, Deserialize)]
@@ -90,6 +92,9 @@ fn init_db() {
 
 #[ic_cdk::update]
 fn kv_put(key: String, value: String) -> Result<(), String> {
+    require_controller()?;
+    validate_text_len("key", &key, MAX_KV_KEY_BYTES)?;
+    validate_text_len("value", &value, MAX_KV_VALUE_BYTES)?;
     Db::update(|connection| {
         connection.execute_text_text(
             "INSERT INTO kv(key, value) VALUES (?1, ?2)
@@ -103,6 +108,7 @@ fn kv_put(key: String, value: String) -> Result<(), String> {
 
 #[ic_cdk::query]
 fn kv_get(key: String) -> Result<Option<String>, String> {
+    validate_text_len("key", &key, MAX_KV_KEY_BYTES)?;
     Db::query(|connection| {
         connection.query_optional_string_text("SELECT value FROM kv WHERE key = ?1", &key)
     })
@@ -119,6 +125,9 @@ fn kv_get_many(keys: Vec<String>) -> Result<Vec<Option<String>>, String> {
             "kv_get_many accepts at most {MAX_KV_GET_MANY_KEYS} keys"
         ));
     }
+    for key in &keys {
+        validate_text_len("key", key, MAX_KV_KEY_BYTES)?;
+    }
     let sql = values_lookup_sql(keys.len(), "value")?;
     Db::query(|connection| {
         let values = keys
@@ -132,6 +141,9 @@ fn kv_get_many(keys: Vec<String>) -> Result<Vec<Option<String>>, String> {
 
 #[ic_cdk::update]
 fn kv_set_note(key: String, note: String) -> Result<(), String> {
+    require_controller()?;
+    validate_text_len("key", &key, MAX_KV_KEY_BYTES)?;
+    validate_text_len("note", &note, MAX_KV_NOTE_BYTES)?;
     Db::update(|connection| {
         connection.execute_text_text("UPDATE kv SET note = ?1 WHERE key = ?2", &note, &key)
     })
@@ -140,6 +152,7 @@ fn kv_set_note(key: String, note: String) -> Result<(), String> {
 
 #[ic_cdk::query]
 fn kv_get_note(key: String) -> Result<Option<String>, String> {
+    validate_text_len("key", &key, MAX_KV_KEY_BYTES)?;
     Db::query(|connection| {
         connection.query_optional_string_text("SELECT note FROM kv WHERE key = ?1", &key)
     })
@@ -161,8 +174,37 @@ fn values_lookup_sql(count: usize, column: &str) -> Result<String, String> {
     Ok(sql)
 }
 
+fn validate_text_len(field: &str, value: &str, max_bytes: usize) -> Result<(), String> {
+    let len = value.len();
+    if len > max_bytes {
+        Err(format!(
+            "{field} accepts at most {max_bytes} bytes; got {len} bytes"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_nonzero_u64_max(
+    field: &str,
+    value: u64,
+    max: u64,
+    endpoint: &str,
+) -> Result<(), String> {
+    if value == 0 {
+        Err(format!("{endpoint} requires {field} greater than zero"))
+    } else if value > max {
+        Err(format!(
+            "{endpoint} accepts {field} at most {max} bytes; got {value} bytes"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[ic_cdk::query]
 fn kv_count() -> Result<u64, String> {
+    require_controller()?;
     let count = Db::query(|connection| {
         connection.query_scalar::<i64>("SELECT COUNT(*) FROM kv", crate::params![])
     })
@@ -190,16 +232,14 @@ fn db_meta() -> Result<DbMeta, String> {
         checksum_stale: block.is_checksum_stale(),
         checksum_refreshing: block.is_checksum_refreshing(),
         checksum_refresh_offset: block.checksum_refresh_offset,
-        importing: block.is_importing(),
-        import_written_until: block.import_written_until,
         layout_version: stats.layout_version,
         page_count: stats.page_count,
         page_table_bytes: stats.page_table_bytes,
+        zero_extent_count: stats.zero_extent_count,
         active_bytes: stats.active_bytes,
         allocated_bytes: stats.allocated_bytes,
         orphan_bytes_estimate: stats.orphan_bytes_estimate,
         orphan_ratio_basis_points: stats.orphan_ratio_basis_points,
-        compact_recommended: stats.compact_recommended,
     })
 }
 
@@ -218,12 +258,18 @@ fn db_checksum() -> Result<u64, String> {
 #[ic_cdk::update]
 fn db_refresh_checksum() -> Result<u64, String> {
     require_controller()?;
-    Db::refresh_checksum().map_err(error_text)
+    Err("use db_refresh_checksum_chunk".to_string())
 }
 
 #[ic_cdk::update]
 fn db_refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, String> {
     require_controller()?;
+    validate_nonzero_u64_max(
+        "max_bytes",
+        max_bytes,
+        MAX_CHECKSUM_REFRESH_BYTES,
+        "db_refresh_checksum_chunk",
+    )?;
     let report = Db::refresh_checksum_chunk(max_bytes).map_err(error_text)?;
     Ok(ChecksumRefresh {
         complete: report.complete,
@@ -231,42 +277,6 @@ fn db_refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, String> 
         scanned_bytes: report.scanned_bytes,
         db_size: report.db_size,
     })
-}
-
-#[ic_cdk::query]
-fn db_export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, String> {
-    require_controller()?;
-    Db::export_chunk(offset, len).map_err(error_text)
-}
-
-#[ic_cdk::update]
-fn db_begin_import(total_size: u64, expected_checksum: u64) -> Result<(), String> {
-    require_controller()?;
-    Db::begin_import(total_size, expected_checksum).map_err(error_text)
-}
-
-#[ic_cdk::update]
-fn db_import_chunk(offset: u64, bytes: Vec<u8>) -> Result<(), String> {
-    require_controller()?;
-    Db::import_chunk(offset, &bytes).map_err(error_text)
-}
-
-#[ic_cdk::update]
-fn db_finish_import() -> Result<(), String> {
-    require_controller()?;
-    Db::finish_import().map_err(error_text)
-}
-
-#[ic_cdk::update]
-fn db_cancel_import() -> Result<(), String> {
-    require_controller()?;
-    Db::cancel_import().map_err(error_text)
-}
-
-#[ic_cdk::update]
-fn db_compact() -> Result<(), String> {
-    require_controller()?;
-    Db::compact().map_err(error_text)
 }
 
 #[cfg(feature = "canister-api-test-failpoints")]
@@ -312,5 +322,45 @@ fn require_controller() -> Result<(), String> {
         Ok(())
     } else {
         Err("caller is not a controller".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        validate_text_len, MAX_KV_GET_MANY_KEYS, MAX_KV_KEY_BYTES, MAX_KV_NOTE_BYTES,
+        MAX_KV_VALUE_BYTES,
+    };
+
+    #[test]
+    fn kv_input_limits_accept_boundary_values() {
+        let key = "k".repeat(MAX_KV_KEY_BYTES);
+        let value = "v".repeat(MAX_KV_VALUE_BYTES);
+        let note = "n".repeat(MAX_KV_NOTE_BYTES);
+
+        assert_eq!(validate_text_len("key", &key, MAX_KV_KEY_BYTES), Ok(()));
+        assert_eq!(
+            validate_text_len("value", &value, MAX_KV_VALUE_BYTES),
+            Ok(())
+        );
+        assert_eq!(validate_text_len("note", &note, MAX_KV_NOTE_BYTES), Ok(()));
+        assert_eq!(MAX_KV_GET_MANY_KEYS, 1_000);
+    }
+
+    #[test]
+    fn kv_input_limits_reject_one_byte_over_boundary() {
+        let key = "k".repeat(MAX_KV_KEY_BYTES + 1);
+        let value = "v".repeat(MAX_KV_VALUE_BYTES + 1);
+        let note = "n".repeat(MAX_KV_NOTE_BYTES + 1);
+
+        assert!(validate_text_len("key", &key, MAX_KV_KEY_BYTES)
+            .unwrap_err()
+            .contains("at most 256 bytes"));
+        assert!(validate_text_len("value", &value, MAX_KV_VALUE_BYTES)
+            .unwrap_err()
+            .contains("at most 65536 bytes"));
+        assert!(validate_text_len("note", &note, MAX_KV_NOTE_BYTES)
+            .unwrap_err()
+            .contains("at most 4096 bytes"));
     }
 }

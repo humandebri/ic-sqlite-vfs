@@ -3,11 +3,11 @@
 //! 通常CIからは除外し、DBサイズ増加時の更新・読取・checksum傾向を手元で確認する。
 
 use ic_sqlite_vfs::db::migrate::Migration;
+use ic_sqlite_vfs::test_support::lock;
+use ic_sqlite_vfs::test_support::memory;
 #[cfg(debug_assertions)]
-use ic_sqlite_vfs::read_metrics;
-use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
-use ic_sqlite_vfs::stable::memory;
-use ic_sqlite_vfs::stable::meta::Superblock;
+use ic_sqlite_vfs::test_support::read_metrics;
+use ic_sqlite_vfs::test_support::Superblock;
 use ic_sqlite_vfs::{params, Db};
 use serial_test::serial;
 use std::time::Instant;
@@ -21,7 +21,6 @@ const MIGRATIONS: &[Migration] = &[Migration {
 }];
 
 fn reset() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     Db::init(memory::memory_for_tests()).unwrap();
@@ -51,16 +50,11 @@ fn print_read_metric(name: &str, rows: u64, elapsed_ms: u128, db_size: u64, page
     println!(
         "{name}, rows={rows}, elapsed_ms={elapsed_ms}, db_size={db_size}, pages={pages}, \
          x_read_calls={}, x_read_bytes={}, stable_data_read_calls={}, \
-         stable_data_read_bytes={}, page_table_root_hits={}, page_table_root_misses={}, \
-         page_table_segment_hits={}, page_table_segment_misses={}, superblock_loads={}",
+         stable_data_read_bytes={}, superblock_loads={}",
         metrics.x_read_calls,
         metrics.x_read_bytes,
         metrics.stable_data_read_calls,
         metrics.stable_data_read_bytes,
-        metrics.page_table_root_hits,
-        metrics.page_table_root_misses,
-        metrics.page_table_segment_hits,
-        metrics.page_table_segment_misses,
         metrics.superblock_loads
     );
 }
@@ -132,7 +126,7 @@ fn batch_insert_update_and_checksum_scale() {
 #[test]
 #[ignore]
 #[serial]
-fn indexed_read_scan_and_export_scale() {
+fn indexed_read_scan_and_checksum_scale() {
     reset();
     let rows = 20_000_u64;
     Db::update(|connection| {
@@ -189,15 +183,15 @@ fn indexed_read_scan_and_export_scale() {
     );
     assert_eq!(count, i64::try_from(rows).unwrap());
 
-    reset_read_metrics();
     let start = Instant::now();
-    let exported = Db::export_chunk(0, db_size).unwrap();
-    print_read_metric(
-        "export_full_image",
+    let checksum = Db::refresh_checksum().unwrap();
+    let (db_size, _page_count, pages) = meta();
+    print_metric(
+        "refresh_checksum_after_reads",
         rows,
         start.elapsed().as_millis(),
         db_size,
         pages,
     );
-    assert_eq!(exported.len(), usize::try_from(db_size).unwrap());
+    assert_ne!(checksum, 0);
 }

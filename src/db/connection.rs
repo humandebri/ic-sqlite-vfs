@@ -87,7 +87,7 @@ impl StatementCache {
     }
 }
 
-pub fn open_read_write() -> Result<Connection, DbError> {
+pub(crate) fn open_read_write() -> Result<Connection, DbError> {
     open_read_write_with_page_size(true)
 }
 
@@ -105,7 +105,7 @@ fn open_read_write_with_page_size(apply_page_size: bool) -> Result<Connection, D
     Ok(connection)
 }
 
-pub fn open_read_only() -> Result<Connection, DbError> {
+pub(crate) fn open_read_only() -> Result<Connection, DbError> {
     let flags = ffi::SQLITE_OPEN_READONLY | ffi::SQLITE_OPEN_URI | ffi::SQLITE_OPEN_NOMUTEX;
     let connection = Connection::open(flags)?;
     pragmas::apply_read_only(&connection)?;
@@ -559,7 +559,6 @@ mod tests {
 
     fn reset() {
         stable_blob::rollback_update();
-        stable_blob::invalidate_read_cache();
         memory::reset_for_tests();
         lock::reset_for_tests();
         Db::init(memory::memory_for_tests()).unwrap();

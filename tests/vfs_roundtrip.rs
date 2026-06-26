@@ -1,13 +1,14 @@
 use ic_sqlite_vfs::config::{SQLITE_CACHE_SIZE_KIB, SQLITE_PAGE_SIZE};
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::sqlite_vfs::{self, ffi, lock, stable_blob};
-use ic_sqlite_vfs::stable::memory;
-use ic_sqlite_vfs::stable::memory_manager::{MemoryId, MemoryManager};
-use ic_sqlite_vfs::stable::meta::Superblock;
-use ic_sqlite_vfs::stable::raw_memory::DefaultMemoryImpl;
+use ic_sqlite_vfs::test_support::memory;
+use ic_sqlite_vfs::test_support::stable_blob;
+use ic_sqlite_vfs::test_support::{ffi, lock, vfs, Memory, Superblock};
+use ic_sqlite_vfs::DefaultMemoryImpl;
 use ic_sqlite_vfs::{params, Db, DbError, DbHandle};
+use ic_sqlite_vfs::{MemoryId, MemoryManager};
 use serial_test::serial;
 use std::ffi::{c_void, CStr, CString};
+use std::mem::MaybeUninit;
 use std::ptr;
 
 struct RawConnection {
@@ -22,8 +23,105 @@ impl Drop for RawConnection {
     }
 }
 
+struct VfsMainFile {
+    storage: Vec<MaybeUninit<usize>>,
+    raw: *mut ffi::sqlite3_file,
+}
+
+impl VfsMainFile {
+    fn open() -> Self {
+        vfs::register();
+        let vfs_name = CString::new(ic_sqlite_vfs::config::VFS_NAME).unwrap();
+        let db_name = CString::new(ic_sqlite_vfs::config::MAIN_DB_PATH).unwrap();
+        let raw_vfs = unsafe { ffi::sqlite3_vfs_find(vfs_name.as_ptr()) };
+        assert!(!raw_vfs.is_null());
+
+        let file_size = usize::try_from(unsafe { (*raw_vfs).szOsFile }).unwrap();
+        let word_size = std::mem::size_of::<usize>();
+        let word_count = file_size.div_ceil(word_size);
+        let mut storage = vec![MaybeUninit::<usize>::uninit(); word_count];
+        let raw = storage.as_mut_ptr().cast::<ffi::sqlite3_file>();
+        let flags = ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_MAIN_DB;
+        let mut out_flags = 0;
+        let open = unsafe { (*raw_vfs).xOpen.unwrap() };
+        let rc = unsafe {
+            open(
+                raw_vfs,
+                db_name.as_ptr(),
+                raw,
+                flags,
+                ptr::addr_of_mut!(out_flags),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+
+        Self { storage, raw }
+    }
+
+    fn read(&mut self, offset: u64, len: usize) -> Vec<u8> {
+        let mut out = vec![0_u8; len];
+        let methods = unsafe { &*(*self.raw).pMethods };
+        let read = methods.xRead.unwrap();
+        let rc = unsafe {
+            read(
+                self.raw,
+                out.as_mut_ptr().cast::<c_void>(),
+                i32::try_from(out.len()).unwrap(),
+                i64::try_from(offset).unwrap(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        out
+    }
+
+    fn write(&mut self, offset: u64, bytes: &[u8]) {
+        let methods = unsafe { &*(*self.raw).pMethods };
+        let write = methods.xWrite.unwrap();
+        let rc = unsafe {
+            write(
+                self.raw,
+                bytes.as_ptr().cast::<c_void>(),
+                i32::try_from(bytes.len()).unwrap(),
+                i64::try_from(offset).unwrap(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+    }
+
+    fn truncate(&mut self, size: u64) {
+        let methods = unsafe { &*(*self.raw).pMethods };
+        let truncate = methods.xTruncate.unwrap();
+        let rc = unsafe { truncate(self.raw, i64::try_from(size).unwrap()) };
+        assert_eq!(rc, ffi::SQLITE_OK);
+    }
+
+    fn file_size(&mut self) -> u64 {
+        let methods = unsafe { &*(*self.raw).pMethods };
+        let file_size = methods.xFileSize.unwrap();
+        let mut size = 0_i64;
+        let rc = unsafe { file_size(self.raw, ptr::addr_of_mut!(size)) };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        u64::try_from(size).unwrap()
+    }
+}
+
+impl Drop for VfsMainFile {
+    fn drop(&mut self) {
+        if self.raw.is_null() {
+            return;
+        }
+        let methods = unsafe { &*(*self.raw).pMethods };
+        if let Some(close) = methods.xClose {
+            let rc = unsafe { close(self.raw) };
+            debug_assert_eq!(rc, ffi::SQLITE_OK);
+        }
+        let _ = self.storage.len();
+        self.raw = ptr::null_mut();
+    }
+}
+
 fn open_raw(filename: &str, flags: i32) -> Result<RawConnection, String> {
-    sqlite_vfs::register();
+    vfs::register();
     let filename = CString::new(filename).unwrap();
     let vfs = CString::new(ic_sqlite_vfs::config::VFS_NAME).unwrap();
     let mut db = ptr::null_mut();
@@ -95,7 +193,6 @@ fn query_count_raw(connection: &RawConnection, sql: &str) -> i64 {
 }
 
 fn reset() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     Db::init(memory::memory_for_tests()).unwrap();
@@ -104,7 +201,6 @@ fn reset() {
 #[test]
 #[serial]
 fn update_and_query_require_explicit_memory_initialization() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
 
@@ -147,9 +243,9 @@ fn failed_db_init_allows_retry_with_another_memory() {
     let error = Db::init(manager.get(MemoryId::new(20))).unwrap_err();
     assert!(matches!(
         error,
-        ic_sqlite_vfs::DbError::Stable(
-            ic_sqlite_vfs::stable::memory::StableMemoryError::UnsupportedLayoutVersion(0)
-        )
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::UnsupportedLayoutVersion(
+            0
+        ))
     ));
 
     Db::init(manager.get(MemoryId::new(21))).unwrap();
@@ -158,6 +254,137 @@ fn failed_db_init_allows_retry_with_another_memory() {
         sql: "CREATE TABLE recovered(k TEXT PRIMARY KEY NOT NULL);",
     }])
     .unwrap();
+}
+
+#[test]
+#[serial]
+fn db_init_rejects_v6_page_map_layout_without_auto_migration() {
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    memory::init(manager.get(MemoryId::new(22))).unwrap();
+    let mut block = Superblock::fresh();
+    block.layout_version = 6;
+    block.store().unwrap();
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let error = Db::init(manager.get(MemoryId::new(22))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::UnsupportedLayoutVersion(
+            6
+        ))
+    ));
+}
+
+#[test]
+#[serial]
+fn db_init_fresh_initializes_empty_virtual_memory() {
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    Db::init(manager.get(MemoryId::new(23))).unwrap();
+
+    let block = Superblock::load().unwrap();
+    assert_eq!(
+        block.layout_version,
+        ic_sqlite_vfs::test_support::meta::CURRENT_LAYOUT_VERSION
+    );
+}
+
+#[test]
+#[serial]
+fn db_init_rejects_sqlite_format_image_without_overwriting_bytes() {
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let db_memory = manager.get(MemoryId::new(24));
+    let header = b"SQLite format 3\0";
+    assert_eq!(db_memory.grow(1), 0);
+    db_memory.write(0, header);
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let error = Db::init(manager.get(MemoryId::new(24))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::ForeignStableMemoryImage)
+    ));
+
+    let mut preserved = [0_u8; 16];
+    db_memory.read(0, &mut preserved);
+    assert_eq!(&preserved, header);
+}
+
+#[test]
+#[serial]
+fn db_init_rejects_random_non_empty_memory_without_overwriting_bytes() {
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let db_memory = manager.get(MemoryId::new(25));
+    let header = *b"not-ic-sqlite!!!";
+    assert_eq!(db_memory.grow(1), 0);
+    db_memory.write(0, &header);
+
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let error = Db::init(manager.get(MemoryId::new(25))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::ForeignStableMemoryImage)
+    ));
+
+    let mut preserved = [0_u8; 16];
+    db_memory.read(0, &mut preserved);
+    assert_eq!(preserved, header);
+}
+
+#[test]
+#[serial]
+fn db_handle_rejects_duplicate_memory_identity() {
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let first = DbHandle::init(manager.get(MemoryId::new(36))).unwrap();
+
+    let error = DbHandle::init(manager.get(MemoryId::new(36))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::MemoryAlreadyRegistered)
+    ));
+    first.query(|_| Ok::<_, DbError>(())).unwrap();
+}
+
+#[test]
+#[serial]
+fn db_handle_rejects_duplicate_memory_id_across_managers_on_same_backing() {
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let backing = DefaultMemoryImpl::default();
+    let first_manager = MemoryManager::init(backing.clone());
+    let second_manager = MemoryManager::init(backing);
+    let first = DbHandle::init(first_manager.get(MemoryId::new(37))).unwrap();
+
+    let error = DbHandle::init(second_manager.get(MemoryId::new(37))).unwrap_err();
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::DbError::Stable(ic_sqlite_vfs::StableMemoryError::MemoryAlreadyRegistered)
+    ));
+    first.query(|_| Ok::<_, DbError>(())).unwrap();
+}
+
+#[test]
+#[serial]
+fn db_handle_allows_same_memory_id_on_distinct_backing_memories() {
+    memory::reset_for_tests();
+    lock::reset_for_tests();
+    let first_manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let second_manager = MemoryManager::init(DefaultMemoryImpl::default());
+    let first = DbHandle::init(first_manager.get(MemoryId::new(38))).unwrap();
+    let second = DbHandle::init(second_manager.get(MemoryId::new(38))).unwrap();
+
+    first.query(|_| Ok::<_, DbError>(())).unwrap();
+    second.query(|_| Ok::<_, DbError>(())).unwrap();
 }
 
 #[test]
@@ -201,7 +428,6 @@ fn different_memory_ids_keep_database_images_separate() {
 #[test]
 #[serial]
 fn db_handles_keep_simultaneous_contexts_separate() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     let manager = MemoryManager::init(DefaultMemoryImpl::default());
@@ -240,19 +466,17 @@ fn db_handles_keep_simultaneous_contexts_separate() {
     assert_eq!(second_value, "second");
 
     first.refresh_checksum().unwrap();
-    first.compact().unwrap();
-    let second_after_compact = second
+    let second_after_checksum = second
         .query(|connection| {
             connection.query_scalar::<String>("SELECT v FROM multi WHERE k = 'k'", params![])
         })
         .unwrap();
-    assert_eq!(second_after_compact, "second");
+    assert_eq!(second_after_checksum, "second");
 }
 
 #[test]
 #[serial]
-fn db_handle_export_import_roundtrip_is_scoped_to_handle() {
-    stable_blob::invalidate_read_cache();
+fn db_handle_update_and_checksum_are_scoped_to_handle() {
     memory::reset_for_tests();
     lock::reset_for_tests();
     let manager = MemoryManager::init(DefaultMemoryImpl::default());
@@ -277,19 +501,13 @@ fn db_handle_export_import_roundtrip_is_scoped_to_handle() {
         })
         .unwrap();
 
-    let first_size = first.query(|_| Ok(Superblock::load()?.db_size)).unwrap();
-    let first_checksum = first.refresh_checksum().unwrap();
-    let first_image = first.export_chunk(0, first_size).unwrap();
-
     first
         .update(|connection| {
             connection.execute("UPDATE scoped SET v = 'new' WHERE k = 'k'", params![])
         })
         .unwrap();
-
-    first.begin_import(first_size, first_checksum).unwrap();
-    first.import_chunk(0, &first_image).unwrap();
-    first.finish_import().unwrap();
+    let first_checksum = first.refresh_checksum().unwrap();
+    assert_ne!(first_checksum, 0);
 
     let first_value = first
         .query(|connection| {
@@ -302,7 +520,7 @@ fn db_handle_export_import_roundtrip_is_scoped_to_handle() {
         })
         .unwrap();
 
-    assert_eq!(first_value, "old");
+    assert_eq!(first_value, "new");
     assert_eq!(second_value, "second");
 }
 
@@ -427,7 +645,7 @@ fn prepared_statement_cache_reuses_sql_with_repeated_binds() {
 
 #[test]
 #[serial]
-fn blob_boundaries_survive_compact_export_and_import() {
+fn blob_boundaries_survive_checksum_refresh() {
     reset();
     Db::migrate(&[Migration {
         version: 1,
@@ -454,16 +672,7 @@ fn blob_boundaries_survive_compact_export_and_import() {
     })
     .unwrap();
     assert_boundary_blobs(&blobs);
-
-    Db::compact().unwrap();
-    assert_boundary_blobs(&blobs);
-
-    let db_size = Superblock::load().unwrap().db_size;
-    let checksum = Db::refresh_checksum().unwrap();
-    let image = Db::export_chunk(0, db_size).unwrap();
-    Db::begin_import(db_size, checksum).unwrap();
-    Db::import_chunk(0, &image).unwrap();
-    Db::finish_import().unwrap();
+    Db::refresh_checksum().unwrap();
     assert_boundary_blobs(&blobs);
 }
 
@@ -480,6 +689,88 @@ fn deterministic_blob(seed: u8, len: usize) -> Vec<u8> {
     (0..len)
         .map(|index| seed.wrapping_add(index as u8).wrapping_mul(17))
         .collect()
+}
+
+#[test]
+#[serial]
+fn vfs_sparse_write_zero_fills_same_partial_page_eof_gap() {
+    reset();
+    let mut file = VfsMainFile::open();
+
+    file.write(0, b"a");
+    file.write(5, b"z");
+
+    let expected = b"a\0\0\0\0z";
+    assert_eq!(file.file_size(), 6);
+    assert_eq!(file.read(0, 6), expected);
+    assert_logical_image_metadata_matches(expected);
+}
+
+#[test]
+#[serial]
+fn vfs_sparse_write_zero_fills_cross_page_eof_gap() {
+    reset();
+    let page = u64::from(SQLITE_PAGE_SIZE);
+    let old_size = page + 17;
+    let write_offset = page * 2 + 33;
+    let gap_len = usize::try_from(write_offset - old_size).unwrap();
+    let expected_len = usize::try_from(write_offset + 1).unwrap();
+    let mut file = VfsMainFile::open();
+
+    file.write(old_size - 1, b"a");
+    file.write(write_offset, b"z");
+
+    let mut expected = vec![0_u8; expected_len];
+    expected[usize::try_from(old_size - 1).unwrap()] = b'a';
+    expected[usize::try_from(write_offset).unwrap()] = b'z';
+
+    assert_eq!(file.file_size(), write_offset + 1);
+    assert!(file.read(old_size, gap_len).iter().all(|byte| *byte == 0));
+    assert_eq!(file.read(write_offset, 1), b"z");
+    assert_logical_image_metadata_matches(&expected);
+}
+
+#[test]
+#[serial]
+fn vfs_truncate_reextend_keeps_stale_bytes_hidden_after_checksum() {
+    reset();
+    let page = u64::from(SQLITE_PAGE_SIZE);
+    let write_offset = page + 12;
+    let expected_size = write_offset + 1;
+    let mut file = VfsMainFile::open();
+
+    file.write(0, b"a");
+    file.write(page + 1, b"stale");
+    file.truncate(1);
+    file.write(write_offset, b"z");
+
+    let before_import = file.read(0, usize::try_from(expected_size).unwrap());
+    assert_eq!(before_import[0], b'a');
+    assert!(before_import[1..usize::try_from(write_offset).unwrap()]
+        .iter()
+        .all(|byte| *byte == 0));
+    assert_eq!(before_import[usize::try_from(write_offset).unwrap()], b'z');
+    assert_logical_image_metadata_matches(&before_import);
+
+    drop(file);
+    Db::refresh_checksum().unwrap();
+
+    let mut reopened = VfsMainFile::open();
+    assert_eq!(reopened.file_size(), expected_size);
+    assert_eq!(
+        reopened.read(0, usize::try_from(expected_size).unwrap()),
+        before_import
+    );
+    assert_logical_image_metadata_matches(&before_import);
+}
+
+fn assert_logical_image_metadata_matches(expected: &[u8]) {
+    let db_size = Superblock::load().unwrap().db_size;
+    assert_eq!(db_size, u64::try_from(expected.len()).unwrap());
+    assert_eq!(
+        Db::db_checksum().unwrap(),
+        ic_sqlite_vfs::test_support::meta::fnv1a64(expected)
+    );
 }
 
 #[test]
@@ -520,42 +811,7 @@ fn read_only_connection_applies_cache_size_pragma() {
 
 #[test]
 #[serial]
-fn export_import_roundtrip_restores_database_image() {
-    reset();
-    Db::migrate(&[Migration {
-        version: 1,
-        sql: "CREATE TABLE kv(k TEXT PRIMARY KEY, v TEXT NOT NULL);",
-    }])
-    .unwrap();
-    Db::update(|connection| {
-        connection.execute_batch("INSERT INTO kv(k, v) VALUES ('answer', '42')")?;
-        Ok(())
-    })
-    .unwrap();
-
-    let db_size = Superblock::load().unwrap().db_size;
-    let checksum = Db::refresh_checksum().unwrap();
-    let image = Db::export_chunk(0, db_size).unwrap();
-
-    reset();
-    Db::begin_import(db_size, checksum).unwrap();
-    Db::import_chunk(0, &image).unwrap();
-    Db::finish_import().unwrap();
-    let block = Superblock::load().unwrap();
-    assert_eq!(block.checksum, checksum);
-    assert!(!block.is_checksum_stale());
-
-    let value = Db::query(|connection| {
-        connection.query_scalar::<String>("SELECT v FROM kv WHERE k = 'answer'", params![])
-    })
-    .unwrap();
-
-    assert_eq!(value, "42");
-}
-
-#[test]
-#[serial]
-fn single_update_appends_less_than_full_database_image() {
+fn repeated_existing_page_updates_do_not_grow_allocated_bytes() {
     reset();
     Db::migrate(&[Migration {
         version: 1,
@@ -575,73 +831,98 @@ fn single_update_appends_less_than_full_database_image() {
     .unwrap();
 
     let before = Superblock::load().unwrap();
-    let before_pages = memory::size_pages();
-    Db::update(|connection| {
-        connection.execute(
-            "UPDATE growth SET v = ?1 WHERE k = ?2",
-            params!["updated", "k00000042"],
-        )
-    })
-    .unwrap();
-    let after_pages = memory::size_pages();
-    let appended_bytes = after_pages
-        .checked_sub(before_pages)
-        .unwrap()
-        .checked_mul(ic_sqlite_vfs::config::STABLE_PAGE_SIZE)
+    let before_stats = stable_blob::storage_stats().unwrap();
+    for round in 0..128 {
+        let value = format!("updated-{round:04}");
+        Db::update(|connection| {
+            connection.execute(
+                "UPDATE growth SET v = ?1 WHERE k = ?2",
+                params![value, "k00000042"],
+            )
+        })
         .unwrap();
+    }
+    let after = Superblock::load().unwrap();
+    let after_stats = stable_blob::storage_stats().unwrap();
 
     assert!(before.db_size > ic_sqlite_vfs::config::STABLE_PAGE_SIZE);
-    assert!(appended_bytes < before.db_size);
+    assert_eq!(after.db_size, before.db_size);
+    assert_eq!(after.page_count, before.page_count);
+    assert_eq!(after.db_base_offset, before.db_base_offset);
+    assert_eq!(after.page_table_offset, 0);
+    assert_eq!(after_stats.page_table_bytes, 0);
+    assert_eq!(after_stats.allocated_bytes, before_stats.allocated_bytes);
+    assert_eq!(
+        after_stats.orphan_bytes_estimate,
+        before_stats.orphan_bytes_estimate
+    );
+    assert_eq!(
+        memory::size_pages(),
+        before_stats.allocated_bytes / ic_sqlite_vfs::config::STABLE_PAGE_SIZE
+    );
 }
 
 #[test]
 #[serial]
-fn compact_preserves_logical_database_contents() {
+fn grow_truncate_reupdate_keeps_in_place_resource_shape() {
     reset();
     Db::migrate(&[Migration {
         version: 1,
-        sql: "CREATE TABLE compacted(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
+        sql: "CREATE TABLE resource_shape(k INTEGER PRIMARY KEY, v BLOB NOT NULL);",
     }])
     .unwrap();
     Db::update(|connection| {
-        let mut statement = connection.prepare("INSERT INTO compacted(k, v) VALUES (?1, ?2)")?;
-        for index in 0..600 {
-            let key = format!("key-{index:04}");
-            let value = format!("value-{index:04}");
-            statement.execute(params![key, value])?;
-        }
-        Ok(())
+        connection.execute(
+            "INSERT INTO resource_shape(k, v) VALUES (1, zeroblob(?1))",
+            params![i64::from(SQLITE_PAGE_SIZE) * 12],
+        )
     })
     .unwrap();
 
-    let checksum_before = Db::db_checksum().unwrap();
-    let page_count_before = Superblock::load().unwrap().page_count;
-    Db::compact().unwrap();
-    let block = Superblock::load().unwrap();
-    assert_ne!(
-        block.page_table_offset % ic_sqlite_vfs::config::STABLE_PAGE_SIZE,
-        0
+    let initial = Superblock::load().unwrap();
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE resource_shape SET v = zeroblob(?1) WHERE k = 1",
+            params![1],
+        )
+    })
+    .unwrap();
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE resource_shape SET v = zeroblob(?1) WHERE k = 1",
+            params![i64::from(SQLITE_PAGE_SIZE) * 12],
+        )
+    })
+    .unwrap();
+
+    let before_update = Superblock::load().unwrap();
+    let before_stats = stable_blob::storage_stats().unwrap();
+    Db::update(|connection| {
+        connection.execute(
+            "UPDATE resource_shape SET v = ?1 WHERE k = 1",
+            params![vec![7_u8; 256]],
+        )
+    })
+    .unwrap();
+    let after = Superblock::load().unwrap();
+    let after_stats = stable_blob::storage_stats().unwrap();
+
+    assert_eq!(before_update.db_base_offset, initial.db_base_offset);
+    assert_eq!(after.db_size, before_update.db_size);
+    assert_eq!(after.page_count, before_update.page_count);
+    assert_eq!(after.db_base_offset, initial.db_base_offset);
+    assert_eq!(after.page_table_offset, 0);
+    assert_eq!(after_stats.page_table_bytes, 0);
+    assert_eq!(after_stats.allocated_bytes, before_stats.allocated_bytes);
+    assert_eq!(
+        after_stats.orphan_bytes_estimate,
+        before_stats.orphan_bytes_estimate
     );
-    let checksum_after = Db::db_checksum().unwrap();
-    let value = Db::query(|connection| {
-        connection.query_scalar::<String>("SELECT v FROM compacted WHERE k = 'key-0042'", params![])
-    })
-    .unwrap();
-    let count = Db::query(|connection| {
-        connection.query_scalar::<i64>("SELECT COUNT(*) FROM compacted", params![])
-    })
-    .unwrap();
-
-    assert_eq!(checksum_after, checksum_before);
-    assert_eq!(block.page_count, page_count_before);
-    assert_eq!(value, "value-0042");
-    assert_eq!(count, 600);
-    assert_eq!(Db::integrity_check().unwrap(), "ok");
 }
 
 #[test]
 #[serial]
-fn read_table_cache_is_invalidated_after_publish_paths() {
+fn cached_read_connection_observes_update_path() {
     reset();
     Db::migrate(&[Migration {
         version: 1,
@@ -671,25 +952,6 @@ fn read_table_cache_is_invalidated_after_publish_paths() {
     })
     .unwrap();
     assert_eq!(after_update, "after");
-
-    let db_size = Superblock::load().unwrap().db_size;
-    let checksum = Db::refresh_checksum().unwrap();
-    let image = Db::export_chunk(0, db_size).unwrap();
-    Db::begin_import(db_size, checksum).unwrap();
-    Db::import_chunk(0, &image).unwrap();
-    Db::finish_import().unwrap();
-    let after_import = Db::query(|connection| {
-        connection.query_scalar::<String>("SELECT v FROM cache_guard WHERE k = 'key'", params![])
-    })
-    .unwrap();
-    assert_eq!(after_import, "after");
-
-    Db::compact().unwrap();
-    let after_compact = Db::query(|connection| {
-        connection.query_scalar::<String>("SELECT v FROM cache_guard WHERE k = 'key'", params![])
-    })
-    .unwrap();
-    assert_eq!(after_compact, "after");
 }
 
 #[test]
@@ -706,7 +968,7 @@ fn query_closure_rejects_mutation_without_panic_or_stale_clear() {
     })
     .unwrap();
 
-    let (before, update_blocked, compact_blocked, still_before) = Db::query(|connection| {
+    let (before, update_blocked, still_before) = Db::query(|connection| {
         let before = connection
             .query_scalar::<String>("SELECT v FROM reentrant_clear WHERE k = 'key'", params![])?;
         let update_blocked = matches!(
@@ -718,10 +980,9 @@ fn query_closure_rejects_mutation_without_panic_or_stale_clear() {
             }),
             Err(DbError::ReadConnectionInUse)
         );
-        let compact_blocked = matches!(Db::compact(), Err(DbError::ReadConnectionInUse));
         let still_before = connection
             .query_scalar::<String>("SELECT v FROM reentrant_clear WHERE k = 'key'", params![])?;
-        Ok((before, update_blocked, compact_blocked, still_before))
+        Ok((before, update_blocked, still_before))
     })
     .unwrap();
     Db::update(|connection| {
@@ -739,7 +1000,6 @@ fn query_closure_rejects_mutation_without_panic_or_stale_clear() {
 
     assert_eq!(before, "before");
     assert!(update_blocked);
-    assert!(compact_blocked);
     assert_eq!(still_before, "before");
     assert_eq!(after, "after");
 }
@@ -766,33 +1026,6 @@ fn query_closure_rejects_checksum_refresh_without_panic() {
         Ok((
             value,
             matches!(Db::refresh_checksum(), Err(DbError::ReadConnectionInUse)),
-        ))
-    })
-    .unwrap();
-
-    assert_eq!(blocked, ("value".to_string(), true));
-}
-
-#[test]
-#[serial]
-fn query_closure_rejects_import_without_panic() {
-    reset();
-    Db::migrate(&[Migration {
-        version: 1,
-        sql: "CREATE TABLE reentrant_import(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
-    }])
-    .unwrap();
-    Db::update(|connection| {
-        connection.execute_batch("INSERT INTO reentrant_import(k, v) VALUES ('key', 'value')")
-    })
-    .unwrap();
-
-    let blocked = Db::query(|connection| {
-        let value = connection
-            .query_scalar::<String>("SELECT v FROM reentrant_import WHERE k = 'key'", params![])?;
-        Ok((
-            value,
-            matches!(Db::begin_import(0, 0), Err(DbError::ReadConnectionInUse)),
         ))
     })
     .unwrap();
@@ -886,113 +1119,6 @@ fn cached_read_connection_survives_failed_update() {
 
 #[test]
 #[serial]
-fn import_replaces_cached_read_connection() {
-    reset();
-    Db::migrate(&[Migration {
-        version: 1,
-        sql: "CREATE TABLE import_cache_guard(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
-    }])
-    .unwrap();
-    Db::update(|connection| {
-        connection.execute_batch("INSERT INTO import_cache_guard(k, v) VALUES ('key', 'old')")
-    })
-    .unwrap();
-    let db_size = Superblock::load().unwrap().db_size;
-    let checksum = Db::refresh_checksum().unwrap();
-    let old_image = Db::export_chunk(0, db_size).unwrap();
-
-    Db::update(|connection| {
-        connection.execute(
-            "UPDATE import_cache_guard SET v = ?1 WHERE k = 'key'",
-            params!["new"],
-        )
-    })
-    .unwrap();
-    let new_value = Db::query(|connection| {
-        connection.query_scalar::<String>(
-            "SELECT v FROM import_cache_guard WHERE k = 'key'",
-            params![],
-        )
-    })
-    .unwrap();
-    assert_eq!(new_value, "new");
-
-    Db::begin_import(db_size, checksum).unwrap();
-    Db::import_chunk(0, &old_image).unwrap();
-    Db::finish_import().unwrap();
-    let block = Superblock::load().unwrap();
-    assert_ne!(
-        block.page_table_offset % ic_sqlite_vfs::config::STABLE_PAGE_SIZE,
-        0
-    );
-    let imported = Db::query(|connection| {
-        connection.query_scalar::<String>(
-            "SELECT v FROM import_cache_guard WHERE k = 'key'",
-            params![],
-        )
-    })
-    .unwrap();
-
-    assert_eq!(imported, "old");
-
-    Db::update(|connection| {
-        connection.execute(
-            "UPDATE import_cache_guard SET v = ?1 WHERE k = 'key'",
-            params!["after-import"],
-        )
-    })
-    .unwrap();
-    let after_import_update = Db::query(|connection| {
-        connection.query_scalar::<String>(
-            "SELECT v FROM import_cache_guard WHERE k = 'key'",
-            params![],
-        )
-    })
-    .unwrap();
-    assert_eq!(after_import_update, "after-import");
-}
-
-#[test]
-#[serial]
-fn update_is_rejected_during_import_after_write_connection_cache_exists() {
-    reset();
-    Db::migrate(&[Migration {
-        version: 1,
-        sql: "CREATE TABLE import_update_guard(k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);",
-    }])
-    .unwrap();
-    Db::update(|connection| {
-        connection.execute_batch("INSERT INTO import_update_guard(k, v) VALUES ('key', 'before')")
-    })
-    .unwrap();
-
-    Db::begin_import(1, 0).unwrap();
-    let result = Db::update(|connection| {
-        connection.execute(
-            "UPDATE import_update_guard SET v = ?1 WHERE k = 'key'",
-            params!["after"],
-        )
-    });
-    assert!(matches!(
-        result,
-        Err(DbError::Stable(
-            memory::StableMemoryError::ImportAlreadyStarted
-        ))
-    ));
-    Db::cancel_import().unwrap();
-
-    let value = Db::query(|connection| {
-        connection.query_scalar::<String>(
-            "SELECT v FROM import_update_guard WHERE k = 'key'",
-            params![],
-        )
-    })
-    .unwrap();
-    assert_eq!(value, "before");
-}
-
-#[test]
-#[serial]
 fn failed_update_rolls_back_transaction() {
     reset();
     Db::migrate(&[Migration {
@@ -1026,77 +1152,6 @@ fn integrity_check_reports_ok() {
     .unwrap();
 
     assert_eq!(Db::integrity_check().unwrap(), "ok");
-}
-
-#[test]
-#[serial]
-fn import_rejects_checksum_mismatch() {
-    reset();
-    Db::migrate(&[Migration {
-        version: 1,
-        sql: "CREATE TABLE import_check(id INTEGER PRIMARY KEY);",
-    }])
-    .unwrap();
-
-    let db_size = Superblock::load().unwrap().db_size;
-    let image = Db::export_chunk(0, db_size).unwrap();
-
-    reset();
-    Db::begin_import(db_size, 123).unwrap();
-    Db::import_chunk(0, &image).unwrap();
-
-    assert!(Db::finish_import().is_err());
-}
-
-#[test]
-#[serial]
-fn failed_import_preserves_existing_database() {
-    reset();
-    Db::migrate(&[Migration {
-        version: 1,
-        sql: "CREATE TABLE preserved(k TEXT PRIMARY KEY, v TEXT NOT NULL);",
-    }])
-    .unwrap();
-    Db::update(|connection| {
-        connection.execute_batch("INSERT INTO preserved(k, v) VALUES ('key', 'value')")
-    })
-    .unwrap();
-    let stale_before_import = Superblock::load().unwrap().is_checksum_stale();
-
-    let db_size = Superblock::load().unwrap().db_size;
-    let image = Db::export_chunk(0, db_size).unwrap();
-    Db::begin_import(db_size, 123).unwrap();
-    Db::import_chunk(0, &image).unwrap();
-
-    assert!(Db::finish_import().is_err());
-    let value = Db::query(|connection| {
-        connection.query_scalar::<String>("SELECT v FROM preserved WHERE k = 'key'", params![])
-    })
-    .unwrap();
-    assert_eq!(value, "value");
-    let block = Superblock::load().unwrap();
-    assert!(!block.is_importing());
-    assert_eq!(block.is_checksum_stale(), stale_before_import);
-}
-
-#[test]
-#[serial]
-fn import_requires_one_sequential_session() {
-    reset();
-    Db::begin_import(4, 0).unwrap();
-
-    assert!(Db::begin_import(4, 0).is_err());
-    assert!(Db::import_chunk(2, b"cd").is_err());
-    Db::import_chunk(0, b"ab").unwrap();
-    Db::import_chunk(2, b"cd").unwrap();
-}
-
-#[test]
-#[serial]
-fn import_rejects_physical_offset_overflow() {
-    reset();
-
-    assert!(Db::begin_import(u64::MAX, 0).is_err());
 }
 
 #[test]

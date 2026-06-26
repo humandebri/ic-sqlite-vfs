@@ -1,12 +1,11 @@
 use ic_sqlite_vfs::db::migrate::Migration;
 use ic_sqlite_vfs::db::{DbError, NULL};
-use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
-use ic_sqlite_vfs::stable::memory;
+use ic_sqlite_vfs::test_support::lock;
+use ic_sqlite_vfs::test_support::memory;
 use ic_sqlite_vfs::{named_params, params, Db};
 use serial_test::serial;
 
 fn reset() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     Db::init(memory::memory_for_tests()).unwrap();

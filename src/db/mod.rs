@@ -58,6 +58,8 @@ pub enum DbError {
     MigrationVersionOutOfRange(u64),
     #[error("duplicate migration version: {0}")]
     DuplicateMigrationVersion(u64),
+    #[error("migration versions must be strictly increasing: previous={previous}, next={next}")]
+    MigrationVersionOutOfOrder { previous: u64, next: u64 },
     #[error("SQL contains an interior NUL byte")]
     InteriorNul,
     #[error("SQL contains no statement")]
@@ -136,10 +138,6 @@ impl Db {
         Self::default_handle()?.integrity_check()
     }
 
-    pub fn export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, DbError> {
-        Self::default_handle()?.export_chunk(offset, len)
-    }
-
     pub fn db_checksum() -> Result<u64, DbError> {
         Self::default_handle()?.db_checksum()
     }
@@ -151,31 +149,11 @@ impl Db {
     pub fn refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, DbError> {
         Self::default_handle()?.refresh_checksum_chunk(max_bytes)
     }
-
-    pub fn begin_import(total_size: u64, expected_checksum: u64) -> Result<(), DbError> {
-        Self::default_handle()?.begin_import(total_size, expected_checksum)
-    }
-
-    pub fn import_chunk(offset: u64, bytes: &[u8]) -> Result<(), DbError> {
-        Self::default_handle()?.import_chunk(offset, bytes)
-    }
-
-    pub fn finish_import() -> Result<(), DbError> {
-        Self::default_handle()?.finish_import()
-    }
-
-    pub fn cancel_import() -> Result<(), DbError> {
-        Self::default_handle()?.cancel_import()
-    }
-
-    pub fn compact() -> Result<(), DbError> {
-        Self::default_handle()?.compact()
-    }
 }
 
 impl DbHandle {
     pub fn init(memory: DbMemory) -> Result<Self, DbError> {
-        let handle = Self::from_context(memory::init_context(memory));
+        let handle = Self::from_context(memory::init_context(memory)?);
         clear_read_connection(handle.context);
         clear_write_connection(handle.context);
         if let Err(error) = handle.initialize() {
@@ -195,7 +173,7 @@ impl DbHandle {
         self.with_context(|| {
             crate::sqlite_vfs::register();
             Superblock::load()?;
-            stable_blob::ensure_page_map_layout()?;
+            stable_blob::ensure_current_layout()?;
             Ok(())
         })
     }
@@ -254,10 +232,6 @@ impl DbHandle {
         })
     }
 
-    pub fn export_chunk(self, offset: u64, len: u64) -> Result<Vec<u8>, DbError> {
-        self.with_context(|| stable_blob::export_chunk(offset, len).map_err(DbError::from))
-    }
-
     pub fn db_checksum(self) -> Result<u64, DbError> {
         self.with_context(|| stable_blob::checksum().map_err(DbError::from))
     }
@@ -275,50 +249,6 @@ impl DbHandle {
             reject_active_read_connection(self.context)?;
             clear_read_connection(self.context);
             stable_blob::refresh_checksum_chunk(max_bytes).map_err(DbError::from)
-        })
-    }
-
-    pub fn begin_import(self, total_size: u64, expected_checksum: u64) -> Result<(), DbError> {
-        self.with_context(|| {
-            reject_active_read_connection(self.context)?;
-            clear_read_connection(self.context);
-            clear_write_connection(self.context);
-            stable_blob::begin_import(total_size, expected_checksum).map_err(DbError::from)
-        })
-    }
-
-    pub fn import_chunk(self, offset: u64, bytes: &[u8]) -> Result<(), DbError> {
-        self.with_context(|| {
-            reject_active_read_connection(self.context)?;
-            clear_read_connection(self.context);
-            stable_blob::import_chunk(offset, bytes).map_err(DbError::from)
-        })
-    }
-
-    pub fn finish_import(self) -> Result<(), DbError> {
-        self.with_context(|| {
-            reject_active_read_connection(self.context)?;
-            clear_read_connection(self.context);
-            clear_write_connection(self.context);
-            stable_blob::finish_import().map_err(DbError::from)
-        })
-    }
-
-    pub fn cancel_import(self) -> Result<(), DbError> {
-        self.with_context(|| {
-            reject_active_read_connection(self.context)?;
-            clear_read_connection(self.context);
-            clear_write_connection(self.context);
-            stable_blob::cancel_import().map_err(DbError::from)
-        })
-    }
-
-    pub fn compact(self) -> Result<(), DbError> {
-        self.with_context(|| {
-            reject_active_read_connection(self.context)?;
-            clear_read_connection(self.context);
-            clear_write_connection(self.context);
-            stable_blob::compact().map_err(DbError::from)
         })
     }
 }

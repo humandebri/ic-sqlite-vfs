@@ -12,6 +12,56 @@ log() {
   printf '\n==> %s\n' "$*"
 }
 
+node_bin() {
+  if [[ -n "${NODE:-}" ]]; then
+    echo "$NODE"
+  elif command -v node >/dev/null 2>&1; then
+    command -v node
+  elif [[ -x "$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node" ]]; then
+    echo "$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
+  else
+    echo "node not found" >&2
+    return 1
+  fi
+}
+
+build_pocketic_wasm() {
+  cargo build --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api
+  mkdir -p target/pocketic
+  cp target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs.wasm
+}
+
+build_pocketic_failpoint_wasm() {
+  cargo build --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled,canister-api-test-failpoints
+  mkdir -p target/pocketic
+  cp target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm target/pocketic/ic_sqlite_vfs_failpoints.wasm
+}
+
+build_bench_wasm() {
+  cargo build --manifest-path benchmarks/kv-canister/Cargo.toml --target wasm32-unknown-unknown --release
+  mkdir -p target/pocketic
+  cp benchmarks/kv-canister/target/wasm32-unknown-unknown/release/ic_sqlite_vfs_kv_bench.wasm target/pocketic/ic_sqlite_vfs_kv_bench.wasm
+}
+
+run_pocketic_regression() {
+  if command -v npm >/dev/null 2>&1; then
+    npm run test:pocketic:regression
+  else
+    build_pocketic_wasm
+    build_pocketic_failpoint_wasm
+    "$(node_bin)" --test tests/pocketic/upgrade.test.mjs
+  fi
+}
+
+run_pocketic_perf() {
+  if command -v npm >/dev/null 2>&1; then
+    npm run test:pocketic:perf
+  else
+    build_bench_wasm
+    "$(node_bin)" --test tests/pocketic/perf_regression.test.mjs
+  fi
+}
+
 tracked_pids() {
   if [[ -f "$PID_FILE" ]]; then
     sort -u "$PID_FILE" | while IFS= read -r pid; do
@@ -101,37 +151,31 @@ run_verus_proofs() {
   if [[ -z "$verus_bin" ]]; then
     if command -v verus >/dev/null 2>&1; then
       verus_bin="verus"
+    elif [[ -x "$HOME/.local/bin/verus" ]]; then
+      verus_bin="$HOME/.local/bin/verus"
+    elif [[ -x "/opt/homebrew/bin/verus" ]]; then
+      verus_bin="/opt/homebrew/bin/verus"
     fi
   fi
 
   if [[ -n "$verus_bin" ]]; then
     log "running Verus proof"
     mkdir -p target/verus
-    for proof in \
-      proofs/verus/layout_math.rs \
-      proofs/verus/memory_manager_layout.rs \
-      proofs/verus/memory_manager_grow.rs \
-      proofs/verus/memory_capacity.rs \
-      proofs/verus/checksum_fnv.rs \
-      proofs/verus/page_map_commit.rs \
-      proofs/verus/page_table_byte_encoding.rs \
-      proofs/verus/import_state_machine.rs \
-      proofs/verus/memory_manager_allocation.rs \
-      proofs/verus/superblock_encoding.rs \
-      proofs/verus/superblock_byte_encoding.rs \
-      proofs/verus/superblock_byte_roundtrip.rs \
-      proofs/verus/overlay_model.rs \
-      proofs/verus/compact_model.rs; do
+    while IFS= read -r proof; do
       "$verus_bin" --crate-type=lib --out-dir target/verus "$proof"
-    done
+    done < <(find proofs/verus -maxdepth 1 -type f -name '*.rs' | sort)
   else
+    if [[ "${VERUS_REQUIRED:-0}" == "1" ]]; then
+      echo "Verus not found but VERUS_REQUIRED=1"
+      exit 1
+    fi
     echo "Verus not found; skipped proofs/verus/*.rs"
   fi
 }
 
 trap cleanup_run_dir EXIT
 
-log "checking await-free canister API"
+log "checking runtime-contract canister API"
 bash scripts/check-no-await.sh
 
 log "checking bidi control characters"
@@ -173,7 +217,7 @@ run_verus_proofs
 for attempt in 1 2; do
   log "running PocketIC regression attempt ${attempt}"
   : > "$PID_FILE"
-  if run_with_timeout 600 npm run test:pocketic:regression; then
+  if run_with_timeout 600 run_pocketic_regression; then
     break
   fi
   diagnose_pocketic
@@ -182,4 +226,18 @@ for attempt in 1 2; do
     exit 1
   fi
   echo "PocketIC regression failed; retrying once"
+done
+
+for attempt in 1 2; do
+  log "running PocketIC performance and capacity regression attempt ${attempt}"
+  : > "$PID_FILE"
+  if run_with_timeout 600 run_pocketic_perf; then
+    break
+  fi
+  diagnose_pocketic
+  cleanup_pocketic
+  if [[ "$attempt" -eq 2 ]]; then
+    exit 1
+  fi
+  echo "PocketIC performance and capacity regression failed; retrying once"
 done

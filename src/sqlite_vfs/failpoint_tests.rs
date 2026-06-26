@@ -24,7 +24,6 @@ struct Snapshot {
 fn reset() {
     stable_blob::clear_failpoint();
     stable_blob::rollback_update();
-    stable_blob::invalidate_read_cache();
     statement::clear_step_failpoint();
     memory::reset_for_tests();
     lock::reset_for_tests();
@@ -34,7 +33,6 @@ fn reset() {
 fn restart_after_failed_message(snapshot: Vec<u8>) {
     stable_blob::clear_failpoint();
     stable_blob::rollback_update();
-    stable_blob::invalidate_read_cache();
     statement::clear_step_failpoint();
     memory::clear_failpoint();
     let memory = memory::restore_for_tests(snapshot);
@@ -60,7 +58,7 @@ fn snapshot() -> Snapshot {
         db_size: block.db_size,
         last_tx_id: block.last_tx_id,
         checksum: Db::db_checksum().unwrap(),
-        image: Db::export_chunk(0, block.db_size).unwrap(),
+        image: blob::export_chunk(0, block.db_size).unwrap(),
     }
 }
 
@@ -119,35 +117,151 @@ fn sparse_extend_zero_fills_gap_after_truncate() {
 
 #[test]
 #[serial]
-fn segmented_commit_rewrites_only_dirty_segment_tables() {
+fn sparse_extend_after_truncate_keeps_base_and_uses_zero_mask() {
+    reset();
+    blob::write_at(0, b"abcd").unwrap();
+    let initial_base = Superblock::load().unwrap().db_base_offset;
+
+    blob::truncate(1).unwrap();
+    let truncated = Superblock::load().unwrap();
+    assert_eq!(truncated.db_base_offset, initial_base);
+    assert_eq!(truncated.zero_extent_count(), 0);
+
+    let page_size = u64::from(crate::config::SQLITE_PAGE_SIZE);
+    blob::write_at(page_size + 3, b"z").unwrap();
+    let grown = Superblock::load().unwrap();
+    let image = blob::export_chunk(0, page_size + 4).unwrap();
+
+    assert_eq!(grown.db_base_offset, initial_base);
+    assert_eq!(grown.zero_extent_count(), 0);
+    assert_eq!(image[0], b'a');
+    assert!(image[1..usize::try_from(page_size + 3).unwrap()]
+        .iter()
+        .all(|byte| *byte == 0));
+    assert_eq!(image[usize::try_from(page_size + 3).unwrap()], b'z');
+}
+
+#[test]
+#[serial]
+fn grow_without_prior_truncate_keeps_existing_base() {
+    reset();
+    blob::write_at(0, b"a").unwrap();
+    let initial_base = Superblock::load().unwrap().db_base_offset;
+
+    blob::write_at(3, b"z").unwrap();
+    let grown = Superblock::load().unwrap();
+    let image = blob::export_chunk(0, 4).unwrap();
+
+    assert_eq!(image, b"a\0\0z");
+    assert_eq!(grown.db_base_offset, initial_base);
+    assert_eq!(grown.zero_extent_count(), 0);
+}
+
+#[test]
+#[serial]
+fn zero_mask_grow_failure_keeps_active_image_unchanged() {
+    reset();
+    blob::write_at(0, b"abcd").unwrap();
+    blob::truncate(1).unwrap();
+    let before = blob::export_chunk(0, 1).unwrap();
+    let block_before = Superblock::load().unwrap();
+
+    memory::set_failpoint(MemoryFailpoint::GrowFailed { ordinal: 1 });
+    let result = blob::write_at(300_000, b"z");
+
+    assert!(result.is_err());
+    memory::clear_failpoint();
+    assert_eq!(blob::export_chunk(0, block_before.db_size).unwrap(), before);
+    assert_eq!(Superblock::load().unwrap(), block_before);
+}
+
+#[test]
+#[serial]
+fn zero_mask_dirty_page_failure_keeps_active_image_unchanged() {
+    reset();
+    blob::write_at(0, b"abcd").unwrap();
+    blob::truncate(1).unwrap();
+    let before = blob::export_chunk(0, 1).unwrap();
+    let block_before = Superblock::load().unwrap();
+
+    stable_blob::set_failpoint(StableBlobFailpoint::CommitChunkWrite);
+    let result = blob::write_at(3, b"z");
+
+    assert!(result.is_err());
+    assert_eq!(blob::export_chunk(0, block_before.db_size).unwrap(), before);
+    assert_eq!(Superblock::load().unwrap(), block_before);
+}
+
+#[test]
+#[serial]
+fn zero_mask_superblock_store_failure_keeps_active_image_after_restart() {
+    reset();
+    blob::write_at(0, b"abcd").unwrap();
+    blob::truncate(1).unwrap();
+    let before = blob::export_chunk(0, 1).unwrap();
+    let block_before = Superblock::load().unwrap();
+    let memory_before = memory::snapshot_for_tests();
+
+    stable_blob::set_failpoint(StableBlobFailpoint::CommitSuperblockStore);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = blob::write_at(3, b"z");
+    }));
+
+    assert!(result.is_err());
+    restart_after_failed_message(memory_before);
+    assert_eq!(blob::export_chunk(0, block_before.db_size).unwrap(), before);
+    assert_eq!(Superblock::load().unwrap(), block_before);
+}
+
+#[test]
+#[serial]
+fn zero_mask_write_traps_preserve_active_image_after_restart() {
+    let ordinal = 1_u64;
+    reset();
+    blob::write_at(0, b"abcd").unwrap();
+    blob::truncate(1).unwrap();
+    let before = blob::export_chunk(0, 1).unwrap();
+    let block_before = Superblock::load().unwrap();
+    let memory_before = memory::snapshot_for_tests();
+
+    memory::set_failpoint(MemoryFailpoint::TrapAfterWrite { ordinal });
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = blob::write_at(3, b"z");
+    }));
+
+    assert!(result.is_err());
+    restart_after_failed_message(memory_before);
+    assert_eq!(blob::export_chunk(0, block_before.db_size).unwrap(), before);
+    assert_eq!(Superblock::load().unwrap(), block_before);
+}
+
+#[test]
+#[serial]
+fn in_place_commit_reuses_existing_capacity_for_existing_pages() {
     reset();
     let segment_size = u64::from(crate::config::SQLITE_PAGE_SIZE) * 256;
     blob::write_at(0, b"a").unwrap();
     blob::write_at(segment_size, b"b").unwrap();
-    let root = stable_blob::debug_root_table_for_tests().unwrap();
-    assert_eq!(root.len(), 2);
+    let pages_after_seed = memory::size_pages();
 
     blob::write_at(7, b"x").unwrap();
-    let updated = stable_blob::debug_root_table_for_tests().unwrap();
-    assert_eq!(changed_root_entries(&root, &updated), vec![0]);
+    assert_eq!(memory::size_pages(), pages_after_seed);
 
     stable_blob::begin_update().unwrap();
     blob::write_at(8, b"y").unwrap();
     blob::write_at(segment_size + 8, b"z").unwrap();
     stable_blob::commit_update().unwrap();
-    let multi = stable_blob::debug_root_table_for_tests().unwrap();
-    assert_eq!(changed_root_entries(&updated, &multi), vec![0, 1]);
+    assert_eq!(memory::size_pages(), pages_after_seed);
 }
 
 #[test]
 #[serial]
-fn segmented_truncate_shrinks_root_and_zero_fills_boundary_tail() {
+fn in_place_truncate_and_reextend_zero_fills_boundary_tail() {
     reset();
     let page_size = u64::from(crate::config::SQLITE_PAGE_SIZE);
     let segment_size = page_size * 256;
     blob::write_at(segment_size, b"a").unwrap();
     blob::write_at(segment_size + page_size, b"stale").unwrap();
-    assert_eq!(stable_blob::debug_root_table_for_tests().unwrap().len(), 2);
 
     blob::truncate(segment_size + 1).unwrap();
     blob::write_at(segment_size + page_size + 2, b"n").unwrap();
@@ -159,7 +273,7 @@ fn segmented_truncate_shrinks_root_and_zero_fills_boundary_tail() {
     assert_eq!(image[usize::try_from(page_size + 2).unwrap()], b'n');
 
     blob::truncate(1).unwrap();
-    assert_eq!(stable_blob::debug_root_table_for_tests().unwrap().len(), 1);
+    assert_eq!(Superblock::load().unwrap().page_count, 1);
 }
 
 #[test]
@@ -180,23 +294,25 @@ fn failed_commit_superblock_store_keeps_active_image_unchanged() {
     assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::CommitSuperblockStore);
 }
 
-#[test]
-#[serial]
-fn failed_commit_page_table_write_keeps_active_image_unchanged() {
-    assert_commit_failpoint_preserves_snapshot(StableBlobFailpoint::CommitPageTableWrite);
-}
-
 fn assert_commit_failpoint_preserves_snapshot(failpoint: StableBlobFailpoint) {
     reset();
     seed();
     let before = snapshot();
+    let memory_before = memory::snapshot_for_tests();
 
     stable_blob::set_failpoint(failpoint);
-    let result = Db::update(|connection| {
-        connection.execute_batch("INSERT INTO durable(k, v) VALUES ('after', 'shadow')")
-    });
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Db::update(|connection| {
+            connection.execute_batch("INSERT INTO durable(k, v) VALUES ('after', 'shadow')")
+        })
+    }));
 
-    assert!(result.is_err());
+    if failpoint == StableBlobFailpoint::CommitSuperblockStore {
+        assert!(result.is_err());
+        restart_after_failed_message(memory_before);
+    } else {
+        assert!(result.unwrap().is_err());
+    }
     assert_database_unchanged(&before);
 }
 
@@ -227,25 +343,15 @@ fn stable_write_trap_ordinals_preserve_active_image_after_restart() {
 
 #[test]
 #[serial]
-fn compact_write_failure_keeps_active_image_after_restart() {
-    for ordinal in [1_u64, 2, 3] {
-        reset();
-        seed();
-        let before = snapshot();
-        let memory_before = memory::snapshot_for_tests();
+fn compact_is_noop_and_does_not_hit_write_failpoint() {
+    reset();
+    seed();
+    let before = snapshot();
 
-        memory::set_failpoint(MemoryFailpoint::TrapAfterWrite { ordinal });
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let _ = Db::compact();
-        }));
-
-        assert!(
-            result.is_err(),
-            "compact write ordinal {ordinal} did not trap"
-        );
-        restart_after_failed_message(memory_before);
-        assert_database_unchanged(&before);
-    }
+    memory::set_failpoint(MemoryFailpoint::TrapAfterWrite { ordinal: 1 });
+    blob::compact().unwrap();
+    memory::clear_failpoint();
+    assert_database_unchanged(&before);
 }
 
 #[test]
@@ -256,10 +362,11 @@ fn stable_grow_failure_keeps_active_image_unchanged() {
     let before = snapshot();
 
     memory::set_failpoint(MemoryFailpoint::GrowFailed { ordinal: 1 });
+    let large_value = "x".repeat(300_000);
     let result = Db::update(|connection| {
         connection.execute(
             "INSERT INTO durable(k, v) VALUES (?1, ?2)",
-            crate::params!["after", "grow"],
+            crate::params!["after", large_value.as_str()],
         )
     });
 
@@ -305,13 +412,4 @@ fn panic_inside_update_drops_overlay_without_changing_active_image() {
 
     assert!(result.is_err());
     assert_database_unchanged(&before);
-}
-
-fn changed_root_entries(before: &[u64], after: &[u64]) -> Vec<usize> {
-    before
-        .iter()
-        .zip(after)
-        .enumerate()
-        .filter_map(|(index, (before, after))| (before != after).then_some(index))
-        .collect()
 }

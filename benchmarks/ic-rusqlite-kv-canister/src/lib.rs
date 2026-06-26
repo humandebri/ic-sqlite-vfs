@@ -39,6 +39,21 @@ pub struct DbStatsReport {
     pub sqlite_freelist_count: u64,
 }
 
+#[derive(CandidType, Deserialize)]
+pub struct BenchChurnStepReport {
+    pub cycle: u64,
+    pub phase: String,
+    pub rows: u64,
+    pub instructions: u64,
+    pub row_count: u64,
+    pub db_size: u64,
+    pub stable_pages: u64,
+    pub stable_bytes: u64,
+    pub sqlite_page_size: u64,
+    pub sqlite_page_count: u64,
+    pub sqlite_freelist_count: u64,
+}
+
 #[init]
 fn init() {
     must(migrate());
@@ -225,26 +240,84 @@ fn db_stats() -> Result<DbStatsReport, String> {
     let stable_bytes = stable_pages
         .checked_mul(STABLE_PAGE_SIZE)
         .ok_or_else(|| "stable byte size overflow".to_string())?;
-    let (sqlite_page_size, sqlite_page_count, sqlite_freelist_count) =
-        with_connection(|connection| -> Result<(i64, i64, i64), ic_rusqlite::Error> {
-            Ok((
-                connection.query_row("PRAGMA page_size", [], |row| row.get(0))?,
-                connection.query_row("PRAGMA page_count", [], |row| row.get(0))?,
-                connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?,
-            ))
-        })
-        .map_err(error_text)?;
+    let (sqlite_page_size, sqlite_page_count, sqlite_freelist_count) = sqlite_stats()?;
     Ok(DbStatsReport {
         db_size,
         stable_pages,
         stable_bytes,
-        sqlite_page_size: u64::try_from(sqlite_page_size)
-            .map_err(|_| "negative page_size".to_string())?,
-        sqlite_page_count: u64::try_from(sqlite_page_count)
-            .map_err(|_| "negative page_count".to_string())?,
-        sqlite_freelist_count: u64::try_from(sqlite_freelist_count)
-            .map_err(|_| "negative freelist_count".to_string())?,
+        sqlite_page_size,
+        sqlite_page_count,
+        sqlite_freelist_count,
     })
+}
+
+#[update]
+fn bench_churn_reset(base_rows: u32) -> Result<BenchChurnStepReport, String> {
+    let start = performance_counter(0);
+    with_connection(|connection| -> Result<(), ic_rusqlite::Error> {
+        reset_churn_table(&connection)?;
+        let mut statement =
+            connection.prepare("INSERT INTO churn_bench(key, value) VALUES (?1, ?2)")?;
+        for index in 0..base_rows {
+            let key = format!("c{index:08}");
+            let value = format!("value-{index:08}-stable-vfs");
+            statement.execute(params![key, value])?;
+        }
+        Ok(())
+    })
+    .map_err(error_text)?;
+    churn_report(0, "reset", base_rows, start)
+}
+
+#[update]
+fn bench_churn_delete(
+    start_index: u32,
+    rows: u32,
+    cycle: u32,
+) -> Result<BenchChurnStepReport, String> {
+    validate_churn_range(start_index, rows)?;
+    let start = performance_counter(0);
+    with_connection(|connection| -> Result<(), ic_rusqlite::Error> {
+        let mut statement = connection.prepare("DELETE FROM churn_bench WHERE key = ?1")?;
+        for offset in 0..rows {
+            let index = start_index
+                .checked_add(offset)
+                .ok_or_else(|| ic_rusqlite::Error::ExecuteReturnedResults)?;
+            let key = format!("c{index:08}");
+            let changed = statement.execute(params![key])?;
+            if changed != 1 {
+                return Err(ic_rusqlite::Error::ExecuteReturnedResults);
+            }
+        }
+        Ok(())
+    })
+    .map_err(error_text)?;
+    churn_report(cycle, "delete", rows, start)
+}
+
+#[update]
+fn bench_churn_insert(
+    start_index: u32,
+    rows: u32,
+    cycle: u32,
+) -> Result<BenchChurnStepReport, String> {
+    validate_churn_range(start_index, rows)?;
+    let start = performance_counter(0);
+    with_connection(|connection| -> Result<(), ic_rusqlite::Error> {
+        let mut statement =
+            connection.prepare("INSERT INTO churn_bench(key, value) VALUES (?1, ?2)")?;
+        for offset in 0..rows {
+            let index = start_index
+                .checked_add(offset)
+                .ok_or_else(|| ic_rusqlite::Error::ExecuteReturnedResults)?;
+            let key = format!("c{index:08}");
+            let value = format!("value-{index:08}-stable-vfs");
+            statement.execute(params![key, value])?;
+        }
+        Ok(())
+    })
+    .map_err(error_text)?;
+    churn_report(cycle, "insert", rows, start)
 }
 
 fn migrate() -> Result<(), ic_rusqlite::Error> {
@@ -255,6 +328,16 @@ fn reset_bench_table(connection: &ic_rusqlite::Connection) -> Result<(), ic_rusq
     connection.execute_batch(
         "DROP TABLE IF EXISTS bench;
          CREATE TABLE bench (
+            key TEXT PRIMARY KEY NOT NULL,
+            value TEXT NOT NULL
+         ) WITHOUT ROWID;",
+    )
+}
+
+fn reset_churn_table(connection: &ic_rusqlite::Connection) -> Result<(), ic_rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS churn_bench;
+         CREATE TABLE churn_bench (
             key TEXT PRIMARY KEY NOT NULL,
             value TEXT NOT NULL
          ) WITHOUT ROWID;",
@@ -272,6 +355,65 @@ fn seed_bench_rows(rows: u32) -> Result<(), ic_rusqlite::Error> {
             statement.execute(params![key, value])?;
         }
         Ok(())
+    })
+}
+
+fn validate_churn_range(start: u32, rows: u32) -> Result<(), String> {
+    if rows == 0 {
+        return Err("rows must be positive".to_string());
+    }
+    start
+        .checked_add(rows)
+        .map(|_| ())
+        .ok_or_else(|| "benchmark key index overflow".to_string())
+}
+
+fn sqlite_stats() -> Result<(u64, u64, u64), String> {
+    let (sqlite_page_size, sqlite_page_count, sqlite_freelist_count) =
+        with_connection(|connection| -> Result<(i64, i64, i64), ic_rusqlite::Error> {
+            Ok((
+                connection.query_row("PRAGMA page_size", [], |row| row.get(0))?,
+                connection.query_row("PRAGMA page_count", [], |row| row.get(0))?,
+                connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?,
+            ))
+        })
+        .map_err(error_text)?;
+    Ok((
+        u64::try_from(sqlite_page_size).map_err(|_| "negative page_size".to_string())?,
+        u64::try_from(sqlite_page_count).map_err(|_| "negative page_count".to_string())?,
+        u64::try_from(sqlite_freelist_count)
+            .map_err(|_| "negative freelist_count".to_string())?,
+    ))
+}
+
+fn churn_report(
+    cycle: u32,
+    phase: &str,
+    rows: u32,
+    start: u64,
+) -> Result<BenchChurnStepReport, String> {
+    let db_size = db_file_size()?;
+    let stable_pages = ic_cdk::api::stable_size();
+    let stable_bytes = stable_pages
+        .checked_mul(STABLE_PAGE_SIZE)
+        .ok_or_else(|| "stable byte size overflow".to_string())?;
+    let (sqlite_page_size, sqlite_page_count, sqlite_freelist_count) = sqlite_stats()?;
+    let row_count = with_connection(|connection| -> Result<i64, ic_rusqlite::Error> {
+        connection.query_row("SELECT COUNT(*) FROM churn_bench", [], |row| row.get(0))
+    })
+    .map_err(error_text)?;
+    Ok(BenchChurnStepReport {
+        cycle: u64::from(cycle),
+        phase: phase.to_string(),
+        rows: u64::from(rows),
+        instructions: performance_counter(0).saturating_sub(start),
+        row_count: u64::try_from(row_count).map_err(|_| "negative row count".to_string())?,
+        db_size,
+        stable_pages,
+        stable_bytes,
+        sqlite_page_size,
+        sqlite_page_count,
+        sqlite_freelist_count,
     })
 }
 

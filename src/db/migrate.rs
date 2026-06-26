@@ -14,7 +14,7 @@ pub struct Migration {
 }
 
 pub fn apply(connection: &Connection, migrations: &[Migration]) -> Result<(), DbError> {
-    validate_unique_versions(migrations)?;
+    validate_versions(migrations)?;
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS __ic_sqlite_migrations (
             version INTEGER PRIMARY KEY NOT NULL
@@ -41,12 +41,22 @@ pub fn apply(connection: &Connection, migrations: &[Migration]) -> Result<(), Db
     Ok(())
 }
 
-fn validate_unique_versions(migrations: &[Migration]) -> Result<(), DbError> {
+fn validate_versions(migrations: &[Migration]) -> Result<(), DbError> {
     let mut seen = BTreeSet::new();
+    let mut previous = None;
     for migration in migrations {
         if !seen.insert(migration.version) {
             return Err(DbError::DuplicateMigrationVersion(migration.version));
         }
+        if let Some(previous) = previous {
+            if migration.version < previous {
+                return Err(DbError::MigrationVersionOutOfOrder {
+                    previous,
+                    next: migration.version,
+                });
+            }
+        }
+        previous = Some(migration.version);
     }
     Ok(())
 }

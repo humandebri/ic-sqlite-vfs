@@ -1,7 +1,7 @@
 use ic_sqlite_vfs::db::migrate::Migration;
-use ic_sqlite_vfs::sqlite_vfs::{lock, stable_blob};
-use ic_sqlite_vfs::stable::memory;
-use ic_sqlite_vfs::stable::meta::Superblock;
+use ic_sqlite_vfs::test_support::lock;
+use ic_sqlite_vfs::test_support::memory;
+use ic_sqlite_vfs::test_support::Superblock;
 use ic_sqlite_vfs::{params, Db};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
@@ -9,7 +9,6 @@ use serial_test::serial;
 use std::collections::BTreeMap;
 
 fn reset() {
-    stable_blob::invalidate_read_cache();
     memory::reset_for_tests();
     lock::reset_for_tests();
     Db::init(memory::memory_for_tests()).unwrap();
@@ -59,6 +58,33 @@ fn duplicate_migration_version_is_rejected_before_schema_changes() {
     let exists = Db::query(|connection| {
         connection.query_scalar::<i64>(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'duplicate_first'",
+            params![],
+        )
+    })
+    .unwrap();
+    assert_eq!(exists, 0);
+}
+
+#[test]
+#[serial]
+fn out_of_order_migration_version_is_rejected_before_schema_changes() {
+    reset();
+    let result = Db::migrate(&[
+        Migration {
+            version: 2,
+            sql: "CREATE TABLE out_of_order_first(id INTEGER PRIMARY KEY);",
+        },
+        Migration {
+            version: 1,
+            sql: "CREATE TABLE out_of_order_second(id INTEGER PRIMARY KEY);",
+        },
+    ]);
+
+    assert!(result.is_err());
+    assert_eq!(Superblock::load().unwrap().schema_version, 0);
+    let exists = Db::query(|connection| {
+        connection.query_scalar::<i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'out_of_order_first'",
             params![],
         )
     })
@@ -140,7 +166,7 @@ fn deterministic_fuzz_matches_model() {
 
 #[test]
 #[serial]
-fn pbt_operation_sequences_match_model_after_compact_and_import() {
+fn pbt_operation_sequences_match_model_after_checksum_refresh() {
     let strategy = prop::collection::vec((0_u8..5, 0_i64..48, -50_000_i64..50_000), 1..96);
     let mut runner = TestRunner::new(Config {
         cases: 96,
@@ -217,18 +243,7 @@ fn pbt_operation_sequences_match_model_after_compact_and_import() {
                 prop_assert_eq!(Db::integrity_check().unwrap(), "ok");
             }
 
-            Db::compact().map_err(|error| TestCaseError::fail(error.to_string()))?;
-            prop_assert_eq!(read_pbt_rows()?, model.clone());
-
-            let db_size = Superblock::load().unwrap().db_size;
-            let checksum =
-                Db::refresh_checksum().map_err(|error| TestCaseError::fail(error.to_string()))?;
-            let image = Db::export_chunk(0, db_size)
-                .map_err(|error| TestCaseError::fail(error.to_string()))?;
-            Db::begin_import(db_size, checksum)
-                .map_err(|error| TestCaseError::fail(error.to_string()))?;
-            Db::import_chunk(0, &image).map_err(|error| TestCaseError::fail(error.to_string()))?;
-            Db::finish_import().map_err(|error| TestCaseError::fail(error.to_string()))?;
+            Db::refresh_checksum().map_err(|error| TestCaseError::fail(error.to_string()))?;
             prop_assert_eq!(read_pbt_rows()?, model.clone());
             prop_assert_eq!(Db::integrity_check().unwrap(), "ok");
             Ok(())
@@ -244,24 +259,6 @@ fn read_pbt_rows() -> Result<BTreeMap<i64, i64>, TestCaseError> {
     })
     .map_err(|error| TestCaseError::fail(error.to_string()))?;
     Ok(rows.into_iter().collect())
-}
-
-#[test]
-#[serial]
-fn capacity_and_import_bounds_are_rejected() {
-    reset();
-    Db::migrate(&[Migration {
-        version: 1,
-        sql: "CREATE TABLE cap(id INTEGER PRIMARY KEY);",
-    }])
-    .unwrap();
-
-    let db_size = Superblock::load().unwrap().db_size;
-    let checksum = Db::refresh_checksum().unwrap();
-    Db::begin_import(db_size, checksum).unwrap();
-    let result = Db::import_chunk(db_size + 1, &[1, 2, 3]);
-
-    assert!(result.is_err());
 }
 
 #[test]

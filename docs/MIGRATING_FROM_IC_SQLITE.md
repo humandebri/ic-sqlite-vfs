@@ -7,7 +7,9 @@ through synchronous `Db::update` and `Db::query` closures.
 ## Initialization
 
 Choose one stable `MemoryId` for SQLite and keep it unchanged across upgrades.
-Do not reuse that `MemoryId` for another stable structure.
+Do not reuse that `MemoryId` for another stable structure. For migrations from
+`ic-rusqlite`, this is the fresh destination slot, not direct reuse of the old
+stable-memory image.
 
 ```rust
 use ic_sqlite_vfs::{Db, DefaultMemoryImpl, MemoryId, MemoryManager};
@@ -17,7 +19,10 @@ const SQLITE_MEMORY_ID: MemoryId = MemoryId::new(120);
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
-        RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
+        RefCell::new(
+            MemoryManager::init_strict(DefaultMemoryImpl::default())
+                .expect("stable memory must either be empty or use MemoryManager layout"),
+        );
 }
 
 fn init_db() {
@@ -50,24 +55,41 @@ invalid.
 Index DBs, catalog DBs, metadata stores, and reserved ranges consume the same
 finite ID space.
 
-Use `MemoryId::new(120)` as the default slot anchor when preserving
-`ic-rusqlite` mounted DB conventions. For a migrated single DB, keep that image
-at `120`. For per-slot archives, either assign the migrated/default archive to
-`120` or reserve `120` for the index/default DB, then allocate neighboring slot
-IDs from an application-owned range. Record the choice in the slot catalog; the
-crate does not reserve the range.
+Use `MemoryId::new(120)` as the default fresh destination slot anchor when
+preserving `ic-rusqlite` mounted DB conventions. Do not call `Db::init` on the
+old `ic-rusqlite` `120` image. The current release has no supported direct
+migration/import path from `ic-rusqlite`. For per-slot archives, reserve `120`
+for the index/default DB or a future migration destination, then allocate
+neighboring slot IDs from an application-owned range. Record the choice in the
+slot catalog; the crate does not reserve the range.
 
 Per-slot archives are therefore a bounded design. If no free slot remains,
 reject archive creation. Reuse deleted slots only when the application tracks a
 generation number or tombstone state so stale archive references cannot open the
 new occupant's SQLite image.
 
-Archive and restore operate on one logical SQLite image at a time through
-export/import. A multi-slot archive should snapshot the full slot catalog,
-export each handle separately, and restore each image into the matching
-`MemoryId`. Do not pack several independent SQLite databases into one
-`VirtualMemory`, and do not depend on a forked `u16` `MemoryId` layout for this
-crate.
+Archive and restore are not provided by the current public API. A future
+bounded staging design must operate on one logical SQLite image at a time and
+preserve the slot catalog. Do not pack several independent SQLite databases
+into one `VirtualMemory`, and do not depend on a forked `u16` `MemoryId` layout
+for this crate.
+
+## `ic-rusqlite` migration boundary
+
+`ic-rusqlite` stores a raw SQLite file image. `ic-sqlite-vfs` v8 stores an
+`ICSQLITE` superblock at offset `0` and the SQLite image after `64KiB`.
+Direct stable-memory upgrade cannot reinterpret one layout as the other.
+
+Current release behavior:
+
+1. Keep the old canister running if the data must remain accessible.
+2. Do not install v8 over the old raw SQLite stable-memory image.
+3. Use a fresh selected virtual memory for new v8 deployments.
+4. Wait for bounded staging import support before attempting direct migration.
+
+If the selected memory already contains `SQLite format 3\0` or any other
+non-`ICSQLITE` bytes, `Db::init` returns
+`StableMemoryError::ForeignStableMemoryImage` and preserves the existing bytes.
 
 ## Access Pattern
 
@@ -141,8 +163,9 @@ keeps statement lifetimes inside one synchronous canister message.
   `DbError::ReadConnectionInUse`.
 - Use migrations for schema changes:
 
-`Db::migrate` records applied versions. Treat each SQL body as one versioned
-step, not as an idempotent `IF NOT EXISTS` initializer.
+`Db::migrate` records applied versions. Treat each SQL body as one strictly
+increasing versioned step, not as an idempotent `IF NOT EXISTS` initializer.
+Migration SQL must be static trusted SQL; do not build it from user input.
 
 ```rust
 use ic_sqlite_vfs::db::migrate::Migration;

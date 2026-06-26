@@ -25,10 +25,6 @@ type BenchReadProfileReport = record {
   x_read_bytes : nat64;
   stable_data_read_calls : nat64;
   stable_data_read_bytes : nat64;
-  page_table_root_hits : nat64;
-  page_table_root_misses : nat64;
-  page_table_segment_hits : nat64;
-  page_table_segment_misses : nat64;
   superblock_loads : nat64;
 };
 type BenchGetManyProfileReport = record {
@@ -49,10 +45,6 @@ type BenchGetManyProfileReport = record {
   x_read_bytes : nat64;
   stable_data_read_calls : nat64;
   stable_data_read_bytes : nat64;
-  page_table_root_hits : nat64;
-  page_table_root_misses : nat64;
-  page_table_segment_hits : nat64;
-  page_table_segment_misses : nat64;
   superblock_loads : nat64;
 };
 type BenchWriteProfileReport = record {
@@ -85,16 +77,10 @@ type BenchWriteProfileReport = record {
   stable_data_write_bytes : nat64;
   stable_grow_calls : nat64;
   stable_grow_pages : nat64;
-  page_table_root_hits : nat64;
-  page_table_root_misses : nat64;
-  page_table_segment_hits : nat64;
-  page_table_segment_misses : nat64;
   superblock_loads : nat64;
   commit_load : nat64;
-  commit_build_segments : nat64;
   commit_capacity : nat64;
   commit_page_write : nat64;
-  commit_table_write : nat64;
   commit_superblock_store : nat64;
 };
 type BenchGrowthProfileReport = record {
@@ -127,19 +113,51 @@ type BenchGrowthProfileReport = record {
   stable_data_write_bytes : nat64;
   stable_grow_calls : nat64;
   stable_grow_pages : nat64;
-  page_table_root_hits : nat64;
-  page_table_root_misses : nat64;
-  page_table_segment_hits : nat64;
-  page_table_segment_misses : nat64;
   superblock_loads : nat64;
   commit_load : nat64;
-  commit_build_segments : nat64;
   commit_capacity : nat64;
   commit_page_write : nat64;
-  commit_table_write : nat64;
   commit_superblock_store : nat64;
 };
+type BenchCapacityGrowthReport = record {
+  rows : nat64;
+  writes : nat64;
+  instructions : nat64;
+  checksum : nat64;
+  db_size : nat64;
+  stable_pages : nat64;
+  stable_bytes : nat64;
+  db_size_before : nat64;
+  db_size_after : nat64;
+  db_base_offset_before : nat64;
+  db_base_offset_after : nat64;
+  page_table_offset_before : nat64;
+  page_table_offset_after : nat64;
+  page_table_bytes_before : nat64;
+  page_table_bytes_after : nat64;
+  stable_pages_before : nat64;
+  stable_pages_after : nat64;
+  allocated_bytes_before : nat64;
+  allocated_bytes_after : nat64;
+  orphan_bytes_estimate_before : nat64;
+  orphan_bytes_estimate_after : nat64;
+  stable_grow_calls : nat64;
+  stable_grow_pages : nat64;
+};
 type DbStatsReport = record {
+  db_size : nat64;
+  stable_pages : nat64;
+  stable_bytes : nat64;
+  sqlite_page_size : nat64;
+  sqlite_page_count : nat64;
+  sqlite_freelist_count : nat64;
+};
+type BenchChurnStepReport = record {
+  cycle : nat64;
+  phase : text;
+  rows : nat64;
+  instructions : nat64;
+  row_count : nat64;
   db_size : nat64;
   stable_pages : nat64;
   stable_bytes : nat64;
@@ -167,5 +185,9 @@ service : {
   bench_join : (nat32) -> (variant { Ok : BenchReport; Err : text });
   bench_growth : (nat32, nat32) -> (variant { Ok : BenchReport; Err : text });
   bench_growth_profile : (nat32, nat32) -> (variant { Ok : BenchGrowthProfileReport; Err : text });
+  bench_capacity_growth_guard : (nat32, nat32) -> (variant { Ok : BenchCapacityGrowthReport; Err : text });
+  bench_churn_reset : (nat32) -> (variant { Ok : BenchChurnStepReport; Err : text });
+  bench_churn_delete : (nat32, nat32, nat32) -> (variant { Ok : BenchChurnStepReport; Err : text });
+  bench_churn_insert : (nat32, nat32, nat32) -> (variant { Ok : BenchChurnStepReport; Err : text });
   db_stats : () -> (variant { Ok : DbStatsReport; Err : text }) query;
 }

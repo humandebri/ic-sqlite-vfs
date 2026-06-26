@@ -1,28 +1,27 @@
-//! Logical `/main.db` access backed by segmented stable-memory page mapping.
+//! Logical `/main.db` access backed by an in-place stable-memory image.
 //!
-//! SQLite sees a contiguous file. Internally, the active superblock points to a
-//! root table. Each root entry points to a 256-page segment table.
+//! SQLite sees a contiguous file. Internally, logical page `n` lives at
+//! `db_base_offset + n * SQLITE_PAGE_SIZE`.
 
 use crate::config::{SQLITE_PAGE_SIZE, STABLE_PAGE_SIZE, SUPERBLOCK_SIZE};
 use crate::sqlite_vfs::overlay::{self, Overlay};
-use crate::stable::memory::{self, ContextId, StableMemoryError};
+#[cfg(test)]
+use crate::stable::memory::ContextId;
+use crate::stable::memory::{self, StableMemoryError};
 use crate::stable::meta::{
-    fnv1a64, Superblock, FLAG_CHECKSUM_REFRESHING, FLAG_CHECKSUM_STALE, FLAG_IMPORTING,
-    PAGE_MAP_LAYOUT_VERSION,
+    fnv1a64, Superblock, ZeroExtent, CURRENT_LAYOUT_VERSION, FLAG_CHECKSUM_REFRESHING,
+    FLAG_CHECKSUM_STALE, FLAG_IMPORTING, MAX_ZERO_EXTENTS,
 };
+#[cfg(test)]
 use std::cell::RefCell;
+#[cfg(test)]
 use std::collections::BTreeMap;
-use std::mem::MaybeUninit;
 
 const CHECKSUM_CHUNK_LEN: u64 = 16 * 1024;
-const PAGE_TABLE_ENTRY_LEN: u64 = 8;
-const SEGMENT_PAGE_COUNT: u64 = 256;
-const SEGMENT_TABLE_BYTES: u64 = SEGMENT_PAGE_COUNT * PAGE_TABLE_ENTRY_LEN;
-const SINGLE_SEGMENT_PAGE_TABLE_BYTES: u64 = SEGMENT_TABLE_BYTES + PAGE_TABLE_ENTRY_LEN;
-const READ_SEGMENT_CACHE_CAPACITY: usize = 8;
+#[cfg(test)]
+const FAR_PAGE_NO: u64 = 257;
 const FILE_PAGE_OFFSET_CACHE_CAPACITY: usize = 64;
 const FILE_PAGE_DATA_CACHE_CAPACITY: usize = 8;
-const COMPACT_MIN_ORPHAN_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChecksumRefresh {
@@ -32,11 +31,13 @@ pub struct ChecksumRefresh {
     pub db_size: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageStats {
     pub layout_version: u64,
     pub page_count: u64,
     pub page_table_bytes: u64,
+    pub zero_extent_count: u64,
     pub active_bytes: u64,
     pub allocated_bytes: u64,
     pub orphan_bytes_estimate: u64,
@@ -50,105 +51,12 @@ pub(crate) enum StableBlobFailpoint {
     OverlayTruncate,
     CommitCapacity,
     CommitChunkWrite,
-    CommitPageTableWrite,
     CommitSuperblockStore,
 }
 
 thread_local! {
     #[cfg(test)]
     static FAILPOINTS: RefCell<BTreeMap<ContextId, StableBlobFailpoint>> = const { RefCell::new(BTreeMap::new()) };
-    static READ_TABLE_CACHE: RefCell<Vec<(ContextId, ReadTableCache)>> = const { RefCell::new(Vec::new()) };
-    static COMMIT_SEGMENT_CACHE: RefCell<Vec<(ContextId, CommitSegmentCache)>> = const { RefCell::new(Vec::new()) };
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ReadCacheKey {
-    page_table_offset: u64,
-    page_count: u64,
-    db_size: u64,
-    last_tx_id: u64,
-}
-
-#[derive(Debug)]
-struct ReadTableCache {
-    key: Option<ReadCacheKey>,
-    root: Vec<u64>,
-    segments: Vec<CachedSegment>,
-}
-
-#[derive(Debug)]
-struct CachedSegment {
-    segment_no: u64,
-    table: Vec<u64>,
-}
-
-#[derive(Debug)]
-struct CommitSegmentCache {
-    segment_no: u64,
-    segment_offset: u64,
-    table: Vec<u64>,
-}
-
-impl ReadTableCache {
-    fn new() -> Self {
-        Self {
-            key: None,
-            root: Vec::new(),
-            segments: Vec::new(),
-        }
-    }
-
-    fn clear(&mut self) {
-        self.key = None;
-        self.root.clear();
-        self.segments.clear();
-    }
-
-    fn ensure_key(&mut self, key: ReadCacheKey) {
-        if self.key == Some(key) {
-            return;
-        }
-        self.clear();
-        self.key = Some(key);
-    }
-
-    #[inline(always)]
-    fn segment_page_offset(&mut self, segment_no: u64, index: usize) -> Option<u64> {
-        if self.segments.is_empty() {
-            return None;
-        }
-        if self.segments.len() == 1 {
-            let segment = &self.segments[0];
-            if segment.segment_no == segment_no {
-                return Some(segment.table[index]);
-            }
-            return None;
-        }
-        let position = self
-            .segments
-            .iter()
-            .position(|segment| segment.segment_no == segment_no)?;
-        let offset = Some(self.segments[position].table[index]);
-        if position + 1 != self.segments.len() {
-            let segment = self.segments.remove(position);
-            self.segments.push(segment);
-        }
-        offset
-    }
-
-    fn insert_segment(&mut self, segment_no: u64, table: Vec<u64>) {
-        if let Some(position) = self
-            .segments
-            .iter()
-            .position(|segment| segment.segment_no == segment_no)
-        {
-            self.segments.remove(position);
-        }
-        self.segments.push(CachedSegment { segment_no, table });
-        while self.segments.len() > READ_SEGMENT_CACHE_CAPACITY {
-            self.segments.remove(0);
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -233,9 +141,9 @@ pub(crate) fn clear_failpoint() {
     FAILPOINTS.with(|slot| slot.borrow_mut().clear());
 }
 
-pub(crate) fn ensure_page_map_layout() -> Result<(), StableMemoryError> {
+pub(crate) fn ensure_current_layout() -> Result<(), StableMemoryError> {
     let block = Superblock::load()?;
-    if block.layout_version >= PAGE_MAP_LAYOUT_VERSION {
+    if block.layout_version == CURRENT_LAYOUT_VERSION {
         return Ok(());
     }
     Err(StableMemoryError::UnsupportedLayoutVersion(
@@ -245,7 +153,7 @@ pub(crate) fn ensure_page_map_layout() -> Result<(), StableMemoryError> {
 
 pub(crate) fn begin_update() -> Result<u64, StableMemoryError> {
     let block = Superblock::load()?;
-    if block.layout_version < PAGE_MAP_LAYOUT_VERSION {
+    if block.layout_version != CURRENT_LAYOUT_VERSION {
         return Err(StableMemoryError::UnsupportedLayoutVersion(
             block.layout_version,
         ));
@@ -259,12 +167,6 @@ pub(crate) fn begin_update() -> Result<u64, StableMemoryError> {
 
 pub(crate) fn rollback_update() {
     overlay::rollback();
-}
-
-#[doc(hidden)]
-pub fn invalidate_read_cache() {
-    READ_TABLE_CACHE.with(|cache| cache.borrow_mut().clear());
-    COMMIT_SEGMENT_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
 pub(crate) fn commit_update() -> Result<(), StableMemoryError> {
@@ -345,15 +247,13 @@ pub(crate) fn read_base_at_with_page_cache(
 pub(crate) fn read_base_page(page_no: u64) -> Result<Vec<u8>, StableMemoryError> {
     let block = Superblock::load()?;
     let mut page = zero_page();
-    if page_no >= active_page_count(&block)? {
-        return Ok(page);
-    }
-    let physical = page_offset_for(&block, page_no)?;
-    if physical != 0 {
-        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-        crate::read_metrics::record_stable_data_read(page.len());
-        memory::read_preallocated(physical, &mut page)?;
-    }
+    read_base_at_with_block(
+        &block,
+        page_no
+            .checked_mul(page_size())
+            .ok_or(StableMemoryError::OffsetOverflow)?,
+        &mut page,
+    )?;
     Ok(page)
 }
 
@@ -365,7 +265,7 @@ pub(crate) fn write_at(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryErro
     if bytes.is_empty() {
         return Ok(());
     }
-    ensure_page_map_layout()?;
+    ensure_current_layout()?;
     let mut direct = Overlay::new(Superblock::load()?.db_size);
     direct.write_at(offset, bytes)?;
     commit_overlay(direct, false)
@@ -376,7 +276,7 @@ pub(crate) fn truncate(size: u64) -> Result<(), StableMemoryError> {
         hit_failpoint(StableBlobFailpoint::OverlayTruncate)?;
         return result;
     }
-    ensure_page_map_layout()?;
+    ensure_current_layout()?;
     let mut direct = Overlay::new(Superblock::load()?.db_size);
     direct.truncate(size)?;
     if direct.is_empty() {
@@ -392,6 +292,7 @@ pub(crate) fn file_size() -> Result<u64, StableMemoryError> {
     Ok(Superblock::load()?.db_size)
 }
 
+#[allow(dead_code)]
 pub fn export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, StableMemoryError> {
     reject_during_update()?;
     let block = Superblock::load()?;
@@ -405,6 +306,7 @@ pub fn export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, StableMemoryError>
     Ok(out)
 }
 
+#[allow(dead_code)]
 pub fn import_chunk(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -429,10 +331,10 @@ pub fn import_chunk(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> 
     memory::write(import_offset(&block, offset)?, bytes)?;
     block.import_written_until = end;
     block.store()?;
-    invalidate_read_cache();
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn begin_import(total_size: u64, expected_checksum: u64) -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -448,10 +350,10 @@ pub fn begin_import(total_size: u64, expected_checksum: u64) -> Result<(), Stabl
     block.import_total_size = total_size;
     block.import_base_offset = import_base_offset;
     block.store()?;
-    invalidate_read_cache();
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn finish_import() -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -473,15 +375,15 @@ pub fn finish_import() -> Result<(), StableMemoryError> {
             actual: checksum,
         });
     }
-    let entries = imported_page_table(&block)?;
-    let (root_offset, root_len) = write_segmented_tables(&entries)?;
     block.db_size = block.import_total_size;
     block.db_base_offset = block.import_base_offset;
-    block.page_table_offset = root_offset;
-    block.page_count = root_len;
-    block.layout_version = PAGE_MAP_LAYOUT_VERSION;
+    block.page_table_offset = 0;
+    block.page_count = page_count_for_size(block.db_size)?;
+    block.layout_version = CURRENT_LAYOUT_VERSION;
+    block.schema_version = 0;
     block.flags &= !FLAG_IMPORTING;
     block.flags &= !FLAG_CHECKSUM_STALE;
+    block.clear_zero_extents();
     block.clear_checksum_refresh();
     block.checksum = checksum;
     block.import_expected_checksum = 0;
@@ -489,10 +391,10 @@ pub fn finish_import() -> Result<(), StableMemoryError> {
     block.import_total_size = 0;
     block.import_base_offset = 0;
     block.store()?;
-    invalidate_read_cache();
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn cancel_import() -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -510,7 +412,6 @@ pub fn refresh_checksum() -> Result<u64, StableMemoryError> {
     block.flags &= !FLAG_CHECKSUM_STALE;
     block.clear_checksum_refresh();
     block.store()?;
-    invalidate_read_cache();
     Ok(checksum)
 }
 
@@ -533,7 +434,6 @@ pub fn refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, StableM
     if block.checksum_refresh_tx_id != block.last_tx_id {
         block.clear_checksum_refresh();
         block.store()?;
-        invalidate_read_cache();
         return refresh_checksum_chunk(max_bytes);
     }
 
@@ -564,7 +464,6 @@ pub fn refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, StableM
         db_size: block.db_size,
     };
     block.store()?;
-    invalidate_read_cache();
     Ok(out)
 }
 
@@ -574,52 +473,22 @@ pub fn checksum() -> Result<u64, StableMemoryError> {
     checksum_logical_range(&block, block.db_size)
 }
 
+#[allow(dead_code)]
 pub fn compact() -> Result<(), StableMemoryError> {
     reject_during_update()?;
-    ensure_page_map_layout()?;
-    let block = Superblock::load()?;
-    let table = read_page_table(&block)?;
-    let mut compacted = Vec::with_capacity(table.len());
-    let mut cursor = append_base()?;
-    let non_zero_pages = table.iter().filter(|offset| **offset != 0).count();
-    let data_bytes = u64::try_from(non_zero_pages)
-        .map_err(|_| StableMemoryError::OffsetOverflow)?
-        .checked_mul(page_size())
-        .ok_or(StableMemoryError::OffsetOverflow)?;
-    memory::ensure_capacity(checked_add(cursor, data_bytes)?)?;
-
-    for offset in table {
-        if offset == 0 {
-            compacted.push(0);
-            continue;
-        }
-        let mut page = zero_page();
-        memory::read_preallocated(offset, &mut page)?;
-        memory::write_preallocated(cursor, &page)?;
-        compacted.push(cursor);
-        cursor = checked_add(cursor, page_size())?;
-    }
-
-    let (root_offset, root_len) = write_segmented_tables(&compacted)?;
-    Superblock::store_page_map_without_tx(root_offset, root_len, block.db_size)?;
-    invalidate_read_cache();
+    ensure_current_layout()?;
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn storage_stats() -> Result<StorageStats, StableMemoryError> {
     let block = Superblock::load()?;
-    let table = read_page_table(&block)?;
-    let non_zero_pages = u64::try_from(table.iter().filter(|offset| **offset != 0).count())
-        .map_err(|_| StableMemoryError::OffsetOverflow)?;
-    let segment_count = active_segment_count(&block)?;
-    let root_bytes = root_table_bytes(segment_count)?;
-    let segment_bytes = segment_count
-        .checked_mul(segment_table_bytes()?)
-        .ok_or(StableMemoryError::OffsetOverflow)?;
-    let page_table_bytes = checked_add(root_bytes, segment_bytes)?;
+    ensure_current_layout()?;
+    let page_table_bytes = 0;
+    let zero_extent_count =
+        u64::try_from(block.zero_extent_count()).map_err(|_| StableMemoryError::OffsetOverflow)?;
     let active_bytes = SUPERBLOCK_SIZE
-        .checked_add(non_zero_pages.saturating_mul(page_size()))
-        .and_then(|value| value.checked_add(page_table_bytes))
+        .checked_add(block.db_size)
         .ok_or(StableMemoryError::OffsetOverflow)?;
     let allocated_bytes = memory::size_pages()
         .checked_mul(STABLE_PAGE_SIZE)
@@ -633,12 +502,12 @@ pub fn storage_stats() -> Result<StorageStats, StableMemoryError> {
         layout_version: block.layout_version,
         page_count: active_page_count(&block)?,
         page_table_bytes,
+        zero_extent_count,
         active_bytes,
         allocated_bytes,
         orphan_bytes_estimate,
         orphan_ratio_basis_points,
-        compact_recommended: orphan_bytes_estimate >= active_bytes
-            && orphan_bytes_estimate >= COMPACT_MIN_ORPHAN_BYTES,
+        compact_recommended: false,
     })
 }
 
@@ -646,246 +515,69 @@ pub(crate) fn page_count_for_size(size: u64) -> Result<u64, StableMemoryError> {
     Ok(size.div_ceil(page_size()))
 }
 
-#[cfg(test)]
-pub(crate) fn debug_root_table_for_tests() -> Result<Vec<u64>, StableMemoryError> {
-    let block = Superblock::load()?;
-    read_root_table(&block)
-}
-
 fn commit_overlay(overlay: Overlay, advance_tx: bool) -> Result<(), StableMemoryError> {
     hit_failpoint(StableBlobFailpoint::CommitCapacity)?;
     let profile_enabled = commit_profile_enabled();
+    let profile_start = commit_profile_start(profile_enabled);
     let block = Superblock::load()?;
+    commit_profile_record_load(profile_start);
+    commit_overlay_in_place(&block, overlay, advance_tx, profile_enabled)
+}
+
+fn commit_overlay_in_place(
+    block: &Superblock,
+    overlay: Overlay,
+    advance_tx: bool,
+    profile_enabled: bool,
+) -> Result<(), StableMemoryError> {
     let overlay_size = overlay.size();
     let final_page_count = page_count_for_size(overlay_size)?;
-    let data_cursor = append_base()?;
     debug_assert!(overlay
         .dirty_pages()
         .iter()
         .all(|(page_no, _)| *page_no < final_page_count));
     let dirty_pages = overlay.dirty_pages();
-    if let [(page_no, page)] = dirty_pages {
-        if overlay_size >= block.db_size
-            && *page_no < final_page_count
-            && final_page_count <= SEGMENT_PAGE_COUNT
-        {
-            let build_profile_start = commit_profile_start(profile_enabled);
-            let options = SinglePageCommitOptions {
-                advance_tx,
-                overlay_size,
-                data_cursor,
-                profile_enabled,
-                build_profile_start,
-            };
-            return commit_single_segment_page_overlay(&block, *page_no, page, options);
-        }
-    }
+    let zero_extents = zero_extents_after_commit(block, &overlay, final_page_count)?;
 
-    let final_segment_count = segment_count_for_pages(final_page_count)?;
-    let profile_start = commit_profile_start(profile_enabled);
-    let mut root = read_commit_root_table(&block)?;
-    commit_profile_record_load(profile_start);
-
-    let build_profile_start = commit_profile_start(profile_enabled);
-    let root_len =
-        usize::try_from(final_segment_count).map_err(|_| StableMemoryError::OffsetOverflow)?;
-    if root.len() != root_len {
-        root.resize(root_len, 0);
-    }
-
-    if let [(page_no, page)] = dirty_pages {
-        if overlay_size >= block.db_size && *page_no < final_page_count {
-            let options = SinglePageCommitOptions {
-                advance_tx,
-                overlay_size,
-                data_cursor,
-                profile_enabled,
-                build_profile_start,
-            };
-            return commit_single_page_overlay(
-                &block,
-                final_segment_count,
-                root,
-                *page_no,
-                page,
-                options,
-            );
-        }
-    }
-
-    let mut segment_updates = BTreeMap::<u64, Vec<u64>>::new();
-    let mut page_cursor = data_cursor;
-
+    let mut required_end = checked_add(block.db_base_offset, overlay_size)?;
     for (page_no, _) in dirty_pages {
         if *page_no >= final_page_count {
             continue;
         }
-        let segment_no = segment_no(*page_no);
-        let index = segment_index(*page_no)?;
-        let table = load_segment_for_update(&block, &root, &mut segment_updates, segment_no)?;
-        table[index] = page_cursor;
-        page_cursor = checked_add(page_cursor, page_size())?;
+        required_end = required_end.max(checked_add(
+            page_physical_offset(block, *page_no)?,
+            page_size(),
+        )?);
     }
-
-    if overlay_size < block.db_size {
-        clear_truncated_tail(&block, &root, &mut segment_updates, final_page_count)?;
-    }
-    commit_profile_record_build_segments(build_profile_start);
-
-    let mut table_cursor = page_cursor;
-    let root_entries_len = final_segment_count;
-    let segment_table_writes = segment_updates.len();
-    let segment_table_bytes = u64::try_from(segment_table_writes)
-        .map_err(|_| StableMemoryError::OffsetOverflow)?
-        .checked_mul(segment_table_bytes()?)
-        .ok_or(StableMemoryError::OffsetOverflow)?;
-    let page_table_bytes = checked_add(segment_table_bytes, root_table_bytes(root_entries_len)?)?;
     let profile_start = commit_profile_start(profile_enabled);
-    memory::ensure_capacity(checked_add(table_cursor, page_table_bytes)?)?;
+    memory::ensure_capacity(required_end)?;
     commit_profile_record_capacity(profile_start);
 
     let profile_start = commit_profile_start(profile_enabled);
-    let mut cursor = data_cursor;
-    for (_, page) in dirty_pages {
+    for (page_no, page) in dirty_pages {
+        if *page_no >= final_page_count {
+            continue;
+        }
         hit_failpoint(StableBlobFailpoint::CommitChunkWrite)?;
-        write_commit_page(cursor, page, profile_enabled)?;
-        cursor = checked_add(cursor, page_size())?;
+        write_commit_page(
+            page_physical_offset(block, *page_no)?,
+            page,
+            profile_enabled,
+        )?;
     }
     commit_profile_record_page_write(profile_start);
 
-    hit_failpoint(StableBlobFailpoint::CommitPageTableWrite)?;
+    if let Err(error) = hit_failpoint(StableBlobFailpoint::CommitSuperblockStore) {
+        panic!("failed to publish in-place commit after page writes: {error}");
+    }
     let profile_start = commit_profile_start(profile_enabled);
-    for (segment_no, table) in segment_updates {
-        let offset = write_commit_segment_table_at(&table, &mut table_cursor, profile_enabled)?;
-        let index = usize::try_from(segment_no).map_err(|_| StableMemoryError::OffsetOverflow)?;
-        root[index] = offset;
-    }
-    let root_offset = write_commit_root_table_at(&root, &mut table_cursor, profile_enabled)?;
-    commit_profile_record_table_write(profile_start);
-
-    hit_failpoint(StableBlobFailpoint::CommitSuperblockStore)?;
-    let profile_start = commit_profile_start(profile_enabled);
-    let result = store_commit_page_map(
-        advance_tx,
-        root_offset,
-        root_entries_len,
-        overlay_size,
-        profile_enabled,
-    );
+    let result =
+        store_commit_db_image(advance_tx, block.db_base_offset, overlay_size, zero_extents);
     commit_profile_record_superblock_store(profile_start);
-    result
-}
-
-#[derive(Clone, Copy)]
-struct SinglePageCommitOptions {
-    advance_tx: bool,
-    overlay_size: u64,
-    data_cursor: u64,
-    profile_enabled: bool,
-    build_profile_start: Option<u64>,
-}
-
-fn commit_single_page_overlay(
-    block: &Superblock,
-    final_segment_count: u64,
-    mut root: Vec<u64>,
-    page_no: u64,
-    page: &[u8],
-    options: SinglePageCommitOptions,
-) -> Result<(), StableMemoryError> {
-    let segment_no = segment_no(page_no);
-    let index = segment_index(page_no)?;
-    let mut table = read_commit_segment_table(block, &root, segment_no)?;
-    table[index] = options.data_cursor;
-    let page_cursor = checked_add(options.data_cursor, page_size())?;
-    commit_profile_record_build_segments(options.build_profile_start);
-
-    let root_entries_len = final_segment_count;
-    let page_table_bytes =
-        checked_add(segment_table_bytes()?, root_table_bytes(root_entries_len)?)?;
-    let profile_start = commit_profile_start(options.profile_enabled);
-    memory::ensure_capacity(checked_add(page_cursor, page_table_bytes)?)?;
-    commit_profile_record_capacity(profile_start);
-
-    hit_failpoint(StableBlobFailpoint::CommitChunkWrite)?;
-    let profile_start = commit_profile_start(options.profile_enabled);
-    write_commit_page(options.data_cursor, page, options.profile_enabled)?;
-    commit_profile_record_page_write(profile_start);
-
-    hit_failpoint(StableBlobFailpoint::CommitPageTableWrite)?;
-    let profile_start = commit_profile_start(options.profile_enabled);
-    let mut table_cursor = page_cursor;
-    let offset = write_commit_segment_table_at(&table, &mut table_cursor, options.profile_enabled)?;
-    let root_offset = if final_segment_count == 1 {
-        write_commit_root_table_at(&[offset], &mut table_cursor, options.profile_enabled)?
-    } else {
-        let root_index =
-            usize::try_from(segment_no).map_err(|_| StableMemoryError::OffsetOverflow)?;
-        root[root_index] = offset;
-        write_commit_root_table_at(&root, &mut table_cursor, options.profile_enabled)?
-    };
-    commit_profile_record_table_write(profile_start);
-
-    hit_failpoint(StableBlobFailpoint::CommitSuperblockStore)?;
-    let profile_start = commit_profile_start(options.profile_enabled);
-    let result = store_commit_page_map(
-        options.advance_tx,
-        root_offset,
-        root_entries_len,
-        options.overlay_size,
-        options.profile_enabled,
-    );
-    commit_profile_record_superblock_store(profile_start);
-    if result.is_ok() {
-        cache_commit_segment_table(segment_no, offset, table);
+    if let Err(error) = result {
+        panic!("failed to publish in-place commit after page writes: {error}");
     }
-    result
-}
-
-fn commit_single_segment_page_overlay(
-    block: &Superblock,
-    page_no: u64,
-    page: &[u8],
-    options: SinglePageCommitOptions,
-) -> Result<(), StableMemoryError> {
-    let index = segment_index(page_no)?;
-    let root = read_commit_root_table(block)?;
-    let mut table = read_commit_segment_table(block, &root, 0)?;
-    table[index] = options.data_cursor;
-    let page_cursor = checked_add(options.data_cursor, page_size())?;
-    commit_profile_record_build_segments(options.build_profile_start);
-
-    let profile_start = commit_profile_start(options.profile_enabled);
-    memory::ensure_capacity(checked_add(page_cursor, SINGLE_SEGMENT_PAGE_TABLE_BYTES)?)?;
-    commit_profile_record_capacity(profile_start);
-
-    hit_failpoint(StableBlobFailpoint::CommitChunkWrite)?;
-    let profile_start = commit_profile_start(options.profile_enabled);
-    memory::write_prechecked(options.data_cursor, page)?;
-    commit_profile_record_page_write(profile_start);
-
-    hit_failpoint(StableBlobFailpoint::CommitPageTableWrite)?;
-    let profile_start = commit_profile_start(options.profile_enabled);
-    let mut table_cursor = page_cursor;
-    let offset = write_commit_segment_table_at(&table, &mut table_cursor, options.profile_enabled)?;
-    let root_offset =
-        write_commit_root_table_at(&[offset], &mut table_cursor, options.profile_enabled)?;
-    commit_profile_record_table_write(profile_start);
-
-    hit_failpoint(StableBlobFailpoint::CommitSuperblockStore)?;
-    let profile_start = commit_profile_start(options.profile_enabled);
-    let result = store_commit_page_map(
-        options.advance_tx,
-        root_offset,
-        1,
-        options.overlay_size,
-        options.profile_enabled,
-    );
-    commit_profile_record_superblock_store(profile_start);
-    if result.is_ok() {
-        cache_commit_segment_table(0, offset, table);
-    }
-    result
+    Ok(())
 }
 
 #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
@@ -934,14 +626,9 @@ macro_rules! commit_profile_recorder {
     };
 }
 
-commit_profile_recorder!(commit_profile_record_load, record_commit_load);
-commit_profile_recorder!(
-    commit_profile_record_build_segments,
-    record_commit_build_segments
-);
 commit_profile_recorder!(commit_profile_record_capacity, record_commit_capacity);
+commit_profile_recorder!(commit_profile_record_load, record_commit_load);
 commit_profile_recorder!(commit_profile_record_page_write, record_commit_page_write);
-commit_profile_recorder!(commit_profile_record_table_write, record_commit_table_write);
 commit_profile_recorder!(
     commit_profile_record_superblock_store,
     record_commit_superblock_store
@@ -960,64 +647,191 @@ fn write_commit_page(
     }
 }
 
-fn store_commit_page_map(
+fn store_commit_db_image(
     advance_tx: bool,
-    root_offset: u64,
-    root_entries_len: u64,
+    db_base_offset: u64,
     overlay_size: u64,
-    profile_enabled: bool,
+    zero_extents: Vec<ZeroExtent>,
 ) -> Result<(), StableMemoryError> {
-    match (advance_tx, profile_enabled) {
-        (true, true) => Superblock::commit_page_map(root_offset, root_entries_len, overlay_size),
-        (true, false) => {
-            Superblock::commit_page_map_unmetered(root_offset, root_entries_len, overlay_size)
-        }
-        (false, true) => {
-            Superblock::store_page_map_without_tx(root_offset, root_entries_len, overlay_size)
-        }
-        (false, false) => Superblock::store_page_map_without_tx_unmetered(
-            root_offset,
-            root_entries_len,
-            overlay_size,
-        ),
+    match advance_tx {
+        true => Superblock::commit_db_image(db_base_offset, overlay_size, zero_extents),
+        false => Superblock::store_db_image_without_tx(db_base_offset, overlay_size, zero_extents),
     }
 }
 
-fn load_segment_for_update<'a>(
+fn zero_extents_after_commit(
     block: &Superblock,
-    root: &[u64],
-    updates: &'a mut BTreeMap<u64, Vec<u64>>,
-    segment_no: u64,
-) -> Result<&'a mut Vec<u64>, StableMemoryError> {
-    match updates.entry(segment_no) {
-        std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            let table = read_segment_table(block, root, segment_no)?;
-            Ok(entry.insert(table))
-        }
-    }
-}
-
-fn clear_truncated_tail(
-    block: &Superblock,
-    root: &[u64],
-    updates: &mut BTreeMap<u64, Vec<u64>>,
+    overlay: &Overlay,
     final_page_count: u64,
+) -> Result<Vec<ZeroExtent>, StableMemoryError> {
+    let mut extents = block.zero_extents().to_vec();
+    let old_page_count = page_count_for_size(block.db_size)?;
+    let dirty_page_slack = overlay
+        .dirty_pages()
+        .iter()
+        .filter(|(page_no, _)| *page_no < final_page_count)
+        .count();
+    let temporary_limit = MAX_ZERO_EXTENTS.checked_add(dirty_page_slack).ok_or(
+        StableMemoryError::ZeroExtentLimitExceeded {
+            limit: MAX_ZERO_EXTENTS,
+        },
+    )?;
+    // A commit can temporarily exceed MAX_ZERO_EXTENTS while combining growth,
+    // truncate masks, and dirty-page materialization. Bound that temporary
+    // slack to pages that can actually remove zero-mask metadata later.
+    if overlay.size() > block.db_size {
+        let first_new_page = page_count_for_size(block.db_size)?;
+        add_zero_extent_without_limit(&mut extents, first_new_page, final_page_count);
+        enforce_temporary_zero_extent_limit(&extents, temporary_limit)?;
+    }
+    if overlay.size() < block.db_size {
+        let first_zero_page = page_count_for_size(overlay.size())?;
+        add_zero_extent_without_limit(&mut extents, first_zero_page, old_page_count);
+        enforce_temporary_zero_extent_limit(&extents, temporary_limit)?;
+    }
+    for extent in overlay.zero_extents() {
+        add_zero_extent_without_limit(&mut extents, extent.start_page, extent.end_page);
+        enforce_temporary_zero_extent_limit(&extents, temporary_limit)?;
+    }
+    for (page_no, _) in overlay.dirty_pages() {
+        if *page_no < final_page_count {
+            subtract_zero_extent_without_limit(&mut extents, *page_no, page_no.saturating_add(1));
+        }
+    }
+    enforce_zero_extent_limit(&extents)?;
+    Ok(extents)
+}
+
+fn enforce_temporary_zero_extent_limit(
+    extents: &[ZeroExtent],
+    temporary_limit: usize,
 ) -> Result<(), StableMemoryError> {
-    let old_page_count = active_page_count(block)?;
-    if final_page_count >= old_page_count || final_page_count == 0 {
+    if extents.len() > temporary_limit {
+        return Err(StableMemoryError::ZeroExtentLimitExceeded {
+            limit: MAX_ZERO_EXTENTS,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn add_zero_extent(
+    extents: &mut Vec<ZeroExtent>,
+    start_page: u64,
+    end_page: u64,
+) -> Result<(), StableMemoryError> {
+    if start_page >= end_page {
         return Ok(());
     }
-    let boundary_segment = segment_no(final_page_count);
-    if boundary_segment >= segment_count_for_pages(final_page_count)? {
+    extents.push(ZeroExtent {
+        start_page,
+        end_page,
+    });
+    normalize_zero_extents(extents)
+}
+
+fn add_zero_extent_without_limit(extents: &mut Vec<ZeroExtent>, start_page: u64, end_page: u64) {
+    if start_page >= end_page {
+        return;
+    }
+    extents.push(ZeroExtent {
+        start_page,
+        end_page,
+    });
+    normalize_zero_extents_without_limit(extents);
+}
+
+#[cfg(test)]
+fn subtract_zero_extent(
+    extents: &mut Vec<ZeroExtent>,
+    start_page: u64,
+    end_page: u64,
+) -> Result<(), StableMemoryError> {
+    if start_page >= end_page || extents.is_empty() {
         return Ok(());
     }
-    let start = segment_index(final_page_count)?;
-    if start == 0 {
-        return Ok(());
+    let mut next = Vec::with_capacity(extents.len() + 1);
+    for extent in extents.iter() {
+        if end_page <= extent.start_page || start_page >= extent.end_page {
+            next.push(extent.clone());
+            continue;
+        }
+        if extent.start_page < start_page {
+            next.push(ZeroExtent {
+                start_page: extent.start_page,
+                end_page: start_page,
+            });
+        }
+        if end_page < extent.end_page {
+            next.push(ZeroExtent {
+                start_page: end_page,
+                end_page: extent.end_page,
+            });
+        }
     }
-    let table = load_segment_for_update(block, root, updates, boundary_segment)?;
-    table[start..].fill(0);
+    *extents = next;
+    normalize_zero_extents(extents)
+}
+
+fn subtract_zero_extent_without_limit(
+    extents: &mut Vec<ZeroExtent>,
+    start_page: u64,
+    end_page: u64,
+) {
+    if start_page >= end_page || extents.is_empty() {
+        return;
+    }
+    let mut next = Vec::with_capacity(extents.len() + 1);
+    for extent in extents.iter() {
+        if end_page <= extent.start_page || start_page >= extent.end_page {
+            next.push(extent.clone());
+            continue;
+        }
+        if extent.start_page < start_page {
+            next.push(ZeroExtent {
+                start_page: extent.start_page,
+                end_page: start_page,
+            });
+        }
+        if end_page < extent.end_page {
+            next.push(ZeroExtent {
+                start_page: end_page,
+                end_page: extent.end_page,
+            });
+        }
+    }
+    *extents = next;
+    normalize_zero_extents_without_limit(extents);
+}
+
+#[cfg(test)]
+fn normalize_zero_extents(extents: &mut Vec<ZeroExtent>) -> Result<(), StableMemoryError> {
+    normalize_zero_extents_without_limit(extents);
+    enforce_zero_extent_limit(extents)
+}
+
+fn normalize_zero_extents_without_limit(extents: &mut Vec<ZeroExtent>) {
+    extents.retain(|extent| extent.start_page < extent.end_page);
+    extents.sort_by_key(|extent| extent.start_page);
+    let mut normalized: Vec<ZeroExtent> = Vec::with_capacity(extents.len());
+    for extent in extents.drain(..) {
+        if let Some(last) = normalized.last_mut() {
+            if extent.start_page <= last.end_page {
+                last.end_page = last.end_page.max(extent.end_page);
+                continue;
+            }
+        }
+        normalized.push(extent);
+    }
+    *extents = normalized;
+}
+
+fn enforce_zero_extent_limit(extents: &[ZeroExtent]) -> Result<(), StableMemoryError> {
+    if extents.len() > MAX_ZERO_EXTENTS {
+        return Err(StableMemoryError::ZeroExtentLimitExceeded {
+            limit: MAX_ZERO_EXTENTS,
+        });
+    }
     Ok(())
 }
 
@@ -1110,6 +924,10 @@ fn read_logical_page_slice(
     in_page: usize,
     dst: &mut [u8],
 ) -> Result<(), StableMemoryError> {
+    if page_is_zero_masked(block, page_no) {
+        dst.fill(0);
+        return Ok(());
+    }
     let physical = page_offset_for(block, page_no)?;
     if physical == 0 {
         dst.fill(0);
@@ -1132,17 +950,17 @@ fn read_logical_page_slice_with_page_cache(
     dst: &mut [u8],
     page_offsets: &mut PageOffsetCache,
 ) -> Result<(), StableMemoryError> {
+    if page_is_zero_masked(block, page_no) {
+        dst.fill(0);
+        return Ok(());
+    }
     if dst.len() < page_len() && page_offsets.copy_page_slice(page_no, in_page, dst) {
         return Ok(());
     }
     let physical = match page_offsets.get(page_no) {
         Some(physical) => physical,
         None => {
-            let physical = if block.page_table_offset == 0 {
-                0
-            } else {
-                cached_page_offset_for(block, page_no)?
-            };
+            let physical = page_offset_for(block, page_no)?;
             page_offsets.insert(page_no, physical);
             physical
         }
@@ -1176,446 +994,26 @@ fn read_logical_page_slice_with_page_cache(
 }
 
 fn page_offset_for(block: &Superblock, page_no: u64) -> Result<u64, StableMemoryError> {
-    if page_no >= active_page_count(block)? || block.page_table_offset == 0 {
+    if page_no >= active_page_count(block)? {
         return Ok(0);
     }
-    cached_page_offset_for(block, page_no)
+    page_physical_offset(block, page_no)
 }
 
-fn read_page_table(block: &Superblock) -> Result<Vec<u64>, StableMemoryError> {
-    let root = read_root_table(block)?;
-    let count = active_page_count(block)?;
-    let capacity = usize::try_from(count).map_err(|_| StableMemoryError::OffsetOverflow)?;
-    let mut entries = Vec::with_capacity(capacity);
-    for segment_no in 0..segment_count_for_pages(count)? {
-        let table = read_segment_table(block, &root, segment_no)?;
-        for entry in table {
-            if entries.len() == capacity {
-                break;
-            }
-            entries.push(entry);
-        }
-    }
-    Ok(entries)
-}
-
-fn cached_page_offset_for(block: &Superblock, page_no: u64) -> Result<u64, StableMemoryError> {
-    let context = memory::active_context_id()?;
-    let key = read_cache_key(block);
-    let segment_no = segment_no(page_no);
-    let index = segment_index(page_no)?;
-    READ_TABLE_CACHE.with(|cache| {
-        let mut caches = cache.borrow_mut();
-        let cache = match read_table_cache_index(&caches, context) {
-            Some(index) => &mut caches[index].1,
-            None => {
-                caches.push((context, ReadTableCache::new()));
-                &mut caches
-                    .last_mut()
-                    .ok_or(StableMemoryError::OffsetOverflow)?
-                    .1
-            }
-        };
-        cache.ensure_key(key);
-        if cache.root.is_empty() {
-            #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-            crate::read_metrics::record_page_table_root_miss();
-            cache.root = read_root_table(block)?;
-        } else {
-            #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-            crate::read_metrics::record_page_table_root_hit();
-        }
-        let root_index =
-            usize::try_from(segment_no).map_err(|_| StableMemoryError::OffsetOverflow)?;
-        let segment_offset = cache.root[root_index];
-        if segment_offset == 0 {
-            return Ok(0);
-        }
-        if let Some(offset) = cache.segment_page_offset(segment_no, index) {
-            #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-            crate::read_metrics::record_page_table_segment_hit();
-            return Ok(offset);
-        }
-        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-        crate::read_metrics::record_page_table_segment_miss();
-        let table = read_segment_table_at(segment_offset)?;
-        let offset = table[index];
-        cache.insert_segment(segment_no, table);
-        Ok(offset)
-    })
-}
-
-fn read_table_cache_index(
-    caches: &[(ContextId, ReadTableCache)],
-    context: ContextId,
-) -> Option<usize> {
-    caches
+fn page_is_zero_masked(block: &Superblock, page_no: u64) -> bool {
+    block
+        .zero_extents()
         .iter()
-        .position(|(stored_context, _)| *stored_context == context)
+        .any(|extent| page_no >= extent.start_page && page_no < extent.end_page)
 }
 
-fn read_root_table(block: &Superblock) -> Result<Vec<u64>, StableMemoryError> {
-    if block.page_count == 0 {
-        return Ok(Vec::new());
-    }
-    let entries_len =
-        usize::try_from(block.page_count).map_err(|_| StableMemoryError::OffsetOverflow)?;
-    read_u64_table_at(block.page_table_offset, entries_len)
-}
-
-fn read_commit_root_table(block: &Superblock) -> Result<Vec<u64>, StableMemoryError> {
-    read_root_table(block)
-}
-
-fn read_segment_table(
-    _block: &Superblock,
-    root: &[u64],
-    segment_no: u64,
-) -> Result<Vec<u64>, StableMemoryError> {
-    let index = usize::try_from(segment_no).map_err(|_| StableMemoryError::OffsetOverflow)?;
-    let Some(offset) = root.get(index).copied() else {
-        return Ok(vec![0_u64; segment_page_count_usize()]);
-    };
-    if offset == 0 {
-        return Ok(vec![0_u64; segment_page_count_usize()]);
-    }
-    read_segment_table_at(offset)
-}
-
-fn read_commit_segment_table(
-    _block: &Superblock,
-    root: &[u64],
-    segment_no: u64,
-) -> Result<Vec<u64>, StableMemoryError> {
-    let index = usize::try_from(segment_no).map_err(|_| StableMemoryError::OffsetOverflow)?;
-    let Some(offset) = root.get(index).copied() else {
-        return Ok(vec![0_u64; segment_page_count_usize()]);
-    };
-    if offset == 0 {
-        return Ok(vec![0_u64; segment_page_count_usize()]);
-    }
-    read_commit_segment_table_at(segment_no, offset)
-}
-
-fn read_commit_segment_table_at(
-    segment_no: u64,
-    offset: u64,
-) -> Result<Vec<u64>, StableMemoryError> {
-    if offset == 0 {
-        return Ok(vec![0_u64; segment_page_count_usize()]);
-    }
-    if let Some(table) = take_commit_segment_table(segment_no, offset) {
-        return Ok(table);
-    }
-    read_segment_table_at(offset)
-}
-
-fn take_commit_segment_table(segment_no: u64, segment_offset: u64) -> Option<Vec<u64>> {
-    let Ok(context) = memory::active_context_id() else {
-        return None;
-    };
-    COMMIT_SEGMENT_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.len() == 1 {
-            let (stored_context, cached) = &cache[0];
-            if *stored_context == context
-                && cached.segment_no == segment_no
-                && cached.segment_offset == segment_offset
-            {
-                return cache.pop().map(|(_, cached)| cached.table);
-            }
-            return None;
-        }
-        cache
-            .iter()
-            .position(|(stored_context, cached)| {
-                *stored_context == context
-                    && cached.segment_no == segment_no
-                    && cached.segment_offset == segment_offset
-            })
-            .map(|position| cache.remove(position).1.table)
-    })
-}
-
-fn cache_commit_segment_table(segment_no: u64, segment_offset: u64, table: Vec<u64>) {
-    let Ok(context) = memory::active_context_id() else {
-        return;
-    };
-    COMMIT_SEGMENT_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.is_empty() {
-            cache.push((
-                context,
-                CommitSegmentCache {
-                    segment_no,
-                    segment_offset,
-                    table,
-                },
-            ));
-            return;
-        }
-        if cache.len() == 1 {
-            let (stored_context, cached) = &mut cache[0];
-            if *stored_context == context {
-                cached.segment_no = segment_no;
-                cached.segment_offset = segment_offset;
-                cached.table = table;
-                return;
-            }
-        } else if let Some((_, cached)) = cache
-            .iter_mut()
-            .find(|(stored_context, _)| *stored_context == context)
-        {
-            cached.segment_no = segment_no;
-            cached.segment_offset = segment_offset;
-            cached.table = table;
-            return;
-        }
-        cache.push((
-            context,
-            CommitSegmentCache {
-                segment_no,
-                segment_offset,
-                table,
-            },
-        ));
-    });
-}
-
-fn read_segment_table_at(offset: u64) -> Result<Vec<u64>, StableMemoryError> {
-    read_u64_table_at(offset, segment_page_count_usize())
-}
-
-fn write_segmented_tables(entries: &[u64]) -> Result<(u64, u64), StableMemoryError> {
-    if entries.is_empty() {
-        return Ok((0, 0));
-    }
-    let root_len = segment_count_for_pages(entries_len_u64(entries)?)?;
-    let mut cursor = append_base()?;
-    let segment_bytes = root_len
-        .checked_mul(segment_table_bytes()?)
-        .ok_or(StableMemoryError::OffsetOverflow)?;
-    let page_table_bytes = checked_add(segment_bytes, root_table_bytes(root_len)?)?;
-    memory::ensure_capacity(checked_add(cursor, page_table_bytes)?)?;
-    let mut root = Vec::with_capacity(
-        usize::try_from(root_len).map_err(|_| StableMemoryError::OffsetOverflow)?,
-    );
-    for segment_no in 0..root_len {
-        let start = usize::try_from(
-            segment_no
-                .checked_mul(SEGMENT_PAGE_COUNT)
-                .ok_or(StableMemoryError::OffsetOverflow)?,
-        )
-        .map_err(|_| StableMemoryError::OffsetOverflow)?;
-        let mut table = vec![0_u64; segment_page_count_usize()];
-        for (offset, entry) in entries[start..]
-            .iter()
-            .take(segment_page_count_usize())
-            .enumerate()
-        {
-            table[offset] = *entry;
-        }
-        root.push(write_segment_table_at(&table, &mut cursor)?);
-    }
-    let root_offset = write_root_table_at(&root, &mut cursor)?;
-    Ok((root_offset, entries_len_u64(&root)?))
-}
-
-#[inline(always)]
-fn write_segment_table_at(entries: &[u64], cursor: &mut u64) -> Result<u64, StableMemoryError> {
-    if entries.len() == segment_page_count_usize() {
-        return write_u64_table_at(entries, cursor);
-    }
-
-    let mut table = vec![0_u64; segment_page_count_usize()];
-    for (index, entry) in entries.iter().take(segment_page_count_usize()).enumerate() {
-        table[index] = *entry;
-    }
-    write_u64_table_at(&table, cursor)
-}
-
-fn write_root_table_at(entries: &[u64], cursor: &mut u64) -> Result<u64, StableMemoryError> {
-    write_u64_table_at(entries, cursor)
-}
-
-#[inline(always)]
-fn write_commit_segment_table_at(
-    entries: &[u64],
-    cursor: &mut u64,
-    profile_enabled: bool,
-) -> Result<u64, StableMemoryError> {
-    if profile_enabled {
-        write_segment_table_at(entries, cursor)
-    } else {
-        write_segment_table_at_unmetered(entries, cursor)
-    }
-}
-
-#[inline(always)]
-fn write_commit_root_table_at(
-    entries: &[u64],
-    cursor: &mut u64,
-    profile_enabled: bool,
-) -> Result<u64, StableMemoryError> {
-    if profile_enabled {
-        write_root_table_at(entries, cursor)
-    } else {
-        write_u64_table_at_unmetered(entries, cursor)
-    }
-}
-
-fn write_segment_table_at_unmetered(
-    entries: &[u64],
-    cursor: &mut u64,
-) -> Result<u64, StableMemoryError> {
-    if entries.len() == segment_page_count_usize() {
-        return write_u64_table_at_unmetered(entries, cursor);
-    }
-
-    let mut table = vec![0_u64; segment_page_count_usize()];
-    for (index, entry) in entries.iter().take(segment_page_count_usize()).enumerate() {
-        table[index] = *entry;
-    }
-    write_u64_table_at_unmetered(&table, cursor)
-}
-
-fn write_u64_table_at(entries: &[u64], cursor: &mut u64) -> Result<u64, StableMemoryError> {
-    if entries.is_empty() {
-        return Ok(0);
-    }
-    let offset = *cursor;
-    let byte_len = entries
-        .len()
-        .checked_mul(8)
-        .ok_or(StableMemoryError::OffsetOverflow)?;
-    #[cfg(target_endian = "little")]
-    {
-        // SAFETY: page-table encoding is little-endian u64 and the target is little-endian.
-        let bytes = unsafe { std::slice::from_raw_parts(entries.as_ptr().cast::<u8>(), byte_len) };
-        memory::write_prechecked(offset, bytes)?;
-        *cursor = checked_add(
-            offset,
-            u64::try_from(byte_len).map_err(|_| StableMemoryError::OffsetOverflow)?,
-        )?;
-        Ok(offset)
-    }
-
-    #[cfg(not(target_endian = "little"))]
-    {
-        let mut bytes = vec![0_u8; byte_len];
-        for (chunk, entry) in bytes.chunks_exact_mut(8).zip(entries) {
-            chunk.copy_from_slice(&entry.to_le_bytes());
-        }
-        memory::write_prechecked(offset, &bytes)?;
-        *cursor = checked_add(
-            offset,
-            u64::try_from(byte_len).map_err(|_| StableMemoryError::OffsetOverflow)?,
-        )?;
-        Ok(offset)
-    }
-}
-
-fn read_u64_table_at(offset: u64, entries_len: usize) -> Result<Vec<u64>, StableMemoryError> {
-    if entries_len == 0 {
-        return Ok(Vec::new());
-    }
-    let byte_len = entries_len
-        .checked_mul(8)
-        .ok_or(StableMemoryError::OffsetOverflow)?;
-    #[cfg(target_endian = "little")]
-    {
-        let mut entries = Vec::<MaybeUninit<u64>>::with_capacity(entries_len);
-        unsafe {
-            entries.set_len(entries_len);
-        }
-        // SAFETY: the buffer has `entries_len` u64 slots. The stable-memory read
-        // fills every byte before conversion to initialized `u64` values.
-        let bytes =
-            unsafe { std::slice::from_raw_parts_mut(entries.as_mut_ptr().cast::<u8>(), byte_len) };
-        memory::read_preallocated(offset, bytes)?;
-        let ptr = entries.as_mut_ptr().cast::<u64>();
-        let len = entries.len();
-        let capacity = entries.capacity();
-        std::mem::forget(entries);
-        // SAFETY: all bytes were just initialized by `read_preallocated`, and
-        // every bit pattern is valid for `u64`.
-        unsafe { Ok(Vec::from_raw_parts(ptr, len, capacity)) }
-    }
-
-    #[cfg(not(target_endian = "little"))]
-    {
-        let mut bytes = vec![0_u8; byte_len];
-        memory::read_preallocated(offset, &mut bytes)?;
-        decode_u64_table(&bytes)
-    }
-}
-
-fn write_u64_table_at_unmetered(
-    entries: &[u64],
-    cursor: &mut u64,
-) -> Result<u64, StableMemoryError> {
-    if entries.is_empty() {
-        return Ok(0);
-    }
-    let offset = *cursor;
-    let byte_len = entries
-        .len()
-        .checked_mul(8)
-        .ok_or(StableMemoryError::OffsetOverflow)?;
-    #[cfg(target_endian = "little")]
-    {
-        // SAFETY: page-table encoding is little-endian u64 and the target is little-endian.
-        let bytes = unsafe { std::slice::from_raw_parts(entries.as_ptr().cast::<u8>(), byte_len) };
-        memory::write_prechecked_unmetered(offset, bytes)?;
-        *cursor = checked_add(
-            offset,
-            u64::try_from(byte_len).map_err(|_| StableMemoryError::OffsetOverflow)?,
-        )?;
-        Ok(offset)
-    }
-
-    #[cfg(not(target_endian = "little"))]
-    {
-        let mut bytes = vec![0_u8; byte_len];
-        for (chunk, entry) in bytes.chunks_exact_mut(8).zip(entries) {
-            chunk.copy_from_slice(&entry.to_le_bytes());
-        }
-        memory::write_prechecked_unmetered(offset, &bytes)?;
-        *cursor = checked_add(
-            offset,
-            u64::try_from(byte_len).map_err(|_| StableMemoryError::OffsetOverflow)?,
-        )?;
-        Ok(offset)
-    }
-}
-
-#[cfg(not(target_endian = "little"))]
-fn decode_u64_table(bytes: &[u8]) -> Result<Vec<u64>, StableMemoryError> {
-    if !bytes.len().is_multiple_of(8) {
-        return Err(StableMemoryError::OffsetOverflow);
-    }
-    let mut entries = Vec::with_capacity(bytes.len() / 8);
-    for chunk in bytes.chunks_exact(8) {
-        entries.push(u64::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-        ]));
-    }
-    Ok(entries)
-}
-
-fn imported_page_table(block: &Superblock) -> Result<Vec<u64>, StableMemoryError> {
-    let count = page_count_for_size(block.import_total_size)?;
-    let capacity = usize::try_from(count).map_err(|_| StableMemoryError::OffsetOverflow)?;
-    let mut entries = Vec::with_capacity(capacity);
-    for page_no in 0..count {
-        entries.push(checked_add(
-            block.import_base_offset,
-            page_no
-                .checked_mul(page_size())
-                .ok_or(StableMemoryError::OffsetOverflow)?,
-        )?);
-    }
-    Ok(entries)
+fn page_physical_offset(block: &Superblock, page_no: u64) -> Result<u64, StableMemoryError> {
+    checked_add(
+        block.db_base_offset,
+        page_no
+            .checked_mul(page_size())
+            .ok_or(StableMemoryError::OffsetOverflow)?,
+    )
 }
 
 fn checksum_logical_range(block: &Superblock, len: u64) -> Result<u64, StableMemoryError> {
@@ -1633,6 +1031,7 @@ fn checksum_logical_range(block: &Superblock, len: u64) -> Result<u64, StableMem
     Ok(hash)
 }
 
+#[allow(dead_code)]
 fn checksum_physical_range(base_offset: u64, len: u64) -> Result<u64, StableMemoryError> {
     let mut offset = 0_u64;
     let mut hash = fnv1a64(&[]);
@@ -1648,6 +1047,7 @@ fn checksum_physical_range(base_offset: u64, len: u64) -> Result<u64, StableMemo
     Ok(hash)
 }
 
+#[allow(dead_code)]
 fn clear_import(block: &mut Superblock) -> Result<(), StableMemoryError> {
     block.flags &= !FLAG_IMPORTING;
     block.import_expected_checksum = 0;
@@ -1655,10 +1055,10 @@ fn clear_import(block: &mut Superblock) -> Result<(), StableMemoryError> {
     block.import_total_size = 0;
     block.import_base_offset = 0;
     block.store()?;
-    invalidate_read_cache();
     Ok(())
 }
 
+#[allow(dead_code)]
 fn import_offset(block: &Superblock, offset: u64) -> Result<u64, StableMemoryError> {
     checked_add(block.import_base_offset, offset)
 }
@@ -1667,54 +1067,9 @@ fn active_page_count(block: &Superblock) -> Result<u64, StableMemoryError> {
     page_count_for_size(block.db_size)
 }
 
-fn active_segment_count(block: &Superblock) -> Result<u64, StableMemoryError> {
-    Ok(block.page_count)
-}
-
-fn read_cache_key(block: &Superblock) -> ReadCacheKey {
-    ReadCacheKey {
-        page_table_offset: block.page_table_offset,
-        page_count: block.page_count,
-        db_size: block.db_size,
-        last_tx_id: block.last_tx_id,
-    }
-}
-
-fn segment_count_for_pages(page_count: u64) -> Result<u64, StableMemoryError> {
-    Ok(page_count.div_ceil(SEGMENT_PAGE_COUNT))
-}
-
-fn segment_no(page_no: u64) -> u64 {
-    page_no / SEGMENT_PAGE_COUNT
-}
-
-fn segment_index(page_no: u64) -> Result<usize, StableMemoryError> {
-    usize::try_from(page_no % SEGMENT_PAGE_COUNT).map_err(|_| StableMemoryError::OffsetOverflow)
-}
-
-fn segment_page_count_usize() -> usize {
-    usize::try_from(SEGMENT_PAGE_COUNT).expect("segment page count fits usize")
-}
-
-fn segment_table_len() -> usize {
-    segment_page_count_usize() * 8
-}
-
-fn segment_table_bytes() -> Result<u64, StableMemoryError> {
-    u64::try_from(segment_table_len()).map_err(|_| StableMemoryError::OffsetOverflow)
-}
-
-fn root_table_bytes(entry_count: u64) -> Result<u64, StableMemoryError> {
-    entry_count
-        .checked_mul(PAGE_TABLE_ENTRY_LEN)
-        .ok_or(StableMemoryError::OffsetOverflow)
-}
-
-fn entries_len_u64<T>(entries: &[T]) -> Result<u64, StableMemoryError> {
-    u64::try_from(entries.len()).map_err(|_| StableMemoryError::OffsetOverflow)
-}
-
+#[allow(dead_code)]
 fn append_base() -> Result<u64, StableMemoryError> {
+    // Fresh bases must append at the high-water mark; never reuse stale physical gaps.
     memory::size_pages()
         .checked_mul(STABLE_PAGE_SIZE)
         .ok_or(StableMemoryError::OffsetOverflow)
@@ -1774,7 +1129,6 @@ impl StableBlobFailpoint {
             Self::OverlayTruncate => "before overlay truncate",
             Self::CommitCapacity => "before commit capacity",
             Self::CommitChunkWrite => "before commit page write",
-            Self::CommitPageTableWrite => "before commit page table write",
             Self::CommitSuperblockStore => "before commit superblock store",
         }
     }
@@ -1793,24 +1147,10 @@ mod tests {
         assert_eq!(page_count_for_size(1).unwrap(), 1);
         assert_eq!(page_count_for_size(page_size()).unwrap(), 1);
         assert_eq!(page_count_for_size(page_size() + 1).unwrap(), 2);
-
-        assert_eq!(segment_count_for_pages(0).unwrap(), 0);
-        assert_eq!(segment_count_for_pages(1).unwrap(), 1);
-        assert_eq!(segment_count_for_pages(SEGMENT_PAGE_COUNT).unwrap(), 1);
-        assert_eq!(segment_count_for_pages(SEGMENT_PAGE_COUNT + 1).unwrap(), 2);
-
-        assert_eq!(segment_no(SEGMENT_PAGE_COUNT), 1);
-        assert_eq!(segment_index(SEGMENT_PAGE_COUNT - 1).unwrap(), 255);
-        assert_eq!(segment_index(SEGMENT_PAGE_COUNT).unwrap(), 0);
-        assert_eq!(root_table_bytes(2).unwrap(), 16);
     }
 
     #[test]
     fn layout_math_rejects_u64_max_overflow_boundaries() {
-        assert!(matches!(
-            root_table_bytes(u64::MAX),
-            Err(StableMemoryError::OffsetOverflow)
-        ));
         assert!(matches!(
             checked_add(u64::MAX, 1),
             Err(StableMemoryError::OffsetOverflow)
@@ -1823,10 +1163,9 @@ mod tests {
             Err(StableMemoryError::OffsetOverflow)
         ));
 
-        block.import_base_offset = u64::MAX - page_size() + 1;
-        block.import_total_size = page_size() + 1;
+        block.db_base_offset = u64::MAX - page_size() + 1;
         assert!(matches!(
-            imported_page_table(&block),
+            page_physical_offset(&block, 1),
             Err(StableMemoryError::OffsetOverflow)
         ));
     }
@@ -1840,12 +1179,8 @@ mod tests {
 
         runner
             .run(
-                &(
-                    boundary_size_strategy(),
-                    boundary_page_strategy(),
-                    boundary_entry_strategy(),
-                ),
-                |(size, page_no, entries)| {
+                &(boundary_size_strategy(), boundary_page_strategy()),
+                |(size, page_no)| {
                     let page_count = page_count_for_size(size).unwrap();
                     let page_size = u128::from(page_size());
                     if size == 0 {
@@ -1855,32 +1190,13 @@ mod tests {
                         prop_assert!(u128::from(size) <= u128::from(page_count) * page_size);
                     }
 
-                    let segment_count = segment_count_for_pages(page_count).unwrap();
-                    if page_count == 0 {
-                        prop_assert_eq!(segment_count, 0);
-                    } else {
-                        prop_assert!(
-                            u128::from(segment_count - 1) * u128::from(SEGMENT_PAGE_COUNT)
-                                < u128::from(page_count)
-                        );
-                        prop_assert!(
-                            u128::from(page_count)
-                                <= u128::from(segment_count) * u128::from(SEGMENT_PAGE_COUNT)
-                        );
-                    }
-
-                    let index = segment_index(page_no).unwrap();
-                    prop_assert!(index < segment_page_count_usize());
-                    prop_assert_eq!(
-                        u128::from(segment_no(page_no)) * u128::from(SEGMENT_PAGE_COUNT)
-                            + index as u128,
-                        u128::from(page_no)
-                    );
-
-                    match root_table_bytes(entries) {
-                        Ok(bytes) => prop_assert_eq!(bytes, entries * PAGE_TABLE_ENTRY_LEN),
+                    let mut block = Superblock::fresh();
+                    block.db_base_offset = SUPERBLOCK_SIZE;
+                    let expected = u128::from(SUPERBLOCK_SIZE) + u128::from(page_no) * page_size;
+                    match page_physical_offset(&block, page_no) {
+                        Ok(physical) => prop_assert_eq!(u128::from(physical), expected),
                         Err(StableMemoryError::OffsetOverflow) => {
-                            prop_assert!(entries.checked_mul(PAGE_TABLE_ENTRY_LEN).is_none());
+                            prop_assert!(expected > u128::from(u64::MAX));
                         }
                         Err(error) => return Err(TestCaseError::fail(error.to_string())),
                     }
@@ -1892,7 +1208,7 @@ mod tests {
 
     fn boundary_size_strategy() -> impl Strategy<Value = u64> {
         let page = page_size();
-        let segment_bytes = SEGMENT_PAGE_COUNT * page;
+        let far_page_bytes = FAR_PAGE_NO * page;
         prop_oneof![
             any::<u64>(),
             prop::sample::select(boundary_values(&[
@@ -1901,9 +1217,9 @@ mod tests {
                 page - 1,
                 page,
                 page + 1,
-                segment_bytes - 1,
-                segment_bytes,
-                segment_bytes + 1,
+                far_page_bytes - 1,
+                far_page_bytes,
+                far_page_bytes + 1,
                 u64::MAX,
             ])),
         ]
@@ -1915,28 +1231,9 @@ mod tests {
             prop::sample::select(boundary_values(&[
                 0,
                 1,
-                SEGMENT_PAGE_COUNT - 1,
-                SEGMENT_PAGE_COUNT,
-                SEGMENT_PAGE_COUNT + 1,
-                u64::MAX,
-            ])),
-        ]
-    }
-
-    fn boundary_entry_strategy() -> impl Strategy<Value = u64> {
-        let max_without_overflow = u64::MAX / PAGE_TABLE_ENTRY_LEN;
-        prop_oneof![
-            any::<u64>(),
-            prop::sample::select(boundary_values(&[
-                0,
-                1,
-                SEGMENT_PAGE_COUNT - 1,
-                SEGMENT_PAGE_COUNT,
-                SEGMENT_PAGE_COUNT + 1,
-                max_without_overflow - 1,
-                max_without_overflow,
-                max_without_overflow + 1,
-                u64::MAX - 1,
+                FAR_PAGE_NO - 1,
+                FAR_PAGE_NO,
+                FAR_PAGE_NO + 1,
                 u64::MAX,
             ])),
         ]
@@ -1973,55 +1270,53 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn page_map_commit_tracks_dirty_page_offsets() {
+    fn in_place_commit_keeps_dirty_page_offsets_stable() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-        invalidate_read_cache();
 
         let page_zero = vec![1_u8; page_len()];
         let page_later = vec![2_u8; page_len()];
-        let later_page_no = SEGMENT_PAGE_COUNT + 1;
+        let later_page_no = FAR_PAGE_NO;
         write_at(0, &page_zero).unwrap();
         write_at(later_page_no * page_size(), &page_later).unwrap();
 
         let block = Superblock::load().unwrap();
-        let root = read_root_table(&block).unwrap();
-        let table = read_page_table(&block).unwrap();
-        let expected_pages = active_page_count(&block).unwrap();
-        let expected_segments = segment_count_for_pages(expected_pages).unwrap();
+        let old_page_zero_offset = page_physical_offset(&block, 0).unwrap();
+        let old_later_offset = page_physical_offset(&block, later_page_no).unwrap();
 
-        assert_eq!(root.len() as u64, expected_segments);
-        assert_eq!(table.len() as u64, expected_pages);
-        assert_ne!(table[0], 0);
-        assert_ne!(table[later_page_no as usize], 0);
-
-        let old_page_zero_offset = table[0];
         let updated_page_zero = vec![3_u8; page_len()];
         write_at(0, &updated_page_zero).unwrap();
-        let updated_table = read_page_table(&Superblock::load().unwrap()).unwrap();
+        let updated_block = Superblock::load().unwrap();
         let mut out = vec![0_u8; page_len()];
         read_base_at(0, &mut out).unwrap();
 
-        assert_ne!(updated_table[0], old_page_zero_offset);
+        assert_eq!(
+            page_physical_offset(&updated_block, 0).unwrap(),
+            old_page_zero_offset
+        );
+        assert_eq!(
+            page_physical_offset(&updated_block, later_page_no).unwrap(),
+            old_later_offset
+        );
         assert_eq!(out, updated_page_zero);
     }
 
     #[test]
     #[serial_test::serial]
-    fn page_map_commit_tracks_multi_segment_dirty_and_clean_pages() {
+    fn in_place_commit_tracks_multi_segment_dirty_and_clean_pages() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-        invalidate_read_cache();
 
         let clean_page_no = 1;
-        let later_page_no = SEGMENT_PAGE_COUNT + 1;
+        let later_page_no = FAR_PAGE_NO;
         write_at(0, &vec![1_u8; page_len()]).unwrap();
         write_at(clean_page_no * page_size(), &vec![2_u8; page_len()]).unwrap();
         write_at(later_page_no * page_size(), &vec![3_u8; page_len()]).unwrap();
 
         let before = Superblock::load().unwrap();
-        let before_root = read_root_table(&before).unwrap();
-        let before_table = read_page_table(&before).unwrap();
+        let before_first = page_physical_offset(&before, 0).unwrap();
+        let before_clean = page_physical_offset(&before, clean_page_no).unwrap();
+        let before_later = page_physical_offset(&before, later_page_no).unwrap();
 
         begin_update().unwrap();
         write_at(0, &vec![4_u8; page_len()]).unwrap();
@@ -2029,28 +1324,24 @@ mod tests {
         commit_update().unwrap();
 
         let after = Superblock::load().unwrap();
-        let after_root = read_root_table(&after).unwrap();
-        let after_table = read_page_table(&after).unwrap();
 
-        assert_eq!(after_root.len(), after.page_count as usize);
-        assert_eq!(after_root.len(), before_root.len());
-        assert_ne!(after_table[0], before_table[0]);
+        assert_eq!(after.page_count, active_page_count(&after).unwrap());
+        assert_eq!(page_physical_offset(&after, 0).unwrap(), before_first);
         assert_eq!(
-            after_table[clean_page_no as usize],
-            before_table[clean_page_no as usize]
+            page_physical_offset(&after, clean_page_no).unwrap(),
+            before_clean
         );
-        assert_ne!(
-            after_table[later_page_no as usize],
-            before_table[later_page_no as usize]
+        assert_eq!(
+            page_physical_offset(&after, later_page_no).unwrap(),
+            before_later
         );
     }
 
     #[test]
     #[serial_test::serial]
-    fn page_map_commit_zeroes_truncated_tail_slots() {
+    fn in_place_truncate_hides_old_tail_pages() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-        invalidate_read_cache();
 
         write_at(0, &vec![1_u8; page_len()]).unwrap();
         write_at(page_size(), &vec![2_u8; page_len()]).unwrap();
@@ -2058,23 +1349,45 @@ mod tests {
         truncate(page_size()).unwrap();
 
         let block = Superblock::load().unwrap();
-        let root = read_root_table(&block).unwrap();
-        let segment = read_segment_table(&block, &root, 0).unwrap();
+        let mut hidden = vec![1_u8; page_len()];
+        read_base_at(page_size(), &mut hidden).unwrap();
 
         assert_eq!(block.db_size, page_size());
-        assert!(segment[0] != 0);
-        assert_eq!(segment[1], 0);
-        assert_eq!(segment[2], 0);
+        assert_eq!(block.page_count, 1);
+        assert_eq!(block.zero_extent_count(), 1);
+        assert_eq!(hidden, vec![0_u8; page_len()]);
     }
 
     #[test]
     #[serial_test::serial]
-    fn compact_keeps_zero_pages_and_densifies_offsets_across_segments() {
+    fn same_overlay_truncate_reextend_zeroes_active_gap() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-        invalidate_read_cache();
 
-        let later_page_no = SEGMENT_PAGE_COUNT + 2;
+        write_at(0, &vec![1_u8; page_len()]).unwrap();
+        write_at(page_size(), &vec![0xAA; page_len()]).unwrap();
+        write_at(2 * page_size(), &vec![3_u8; page_len()]).unwrap();
+
+        begin_update().unwrap();
+        truncate(page_size()).unwrap();
+        truncate(2 * page_size()).unwrap();
+        let mut overlay_gap = vec![1_u8; page_len()];
+        read_at(page_size(), &mut overlay_gap).unwrap();
+        commit_update().unwrap();
+
+        let committed_gap = export_chunk(page_size(), page_size()).unwrap();
+
+        assert_eq!(overlay_gap, vec![0_u8; page_len()]);
+        assert_eq!(committed_gap, vec![0_u8; page_len()]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn compact_is_noop_for_in_place_layout() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let later_page_no = FAR_PAGE_NO;
         let first_page = vec![7_u8; page_len()];
         let later_page = vec![9_u8; page_len()];
         write_at(0, &first_page).unwrap();
@@ -2083,36 +1396,31 @@ mod tests {
         compact().unwrap();
 
         let block = Superblock::load().unwrap();
-        let root = read_root_table(&block).unwrap();
-        let table = read_page_table(&block).unwrap();
         let mut first_out = vec![0_u8; page_len()];
         let mut later_out = vec![0_u8; page_len()];
 
         read_base_at(0, &mut first_out).unwrap();
         read_base_at(later_page_no * page_size(), &mut later_out).unwrap();
 
-        assert_eq!(root.len() as u64, block.page_count);
-        assert_eq!(table.len() as u64, active_page_count(&block).unwrap());
-        assert_ne!(table[0], 0);
-        assert_eq!(table[1], 0);
-        assert_eq!(table[later_page_no as usize], table[0] + page_size());
+        assert_eq!(
+            page_physical_offset(&block, later_page_no).unwrap(),
+            block.db_base_offset + later_page_no * page_size()
+        );
         assert_eq!(first_out, first_page);
         assert_eq!(later_out, later_page);
     }
 
     #[test]
     #[serial_test::serial]
-    fn single_segment_fast_path_preserves_table_after_expand_only_commit() {
+    fn in_place_expand_only_commit_zeroes_new_logical_tail() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-        invalidate_read_cache();
 
         write_at(0, &[0]).unwrap();
         truncate(page_size() * 4).unwrap();
         truncate(page_size() * 4 + 1).unwrap();
 
         let block = Superblock::load().unwrap();
-        let table = read_page_table(&block).unwrap();
         let mut first = [1_u8; 1];
         let mut expanded_tail = [1_u8; 1];
 
@@ -2120,93 +1428,416 @@ mod tests {
         read_base_at(page_size() * 4, &mut expanded_tail).unwrap();
 
         assert_eq!(block.db_size, page_size() * 4 + 1);
-        assert_ne!(table[0], 0);
-        assert_eq!(table[1], 0);
-        assert_ne!(table[4], 0);
+        assert_eq!(
+            page_physical_offset(&block, 0).unwrap(),
+            block.db_base_offset
+        );
+        assert_eq!(
+            page_physical_offset(&block, 4).unwrap(),
+            block.db_base_offset + 4 * page_size()
+        );
         assert_eq!(first, [0]);
         assert_eq!(expanded_tail, [0]);
     }
 
     #[test]
     #[serial_test::serial]
-    fn page_table_u64_encoding_is_little_endian_and_round_trips() {
+    fn truncate_grow_zeroes_stale_physical_gap() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-        invalidate_read_cache();
 
-        let entries = [
-            0_u64,
-            1,
-            0x0102_0304_0506_0708,
-            0xf1f2_f3f4_f5f6_f7f8,
-            u64::MAX,
-        ];
-        let mut cursor = 128_u64;
-        let expected_len = u64::try_from(entries.len() * 8).unwrap();
-        crate::stable::memory::ensure_capacity(cursor + expected_len).unwrap();
+        let old_size = page_size() + 17;
+        let grow_len = page_size() * 2 + 111;
+        let grow_len_usize = usize::try_from(grow_len).unwrap();
+        write_at(old_size - 1, b"a").unwrap();
+        let block = Superblock::load().unwrap();
+        crate::stable::memory::write(block.db_base_offset + old_size, &vec![0xAA; grow_len_usize])
+            .unwrap();
 
-        let offset = write_u64_table_at(&entries, &mut cursor).unwrap();
-        let decoded = read_u64_table_at(offset, entries.len()).unwrap();
-        let mut encoded = vec![0_u8; entries.len() * 8];
-        crate::stable::memory::read_preallocated(offset, &mut encoded).unwrap();
-        let expected = entries
-            .iter()
-            .flat_map(|entry| entry.to_le_bytes())
-            .collect::<Vec<_>>();
+        truncate(old_size + grow_len).unwrap();
+        let gap = export_chunk(old_size, grow_len).unwrap();
 
-        assert_eq!(offset, 128);
-        assert_eq!(cursor, 128 + expected_len);
-        assert_eq!(decoded, entries);
-        assert_eq!(encoded, expected);
-
-        let mut empty_cursor = cursor;
-        assert_eq!(write_u64_table_at(&[], &mut empty_cursor).unwrap(), 0);
-        assert_eq!(empty_cursor, cursor);
-        assert!(read_u64_table_at(cursor, 0).unwrap().is_empty());
+        assert!(gap.iter().all(|byte| *byte == 0));
     }
 
     #[test]
     #[serial_test::serial]
-    fn pbt_page_table_u64_encoding_round_trips() {
+    fn sparse_write_zeroes_stale_physical_gap() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let old_size = page_size() + 17;
+        let write_offset = old_size + page_size() * 2 + 33;
+        let gap_len = write_offset - old_size;
+        let gap_len_usize = usize::try_from(gap_len).unwrap();
+        write_at(old_size - 1, b"a").unwrap();
+        let block = Superblock::load().unwrap();
+        crate::stable::memory::write(block.db_base_offset + old_size, &vec![0xAA; gap_len_usize])
+            .unwrap();
+
+        write_at(write_offset, b"z").unwrap();
+        let gap = export_chunk(old_size, gap_len).unwrap();
+        let written = export_chunk(write_offset, 1).unwrap();
+
+        assert!(gap.iter().all(|byte| *byte == 0));
+        assert_eq!(written, b"z");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn failed_import_slack_stays_hidden_after_normal_grow() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        write_at(0, b"a").unwrap();
+        begin_import(page_size(), 0).unwrap();
+        let importing = Superblock::load().unwrap();
+        import_chunk(0, &vec![0xAA; page_len()]).unwrap();
+        assert!(finish_import().is_err());
+
+        let block = Superblock::load().unwrap();
+        let logical_import_offset = importing.import_base_offset - block.db_base_offset;
+        truncate(logical_import_offset + page_size()).unwrap();
+        let grown_over_import_slack = export_chunk(logical_import_offset, page_size()).unwrap();
+
+        assert!(grown_over_import_slack.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn zero_mask_hides_truncated_tail_without_moving_base() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        write_at(0, &vec![b'a'; page_len()]).unwrap();
+        write_at(page_size(), &vec![b'b'; page_len()]).unwrap();
+        let old_base = Superblock::load().unwrap().db_base_offset;
+
+        truncate(1).unwrap();
+        let mut stale_tail = [0_u8; 1];
+        crate::stable::memory::read_preallocated(old_base + page_size(), &mut stale_tail).unwrap();
+        assert_eq!(stale_tail, [b'b']);
+
+        let grow_offset = 2 * page_size() + 2;
+        write_at(grow_offset, b"z").unwrap();
+
+        let block = Superblock::load().unwrap();
+        let image = export_chunk(0, block.db_size).unwrap();
+        let z_index = usize::try_from(grow_offset).unwrap();
+
+        assert_eq!(block.db_base_offset, old_base);
+        assert_eq!(block.db_size, grow_offset + 1);
+        assert_eq!(block.zero_extent_count(), 1);
+        assert_eq!(image[0], b'a');
+        assert!(image[1..z_index].iter().all(|byte| *byte == 0));
+        assert_eq!(image[z_index], b'z');
+    }
+
+    #[test]
+    fn zero_extent_add_subtract_merges_and_splits_ranges() {
+        let mut extents = Vec::new();
+        add_zero_extent(&mut extents, 10, 20).unwrap();
+        add_zero_extent(&mut extents, 30, 40).unwrap();
+        add_zero_extent(&mut extents, 20, 30).unwrap();
+        assert_eq!(
+            extents,
+            vec![ZeroExtent {
+                start_page: 10,
+                end_page: 40
+            }]
+        );
+
+        subtract_zero_extent(&mut extents, 15, 17).unwrap();
+        assert_eq!(
+            extents,
+            vec![
+                ZeroExtent {
+                    start_page: 10,
+                    end_page: 15
+                },
+                ZeroExtent {
+                    start_page: 17,
+                    end_page: 40
+                }
+            ]
+        );
+
+        subtract_zero_extent(&mut extents, 8, 18).unwrap();
+        assert_eq!(
+            extents,
+            vec![ZeroExtent {
+                start_page: 18,
+                end_page: 40
+            }]
+        );
+    }
+
+    #[test]
+    fn zero_extent_truncate_tail_merges_with_existing_range() {
+        let mut extents = vec![ZeroExtent {
+            start_page: 10,
+            end_page: 20,
+        }];
+
+        add_zero_extent(&mut extents, 10, 40).unwrap();
+
+        assert_eq!(
+            extents,
+            vec![ZeroExtent {
+                start_page: 10,
+                end_page: 40
+            }]
+        );
+    }
+
+    #[test]
+    fn zero_extent_commit_allows_temporary_limit_excess_removed_by_dirty_page() {
+        let mut block = Superblock::fresh();
+        block.db_size = (MAX_ZERO_EXTENTS as u64) * 2 * page_size();
+        block.zero_extents = (0..MAX_ZERO_EXTENTS)
+            .map(|index| ZeroExtent {
+                start_page: (index as u64) * 2,
+                end_page: (index as u64) * 2 + 1,
+            })
+            .collect();
+
+        let mut overlay = Overlay::new(block.db_size);
+        overlay
+            .write_at(block.db_size, &vec![0xAA; page_len()])
+            .unwrap();
+        let final_page_count = page_count_for_size(overlay.size()).unwrap();
+
+        let extents = zero_extents_after_commit(&block, &overlay, final_page_count).unwrap();
+
+        assert_eq!(extents.len(), MAX_ZERO_EXTENTS);
+        assert_eq!(extents, block.zero_extents);
+    }
+
+    #[test]
+    fn zero_extent_commit_rejects_final_limit_excess() {
+        let mut block = Superblock::fresh();
+        block.db_size = (MAX_ZERO_EXTENTS as u64) * 2 * page_size();
+        block.zero_extents = (0..MAX_ZERO_EXTENTS)
+            .map(|index| ZeroExtent {
+                start_page: (index as u64) * 2,
+                end_page: (index as u64) * 2 + 1,
+            })
+            .collect();
+
+        let mut overlay = Overlay::new(block.db_size);
+        overlay.truncate(block.db_size + page_size()).unwrap();
+        let final_page_count = page_count_for_size(overlay.size()).unwrap();
+
+        assert!(matches!(
+            zero_extents_after_commit(&block, &overlay, final_page_count),
+            Err(StableMemoryError::ZeroExtentLimitExceeded {
+                limit: MAX_ZERO_EXTENTS
+            })
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn zero_extent_limit_error_keeps_active_image_and_metadata() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        let mut block = Superblock::fresh();
+        let max_zero_extents = u64::try_from(MAX_ZERO_EXTENTS).unwrap();
+        block.db_size = max_zero_extents * 2 * page_size();
+        block.page_count = page_count_for_size(block.db_size).unwrap();
+        block.last_tx_id = 41;
+        block.flags = FLAG_CHECKSUM_STALE | FLAG_CHECKSUM_REFRESHING;
+        block.checksum = 0xA5A5;
+        block.checksum_refresh_offset = 17;
+        block.checksum_refresh_hash = 0x5A5A;
+        block.checksum_refresh_tx_id = 40;
+        block.zero_extents = (0..MAX_ZERO_EXTENTS)
+            .map(|index| ZeroExtent {
+                start_page: u64::try_from(index).unwrap() * 2,
+                end_page: u64::try_from(index).unwrap() * 2 + 1,
+            })
+            .collect();
+
+        let sample_page_no = 1_u64;
+        let sample_offset = page_physical_offset(&block, sample_page_no).unwrap();
+        let sample = b"active-before";
+        let sample_len = u64::try_from(sample.len()).unwrap();
+        crate::stable::memory::ensure_capacity(checked_add(sample_offset, sample_len).unwrap())
+            .unwrap();
+        crate::stable::memory::write(sample_offset, sample).unwrap();
+        block.store().unwrap();
+
+        let before_block = Superblock::load().unwrap();
+        let mut before_sample = vec![0_u8; sample.len()];
+        read_base_at(sample_page_no * page_size(), &mut before_sample).unwrap();
+        assert_eq!(before_sample, sample);
+
+        begin_update().unwrap();
+        truncate(block.db_size + page_size()).unwrap();
+        let result = commit_update();
+
+        assert!(matches!(
+            result,
+            Err(StableMemoryError::ZeroExtentLimitExceeded {
+                limit: MAX_ZERO_EXTENTS
+            })
+        ));
+        assert_eq!(Superblock::load().unwrap(), before_block);
+
+        let mut after_sample = vec![0_u8; sample.len()];
+        read_base_at(sample_page_no * page_size(), &mut after_sample).unwrap();
+        assert_eq!(after_sample, before_sample);
+    }
+
+    #[test]
+    fn zero_extent_temporary_limit_allows_only_dirty_page_slack() {
+        let extents = (0..=MAX_ZERO_EXTENTS)
+            .map(|index| ZeroExtent {
+                start_page: index as u64,
+                end_page: index as u64 + 1,
+            })
+            .collect::<Vec<_>>();
+
+        enforce_temporary_zero_extent_limit(&extents, MAX_ZERO_EXTENTS + 1).unwrap();
+        assert!(matches!(
+            enforce_temporary_zero_extent_limit(&extents, MAX_ZERO_EXTENTS),
+            Err(StableMemoryError::ZeroExtentLimitExceeded {
+                limit: MAX_ZERO_EXTENTS
+            })
+        ));
+    }
+
+    #[test]
+    fn zero_extent_limit_counts_normalized_ranges() {
+        let mut extents = (0..MAX_ZERO_EXTENTS)
+            .map(|index| ZeroExtent {
+                start_page: (index as u64) * 2,
+                end_page: (index as u64) * 2 + 1,
+            })
+            .collect::<Vec<_>>();
+
+        add_zero_extent(
+            &mut extents,
+            (MAX_ZERO_EXTENTS as u64) * 2 - 2,
+            (MAX_ZERO_EXTENTS as u64) * 2,
+        )
+        .unwrap();
+
+        assert_eq!(extents.len(), MAX_ZERO_EXTENTS);
+        assert_eq!(
+            extents[MAX_ZERO_EXTENTS - 1],
+            ZeroExtent {
+                start_page: (MAX_ZERO_EXTENTS as u64) * 2 - 2,
+                end_page: (MAX_ZERO_EXTENTS as u64) * 2
+            }
+        );
+    }
+
+    #[test]
+    fn zero_extent_limit_is_rejected_without_fallback() {
+        let mut extents = (0..MAX_ZERO_EXTENTS)
+            .map(|index| ZeroExtent {
+                start_page: (index as u64) * 2,
+                end_page: (index as u64) * 2 + 1,
+            })
+            .collect::<Vec<_>>();
+        let result = add_zero_extent(
+            &mut extents,
+            (MAX_ZERO_EXTENTS as u64) * 2,
+            (MAX_ZERO_EXTENTS as u64) * 2 + 1,
+        );
+        assert!(matches!(
+            result,
+            Err(StableMemoryError::ZeroExtentLimitExceeded {
+                limit: MAX_ZERO_EXTENTS
+            })
+        ));
+    }
+
+    #[test]
+    fn pbt_zero_extent_normalizer_matches_independent_model() {
         let mut runner = TestRunner::new(Config {
-            cases: 128,
+            cases: 512,
             ..Config::default()
         });
 
         runner
-            .run(
-                &proptest::collection::vec(any::<u64>(), 0..=512),
-                |entries| {
-                    crate::stable::memory::reset_for_tests();
-                    crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-                    invalidate_read_cache();
+            .run(&zero_extent_vec_strategy(), |mut extents| {
+                let expected = model_normalize_zero_extents(&extents);
+                let result = normalize_zero_extents(&mut extents);
 
-                    let mut cursor = 128_u64;
-                    let byte_len = entries.len().checked_mul(8).unwrap();
-                    let end = cursor + u64::try_from(byte_len).unwrap();
-                    crate::stable::memory::ensure_capacity(end).unwrap();
+                if expected.len() > MAX_ZERO_EXTENTS {
+                    let rejected = matches!(
+                        result,
+                        Err(StableMemoryError::ZeroExtentLimitExceeded {
+                            limit: MAX_ZERO_EXTENTS
+                        })
+                    );
+                    prop_assert!(rejected);
+                } else {
+                    result.map_err(|error| TestCaseError::fail(error.to_string()))?;
+                    prop_assert_eq!(extents, expected);
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
 
-                    let offset = write_u64_table_at(&entries, &mut cursor).unwrap();
-                    let decoded = read_u64_table_at(offset, entries.len()).unwrap();
-                    prop_assert_eq!(decoded, entries.clone());
-                    prop_assert_eq!(cursor, end);
+    #[test]
+    fn pbt_zero_extent_add_subtract_matches_independent_model() {
+        let mut runner = TestRunner::new(Config {
+            cases: 256,
+            ..Config::default()
+        });
 
-                    let mut encoded = vec![0_u8; byte_len];
-                    crate::stable::memory::read_preallocated(offset, &mut encoded).unwrap();
-                    let expected = entries
-                        .iter()
-                        .flat_map(|entry| entry.to_le_bytes())
-                        .collect::<Vec<_>>();
-                    prop_assert_eq!(encoded, expected);
-                    Ok(())
-                },
-            )
+        runner
+            .run(&zero_extent_operation_sequence(), |operations| {
+                let mut production = Vec::new();
+                let mut model = Vec::new();
+
+                for operation in operations {
+                    let result = match operation {
+                        ZeroExtentOp::Add {
+                            start_page,
+                            end_page,
+                        } => {
+                            model_add_zero_extent(&mut model, start_page, end_page);
+                            add_zero_extent(&mut production, start_page, end_page)
+                        }
+                        ZeroExtentOp::Subtract {
+                            start_page,
+                            end_page,
+                        } => {
+                            model_subtract_zero_extent(&mut model, start_page, end_page);
+                            subtract_zero_extent(&mut production, start_page, end_page)
+                        }
+                    };
+
+                    let expected = model_normalize_zero_extents(&model);
+                    if expected.len() > MAX_ZERO_EXTENTS {
+                        let rejected = matches!(
+                            result,
+                            Err(StableMemoryError::ZeroExtentLimitExceeded {
+                                limit: MAX_ZERO_EXTENTS
+                            })
+                        );
+                        prop_assert!(rejected);
+                        return Ok(());
+                    }
+
+                    result.map_err(|error| TestCaseError::fail(error.to_string()))?;
+                    prop_assert_eq!(&production, &expected);
+                    model = expected;
+                }
+                Ok(())
+            })
             .unwrap();
     }
 
     #[test]
     #[serial_test::serial]
-    fn pbt_compact_preserves_sparse_page_model() {
+    fn pbt_noop_compact_preserves_sparse_page_model() {
         let mut runner = TestRunner::new(Config {
             cases: 32,
             ..Config::default()
@@ -2218,7 +1849,6 @@ mod tests {
                 |pages| {
                     crate::stable::memory::reset_for_tests();
                     crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-                    invalidate_read_cache();
 
                     let active_len = pages
                         .iter()
@@ -2241,25 +1871,16 @@ mod tests {
                         block.db_size,
                         u64::try_from(active_len).unwrap() * page_size()
                     );
-                    let table = read_page_table(&block).unwrap();
-                    prop_assert_eq!(table.len(), active_len);
+                    prop_assert_eq!(block.page_count, active_page_count(&block).unwrap());
 
-                    let mut first_compacted_offset = None;
-                    let mut non_zero_seen = 0_u64;
                     for (page_no, byte) in pages.iter().take(active_len).enumerate() {
-                        let entry = table[page_no];
                         let mut page = vec![0_u8; page_len()];
                         read_base_at(u64::try_from(page_no).unwrap() * page_size(), &mut page)
                             .unwrap();
 
                         if let Some(byte) = byte {
-                            let base = *first_compacted_offset.get_or_insert(entry);
-                            prop_assert_ne!(entry, 0);
-                            prop_assert_eq!(entry, base + non_zero_seen * page_size());
                             prop_assert_eq!(page, vec![*byte; page_len()]);
-                            non_zero_seen += 1;
                         } else {
-                            prop_assert_eq!(entry, 0);
                             prop_assert_eq!(page, vec![0_u8; page_len()]);
                         }
                     }
@@ -2276,9 +1897,117 @@ mod tests {
         Compact,
     }
 
+    #[derive(Clone, Debug)]
+    enum ZeroExtentOp {
+        Add { start_page: u64, end_page: u64 },
+        Subtract { start_page: u64, end_page: u64 },
+    }
+
+    fn zero_extent_vec_strategy() -> impl Strategy<Value = Vec<ZeroExtent>> {
+        let page_limit = zero_extent_model_page_limit();
+        proptest::collection::vec(
+            (0_u64..=page_limit, 0_u64..=page_limit).prop_map(|(left, right)| ZeroExtent {
+                start_page: left.min(right),
+                end_page: left.max(right),
+            }),
+            0..=MAX_ZERO_EXTENTS + 8,
+        )
+    }
+
+    fn zero_extent_operation_sequence() -> impl Strategy<Value = Vec<ZeroExtentOp>> {
+        let page_limit = zero_extent_model_page_limit();
+        let range = (0_u64..=page_limit, 0_u64..=page_limit)
+            .prop_map(|(left, right)| (left.min(right), left.max(right)));
+        proptest::collection::vec(
+            prop_oneof![
+                range
+                    .clone()
+                    .prop_map(|(start_page, end_page)| ZeroExtentOp::Add {
+                        start_page,
+                        end_page,
+                    }),
+                range.prop_map(|(start_page, end_page)| ZeroExtentOp::Subtract {
+                    start_page,
+                    end_page,
+                }),
+            ],
+            0..=96,
+        )
+    }
+
+    fn zero_extent_model_page_limit() -> u64 {
+        (u64::try_from(MAX_ZERO_EXTENTS).unwrap() + 8) * 2
+    }
+
+    fn model_add_zero_extent(extents: &mut Vec<ZeroExtent>, start_page: u64, end_page: u64) {
+        if start_page < end_page {
+            extents.push(ZeroExtent {
+                start_page,
+                end_page,
+            });
+        }
+    }
+
+    fn model_subtract_zero_extent(extents: &mut Vec<ZeroExtent>, start_page: u64, end_page: u64) {
+        if start_page >= end_page {
+            return;
+        }
+
+        let mut next = Vec::new();
+        for extent in extents.iter() {
+            if end_page <= extent.start_page || start_page >= extent.end_page {
+                next.push(extent.clone());
+                continue;
+            }
+            if extent.start_page < start_page {
+                next.push(ZeroExtent {
+                    start_page: extent.start_page,
+                    end_page: start_page,
+                });
+            }
+            if end_page < extent.end_page {
+                next.push(ZeroExtent {
+                    start_page: end_page,
+                    end_page: extent.end_page,
+                });
+            }
+        }
+        *extents = next;
+    }
+
+    fn model_normalize_zero_extents(extents: &[ZeroExtent]) -> Vec<ZeroExtent> {
+        let page_limit = usize::try_from(zero_extent_model_page_limit()).unwrap();
+        let mut mask = vec![false; page_limit + 1];
+        for extent in extents {
+            let start = usize::try_from(extent.start_page).unwrap().min(mask.len());
+            let end = usize::try_from(extent.end_page).unwrap().min(mask.len());
+            for page in &mut mask[start..end] {
+                *page = true;
+            }
+        }
+
+        let mut normalized = Vec::new();
+        let mut page = 0_usize;
+        while page < mask.len() {
+            if !mask[page] {
+                page += 1;
+                continue;
+            }
+            let start = page;
+            while page < mask.len() && mask[page] {
+                page += 1;
+            }
+            normalized.push(ZeroExtent {
+                start_page: u64::try_from(start).unwrap(),
+                end_page: u64::try_from(page).unwrap(),
+            });
+        }
+        normalized
+    }
+
     #[test]
     #[serial_test::serial]
-    fn pbt_blob_operations_match_logical_model_across_compact() {
+    fn pbt_blob_operations_match_logical_model_across_noop_compact() {
         let mut runner = TestRunner::new(Config {
             cases: 48,
             ..Config::default()
@@ -2288,7 +2017,6 @@ mod tests {
             .run(&blob_operation_sequence(), |operations| {
                 crate::stable::memory::reset_for_tests();
                 crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-                invalidate_read_cache();
 
                 let mut model = Vec::new();
                 let mut materialized = BTreeSet::new();
@@ -2313,7 +2041,7 @@ mod tests {
     fn blob_offset_strategy() -> impl Strategy<Value = u64> {
         let limit = blob_model_limit();
         let page = page_size();
-        let segment = SEGMENT_PAGE_COUNT * page;
+        let far_page = FAR_PAGE_NO * page;
         prop_oneof![
             0_u64..=limit,
             prop::sample::select(boundary_values(&[
@@ -2322,9 +2050,9 @@ mod tests {
                 page - 1,
                 page,
                 page + 1,
-                segment - 1,
-                segment,
-                segment + 1,
+                far_page - 1,
+                far_page,
+                far_page + 1,
                 limit - 1,
                 limit,
             ]))
@@ -2347,7 +2075,7 @@ mod tests {
     }
 
     fn blob_model_limit() -> u64 {
-        (SEGMENT_PAGE_COUNT + 3) * page_size()
+        (FAR_PAGE_NO + 3) * page_size()
     }
 
     fn apply_blob_op(
@@ -2406,8 +2134,8 @@ mod tests {
 
     fn assert_blob_model(
         model: &[u8],
-        materialized: &BTreeSet<u64>,
-        expect_compacted: bool,
+        _materialized: &BTreeSet<u64>,
+        _expect_compacted: bool,
     ) -> Result<(), TestCaseError> {
         let block = Superblock::load().map_err(|error| TestCaseError::fail(error.to_string()))?;
         prop_assert_eq!(block.db_size, u64::try_from(model.len()).unwrap());
@@ -2423,40 +2151,20 @@ mod tests {
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
         prop_assert_eq!(tail, vec![0_u8; 32]);
 
-        let table =
-            read_page_table(&block).map_err(|error| TestCaseError::fail(error.to_string()))?;
         let active_pages = page_count_for_size(u64::try_from(model.len()).unwrap())
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        prop_assert_eq!(table.len(), usize::try_from(active_pages).unwrap());
-
-        let mut first_compacted_offset = None;
-        let mut non_zero_seen = 0_u64;
-        for (index, entry) in table.iter().enumerate() {
-            let page_no = u64::try_from(index).unwrap();
-            if materialized.contains(&page_no) {
-                prop_assert_ne!(*entry, 0);
-                if expect_compacted {
-                    let base = *first_compacted_offset.get_or_insert(*entry);
-                    prop_assert_eq!(*entry, base + non_zero_seen * page_size());
-                }
-                non_zero_seen += 1;
-            } else {
-                prop_assert_eq!(*entry, 0);
-            }
-        }
+        prop_assert_eq!(block.page_count, active_pages);
         Ok(())
     }
 
     #[test]
     #[serial_test::serial]
-    fn read_metrics_separate_table_cache_from_data_reads() {
+    fn read_metrics_track_in_place_data_reads() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-        invalidate_read_cache();
 
         let page = vec![7_u8; page_len()];
         write_at(0, &page).unwrap();
-        invalidate_read_cache();
         crate::read_metrics::reset_read_metrics();
 
         let first = read_base_page(0).unwrap();
@@ -2467,10 +2175,6 @@ mod tests {
         assert_eq!(second, page);
         assert!(metrics.stable_data_read_calls >= 2);
         assert!(metrics.stable_data_read_bytes >= page_size() * 2);
-        assert!(metrics.page_table_root_misses >= 1);
-        assert!(metrics.page_table_root_hits >= 1);
-        assert!(metrics.page_table_segment_misses >= 1);
-        assert!(metrics.page_table_segment_hits >= 1);
         #[cfg(feature = "bench-profile")]
         assert!(metrics.superblock_loads <= 1);
         #[cfg(not(feature = "bench-profile"))]
@@ -2482,7 +2186,6 @@ mod tests {
     fn page_offset_cache_reuses_page_data_for_small_reads() {
         crate::stable::memory::reset_for_tests();
         crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
-        invalidate_read_cache();
 
         let page = vec![9_u8; page_len()];
         write_at(0, &page).unwrap();

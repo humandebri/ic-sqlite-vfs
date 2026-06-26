@@ -1,7 +1,12 @@
 //! Verus model for the stable blob import state machine.
 //!
 //! The model covers begin, sequential chunks, incomplete finish rejection,
-//! abort, and update rejection while importing.
+//! cancel, and update rejection while importing.
+//!
+//! Capacity proof mapping:
+//! - T7: import is an explicit capacity exception; checksum mismatch preserves
+//!   the logical committed image instead of publishing staging bytes, while
+//!   staging writes may still increase the resource high-water mark.
 
 use vstd::prelude::*;
 
@@ -15,6 +20,24 @@ struct ImportState {
     expected_checksum: nat,
 }
 
+struct CommittedImage {
+    db_base_offset: nat,
+    db_size: nat,
+    checksum: nat,
+    schema_version: nat,
+}
+
+struct ResourceHighWater {
+    allocated_bytes: nat,
+    high_water_mark: nat,
+}
+
+struct ImportMachine {
+    committed: CommittedImage,
+    resource: ResourceHighWater,
+    import: ImportState,
+}
+
 spec fn idle() -> ImportState {
     ImportState {
         importing: false,
@@ -22,6 +45,75 @@ spec fn idle() -> ImportState {
         total_size: 0,
         base_offset: 0,
         expected_checksum: 0,
+    }
+}
+
+spec fn max_nat(left: nat, right: nat) -> nat {
+    if left >= right {
+        left
+    } else {
+        right
+    }
+}
+
+spec fn imported_schema_version_after_finish() -> nat {
+    0
+}
+
+spec fn staging_total_end(state: ImportState) -> nat {
+    state.base_offset + state.total_size
+}
+
+spec fn staging_written_end(state: ImportState) -> nat {
+    state.base_offset + state.written_until
+}
+
+spec fn allocated_after_staging(resource: ResourceHighWater, state: ImportState) -> nat {
+    max_nat(resource.allocated_bytes, staging_total_end(state))
+}
+
+spec fn allocated_after_written_staging(resource: ResourceHighWater, state: ImportState) -> nat {
+    max_nat(resource.allocated_bytes, staging_written_end(state))
+}
+
+spec fn resource_after_complete_staging(
+    resource: ResourceHighWater,
+    state: ImportState,
+) -> ResourceHighWater {
+    let allocated = allocated_after_staging(resource, state);
+    ResourceHighWater { allocated_bytes: allocated, high_water_mark: allocated }
+}
+
+spec fn resource_after_written_staging(
+    resource: ResourceHighWater,
+    state: ImportState,
+) -> ResourceHighWater {
+    let allocated = allocated_after_written_staging(resource, state);
+    ResourceHighWater { allocated_bytes: allocated, high_water_mark: allocated }
+}
+
+spec fn finish_import_machine(machine: ImportMachine, actual_checksum: nat) -> Option<ImportMachine> {
+    if machine.import.importing && machine.import.written_until == machine.import.total_size {
+        if actual_checksum == machine.import.expected_checksum {
+            Some(ImportMachine {
+                committed: CommittedImage {
+                    db_base_offset: machine.import.base_offset,
+                    db_size: machine.import.total_size,
+                    checksum: actual_checksum,
+                    schema_version: imported_schema_version_after_finish(),
+                },
+                resource: resource_after_complete_staging(machine.resource, machine.import),
+                import: idle(),
+            })
+        } else {
+            Some(ImportMachine {
+                committed: machine.committed,
+                resource: resource_after_complete_staging(machine.resource, machine.import),
+                import: idle(),
+            })
+        }
+    } else {
+        None
     }
 }
 
@@ -74,6 +166,18 @@ spec fn abort_import(state: ImportState) -> ImportState {
         idle()
     } else {
         state
+    }
+}
+
+spec fn cancel_import_machine(machine: ImportMachine) -> ImportMachine {
+    if machine.import.importing {
+        ImportMachine {
+            committed: machine.committed,
+            resource: resource_after_written_staging(machine.resource, machine.import),
+            import: idle(),
+        }
+    } else {
+        machine
     }
 }
 
@@ -145,9 +249,84 @@ proof fn checksum_mismatch_finish_clears_importing(state: ImportState, actual_ch
 {
 }
 
+proof fn checksum_mismatch_preserves_committed_image(
+    machine: ImportMachine,
+    actual_checksum: nat,
+    next: ImportMachine,
+)
+    requires
+        machine.import.importing,
+        machine.import.written_until == machine.import.total_size,
+        actual_checksum != machine.import.expected_checksum,
+        finish_import_machine(machine, actual_checksum) == Some(next),
+    ensures
+        next.committed == machine.committed,
+        next.resource.allocated_bytes >= machine.resource.allocated_bytes,
+        next.resource.high_water_mark == next.resource.allocated_bytes,
+        !next.import.importing,
+{
+}
+
+proof fn checksum_match_publishes_staging_image(
+    machine: ImportMachine,
+    next: ImportMachine,
+)
+    requires
+        machine.import.importing,
+        machine.import.written_until == machine.import.total_size,
+        finish_import_machine(machine, machine.import.expected_checksum) == Some(next),
+    ensures
+        next.committed.db_base_offset == machine.import.base_offset,
+        next.committed.db_size == machine.import.total_size,
+        next.committed.checksum == machine.import.expected_checksum,
+        next.committed.schema_version == 0,
+        next.resource.allocated_bytes == allocated_after_staging(machine.resource, machine.import),
+        next.resource.allocated_bytes >= machine.resource.allocated_bytes,
+        next.resource.high_water_mark == next.resource.allocated_bytes,
+        !next.import.importing,
+{
+}
+
+proof fn successful_import_resets_schema_version(
+    machine: ImportMachine,
+    next: ImportMachine,
+)
+    requires
+        machine.import.importing,
+        machine.import.written_until == machine.import.total_size,
+        finish_import_machine(machine, machine.import.expected_checksum) == Some(next),
+    ensures
+        next.committed.schema_version == 0,
+{
+}
+
+proof fn complete_import_may_increase_resource_high_water(
+    machine: ImportMachine,
+    actual_checksum: nat,
+    next: ImportMachine,
+)
+    requires
+        machine.import.importing,
+        machine.import.written_until == machine.import.total_size,
+        finish_import_machine(machine, actual_checksum) == Some(next),
+    ensures
+        next.resource.allocated_bytes == allocated_after_staging(machine.resource, machine.import),
+        next.resource.allocated_bytes >= machine.resource.allocated_bytes,
+        next.resource.high_water_mark == next.resource.allocated_bytes,
+{
+}
+
 proof fn abort_clears_importing(state: ImportState)
     ensures
         !abort_import(state).importing,
+{
+}
+
+proof fn cancel_preserves_committed_image(machine: ImportMachine)
+    ensures
+        cancel_import_machine(machine).committed == machine.committed,
+        cancel_import_machine(machine).resource.allocated_bytes >= machine.resource.allocated_bytes,
+        !cancel_import_machine(machine).import.importing,
 {
 }
 

@@ -39,10 +39,6 @@ const idlFactory = ({ IDL }) => {
     x_read_bytes: IDL.Nat64,
     stable_data_read_calls: IDL.Nat64,
     stable_data_read_bytes: IDL.Nat64,
-    page_table_root_hits: IDL.Nat64,
-    page_table_root_misses: IDL.Nat64,
-    page_table_segment_hits: IDL.Nat64,
-    page_table_segment_misses: IDL.Nat64,
     superblock_loads: IDL.Nat64,
   });
   const BenchGetManyProfileReport = IDL.Record({
@@ -63,10 +59,6 @@ const idlFactory = ({ IDL }) => {
     x_read_bytes: IDL.Nat64,
     stable_data_read_calls: IDL.Nat64,
     stable_data_read_bytes: IDL.Nat64,
-    page_table_root_hits: IDL.Nat64,
-    page_table_root_misses: IDL.Nat64,
-    page_table_segment_hits: IDL.Nat64,
-    page_table_segment_misses: IDL.Nat64,
     superblock_loads: IDL.Nat64,
   });
   const BenchWriteProfileReport = IDL.Record({
@@ -99,16 +91,10 @@ const idlFactory = ({ IDL }) => {
     stable_data_write_bytes: IDL.Nat64,
     stable_grow_calls: IDL.Nat64,
     stable_grow_pages: IDL.Nat64,
-    page_table_root_hits: IDL.Nat64,
-    page_table_root_misses: IDL.Nat64,
-    page_table_segment_hits: IDL.Nat64,
-    page_table_segment_misses: IDL.Nat64,
     superblock_loads: IDL.Nat64,
     commit_load: IDL.Nat64,
-    commit_build_segments: IDL.Nat64,
     commit_capacity: IDL.Nat64,
     commit_page_write: IDL.Nat64,
-    commit_table_write: IDL.Nat64,
     commit_superblock_store: IDL.Nat64,
   });
   const BenchGrowthProfileReport = IDL.Record({
@@ -141,17 +127,36 @@ const idlFactory = ({ IDL }) => {
     stable_data_write_bytes: IDL.Nat64,
     stable_grow_calls: IDL.Nat64,
     stable_grow_pages: IDL.Nat64,
-    page_table_root_hits: IDL.Nat64,
-    page_table_root_misses: IDL.Nat64,
-    page_table_segment_hits: IDL.Nat64,
-    page_table_segment_misses: IDL.Nat64,
     superblock_loads: IDL.Nat64,
     commit_load: IDL.Nat64,
-    commit_build_segments: IDL.Nat64,
     commit_capacity: IDL.Nat64,
     commit_page_write: IDL.Nat64,
-    commit_table_write: IDL.Nat64,
     commit_superblock_store: IDL.Nat64,
+  });
+  const BenchCapacityGrowthReport = IDL.Record({
+    rows: IDL.Nat64,
+    writes: IDL.Nat64,
+    instructions: IDL.Nat64,
+    checksum: IDL.Nat64,
+    db_size: IDL.Nat64,
+    stable_pages: IDL.Nat64,
+    stable_bytes: IDL.Nat64,
+    db_size_before: IDL.Nat64,
+    db_size_after: IDL.Nat64,
+    db_base_offset_before: IDL.Nat64,
+    db_base_offset_after: IDL.Nat64,
+    page_table_offset_before: IDL.Nat64,
+    page_table_offset_after: IDL.Nat64,
+    page_table_bytes_before: IDL.Nat64,
+    page_table_bytes_after: IDL.Nat64,
+    stable_pages_before: IDL.Nat64,
+    stable_pages_after: IDL.Nat64,
+    allocated_bytes_before: IDL.Nat64,
+    allocated_bytes_after: IDL.Nat64,
+    orphan_bytes_estimate_before: IDL.Nat64,
+    orphan_bytes_estimate_after: IDL.Nat64,
+    stable_grow_calls: IDL.Nat64,
+    stable_grow_pages: IDL.Nat64,
   });
   const DbStatsReport = IDL.Record({
     db_size: IDL.Nat64,
@@ -195,6 +200,11 @@ const idlFactory = ({ IDL }) => {
     bench_growth_profile: IDL.Func(
       [IDL.Nat32, IDL.Nat32],
       [result(BenchGrowthProfileReport)],
+      [],
+    ),
+    bench_capacity_growth_guard: IDL.Func(
+      [IDL.Nat32, IDL.Nat32],
+      [result(BenchCapacityGrowthReport)],
       [],
     ),
   });
@@ -354,7 +364,21 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
     const growthProfile = await scenario(pic, "growth_profile_1000_20", async (actor) =>
       callReport("bench_growth_profile_1000_20", actor.bench_growth_profile(1_000, 20)),
     );
-    assertGrowthProfile(growth1k, growthProfile);
+    assertGrowthProfile(growth1k, growthProfile, 20);
+    const capacity1k = await scenario(pic, "capacity_growth_1000_128", async (actor) =>
+      callReport(
+        "bench_capacity_growth_guard_1000_128",
+        actor.bench_capacity_growth_guard(1_000, 128),
+      ),
+    );
+    assertCapacityGrowthGuard(capacity1k);
+    const capacity5k = await scenario(pic, "capacity_growth_5000_256", async (actor) =>
+      callReport(
+        "bench_capacity_growth_guard_5000_256",
+        actor.bench_capacity_growth_guard(5_000, 256),
+      ),
+    );
+    assertCapacityGrowthGuard(capacity5k);
   } finally {
     await pic.tearDown();
     await server.stop();
@@ -494,13 +518,18 @@ function assertWriteProfile(write, profile) {
 
   assert(profile.x_write_calls > 0n, "bench_write_profile reported no xWrite calls");
   assert(profile.stable_data_write_calls > 0n, "bench_write_profile reported no stable writes");
+  assert(profile.commit_load > 0n, "bench_write_profile reported no commit load work");
+  assert(profile.commit_capacity > 0n, "bench_write_profile reported no commit capacity work");
+  assert(profile.commit_page_write > 0n, "bench_write_profile reported no commit page write work");
+  assert(
+    profile.commit_superblock_store > 0n,
+    "bench_write_profile reported no commit superblock store work",
+  );
 
   const commitParts =
     profile.commit_load +
-    profile.commit_build_segments +
     profile.commit_capacity +
     profile.commit_page_write +
-    profile.commit_table_write +
     profile.commit_superblock_store;
   assert(commitParts > 0n, "bench_write_profile reported no commit work");
   assert(
@@ -509,8 +538,10 @@ function assertWriteProfile(write, profile) {
   );
 }
 
-function assertGrowthProfile(growth, profile) {
+function assertGrowthProfile(growth, profile, expectedWrites) {
   assert.equal(profile.rows, growth.rows, "growth profile row count differs");
+  assert.equal(growth.checksum, BigInt(expectedWrites), "growth write count differs");
+  assert.equal(profile.writes, BigInt(expectedWrites), "growth profile expected write count differs");
   assert.equal(profile.writes, growth.checksum, "growth profile write count differs");
   assert.equal(profile.checksum, growth.checksum, "growth profile checksum differs");
   assert(
@@ -535,19 +566,46 @@ function assertGrowthProfile(growth, profile) {
   assert(profile.execute_total > 0n, "bench_growth_profile reported no execute work");
   assert(profile.x_write_calls > 0n, "bench_growth_profile reported no xWrite calls");
   assert(profile.stable_data_write_calls > 0n, "bench_growth_profile reported no stable writes");
+  assert(profile.commit_load > 0n, "bench_growth_profile reported no commit load work");
+  assert(profile.commit_capacity > 0n, "bench_growth_profile reported no commit capacity work");
+  assert(profile.commit_page_write > 0n, "bench_growth_profile reported no commit page write work");
+  assert(
+    profile.commit_superblock_store > 0n,
+    "bench_growth_profile reported no commit superblock store work",
+  );
 
   const commitParts =
     profile.commit_load +
-    profile.commit_build_segments +
     profile.commit_capacity +
     profile.commit_page_write +
-    profile.commit_table_write +
     profile.commit_superblock_store;
   assert(commitParts > 0n, "bench_growth_profile reported no commit work");
   assert(
     commitParts <= profile.instructions,
     `growth commit timings exceed total instructions: commitParts=${commitParts}, profile=${formatReport(profile)}`,
   );
+}
+
+function assertCapacityGrowthGuard(report) {
+  assert.equal(report.db_size_after, report.db_size_before, "db size changed");
+  assert.equal(report.db_base_offset_after, report.db_base_offset_before, "db base moved");
+  assert.equal(report.page_table_offset_before, 0n, "page table offset was present before");
+  assert.equal(report.page_table_offset_after, 0n, "page table offset was present after");
+  assert.equal(report.page_table_bytes_before, 0n, "page table bytes were present before");
+  assert.equal(report.page_table_bytes_after, 0n, "page table bytes were present after");
+  assert.equal(report.stable_pages_after, report.stable_pages_before, "stable pages grew");
+  assert.equal(
+    report.allocated_bytes_after,
+    report.allocated_bytes_before,
+    "allocated bytes grew",
+  );
+  assert.equal(
+    report.orphan_bytes_estimate_after,
+    report.orphan_bytes_estimate_before,
+    "orphan bytes estimate changed",
+  );
+  assert.equal(report.stable_grow_calls, 0n, "stable grow was called");
+  assert.equal(report.stable_grow_pages, 0n, "stable grow allocated pages");
 }
 
 function formatReport(report) {
@@ -579,10 +637,6 @@ function formatReport(report) {
       `x_read_bytes=${report.x_read_bytes}`,
       `stable_data_read_calls=${report.stable_data_read_calls}`,
       `stable_data_read_bytes=${report.stable_data_read_bytes}`,
-      `page_table_root_hits=${report.page_table_root_hits}`,
-      `page_table_root_misses=${report.page_table_root_misses}`,
-      `page_table_segment_hits=${report.page_table_segment_hits}`,
-      `page_table_segment_misses=${report.page_table_segment_misses}`,
       `superblock_loads=${report.superblock_loads}`,
     );
   }
@@ -599,10 +653,6 @@ function formatReport(report) {
       `x_read_bytes=${report.x_read_bytes}`,
       `stable_data_read_calls=${report.stable_data_read_calls}`,
       `stable_data_read_bytes=${report.stable_data_read_bytes}`,
-      `page_table_root_hits=${report.page_table_root_hits}`,
-      `page_table_root_misses=${report.page_table_root_misses}`,
-      `page_table_segment_hits=${report.page_table_segment_hits}`,
-      `page_table_segment_misses=${report.page_table_segment_misses}`,
       `superblock_loads=${report.superblock_loads}`,
     );
   }
@@ -632,17 +682,31 @@ function formatReport(report) {
       `stable_data_write_bytes=${report.stable_data_write_bytes}`,
       `stable_grow_calls=${report.stable_grow_calls}`,
       `stable_grow_pages=${report.stable_grow_pages}`,
-      `page_table_root_hits=${report.page_table_root_hits}`,
-      `page_table_root_misses=${report.page_table_root_misses}`,
-      `page_table_segment_hits=${report.page_table_segment_hits}`,
-      `page_table_segment_misses=${report.page_table_segment_misses}`,
       `superblock_loads=${report.superblock_loads}`,
       `commit_load=${report.commit_load}`,
-      `commit_build_segments=${report.commit_build_segments}`,
       `commit_capacity=${report.commit_capacity}`,
       `commit_page_write=${report.commit_page_write}`,
-      `commit_table_write=${report.commit_table_write}`,
       `commit_superblock_store=${report.commit_superblock_store}`,
+    );
+  }
+  if ("stable_grow_calls" in report && !("open_update" in report)) {
+    fields.push(
+      `db_size_before=${report.db_size_before}`,
+      `db_size_after=${report.db_size_after}`,
+      `db_base_offset_before=${report.db_base_offset_before}`,
+      `db_base_offset_after=${report.db_base_offset_after}`,
+      `page_table_offset_before=${report.page_table_offset_before}`,
+      `page_table_offset_after=${report.page_table_offset_after}`,
+      `page_table_bytes_before=${report.page_table_bytes_before}`,
+      `page_table_bytes_after=${report.page_table_bytes_after}`,
+      `stable_pages_before=${report.stable_pages_before}`,
+      `stable_pages_after=${report.stable_pages_after}`,
+      `allocated_bytes_before=${report.allocated_bytes_before}`,
+      `allocated_bytes_after=${report.allocated_bytes_after}`,
+      `orphan_bytes_estimate_before=${report.orphan_bytes_estimate_before}`,
+      `orphan_bytes_estimate_after=${report.orphan_bytes_estimate_after}`,
+      `stable_grow_calls=${report.stable_grow_calls}`,
+      `stable_grow_pages=${report.stable_grow_pages}`,
     );
   }
   return fields.filter(Boolean).join(", ");

@@ -364,7 +364,7 @@ unsafe extern "C" fn x_device_characteristics(file: *mut ffi::sqlite3_file) -> c
     crate::read_metrics::record_x_device_characteristics();
     let file = &mut *file.cast::<IcStableFile>();
     if file.powersafe_overwrite {
-        // Stable writes affect only the requested byte range; page-map publish
+        // Stable writes affect only the requested byte range; image publish
         // happens separately through the superblock.
         ffi::SQLITE_IOCAP_POWERSAFE_OVERWRITE
     } else {

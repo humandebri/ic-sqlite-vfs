@@ -12,6 +12,7 @@ thread_local! {
     static LOCK_LEVEL: RefCell<Vec<(ContextId, c_int)>> = const { RefCell::new(Vec::new()) };
 }
 
+#[cfg(test)]
 pub fn lock(level: c_int) {
     let Ok(context) = crate::stable::memory::active_context_id() else {
         return;
@@ -34,6 +35,7 @@ pub(crate) fn lock_for(context: ContextId, level: c_int) {
     });
 }
 
+#[cfg(test)]
 pub fn unlock(level: c_int) {
     let Ok(context) = crate::stable::memory::active_context_id() else {
         return;
@@ -54,6 +56,7 @@ pub(crate) fn unlock_for(context: ContextId, level: c_int) {
     });
 }
 
+#[cfg(test)]
 pub fn has_reserved() -> bool {
     level() >= crate::sqlite_vfs::ffi::SQLITE_LOCK_RESERVED
 }
@@ -62,6 +65,7 @@ pub(crate) fn has_reserved_for(context: ContextId) -> bool {
     level_for(context) >= crate::sqlite_vfs::ffi::SQLITE_LOCK_RESERVED
 }
 
+#[cfg(test)]
 pub fn level() -> c_int {
     let Ok(context) = crate::stable::memory::active_context_id() else {
         return 0;
@@ -85,14 +89,14 @@ pub(crate) fn level_for(context: ContextId) -> c_int {
     })
 }
 
-#[cfg(any(test, debug_assertions))]
+#[allow(dead_code)]
 pub fn reset_for_tests() {
     LOCK_LEVEL.with(|levels| levels.borrow_mut().clear());
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{has_reserved, lock, reset_for_tests};
+    use super::{has_reserved, level, lock, reset_for_tests, unlock};
     use crate::sqlite_vfs::ffi;
     use crate::stable::memory;
     use crate::stable::memory_manager::{MemoryId, MemoryManager};
@@ -103,12 +107,16 @@ mod tests {
         memory::reset_for_tests();
         reset_for_tests();
         let manager = MemoryManager::init(DefaultMemoryImpl::default());
-        let first = memory::init_context(manager.get(MemoryId::new(32)));
-        let second = memory::init_context(manager.get(MemoryId::new(33)));
+        let first = memory::init_context(manager.get(MemoryId::new(32))).unwrap();
+        let second = memory::init_context(manager.get(MemoryId::new(33))).unwrap();
 
         memory::with_context(first, || {
             lock(ffi::SQLITE_LOCK_RESERVED);
             assert!(has_reserved());
+            assert_eq!(level(), ffi::SQLITE_LOCK_RESERVED);
+            unlock(ffi::SQLITE_LOCK_SHARED);
+            assert!(!has_reserved());
+            assert_eq!(level(), ffi::SQLITE_LOCK_SHARED);
         });
         memory::with_context(second, || {
             assert!(!has_reserved());

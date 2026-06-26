@@ -15,7 +15,10 @@ const MIGRATIONS: &[Migration] = &[Migration {
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
-        RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
+        RefCell::new(
+            MemoryManager::init_strict(DefaultMemoryImpl::default())
+                .expect("stable memory must either be empty or use MemoryManager layout"),
+        );
 }
 
 #[ic_cdk::init]
