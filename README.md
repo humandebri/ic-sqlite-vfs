@@ -73,8 +73,7 @@ virtual offset 64KiB..       fresh/normal in-place SQLite image bytes
 Fresh images start the SQLite bytes at `64KiB`.
 
 The crate does not own the canister's raw stable memory. Raw stable memory is
-managed by a `MemoryManager<DefaultMemoryImpl>` with the same stable layout as
-the `ic-stable-structures` 0.7 MemoryManager.
+managed by this crate's `MemoryManager<DefaultMemoryImpl>` layout.
 Use `MemoryManager::init_strict` for upgrade-sensitive deployments. The
 non-strict `MemoryManager::init` compatibility path may initialize MemoryManager
 metadata on non-empty raw stable memory that does not already contain a
@@ -106,7 +105,8 @@ the same `MemoryId` twice in one Wasm instance returns
 `StableMemoryError::MemoryAlreadyRegistered`.
 
 The bundled MemoryManager-compatible layout supports `MemoryId` values
-`0..=254`; `255` is reserved internally as the unallocated marker.
+`0..=32767`; higher `u16` values are reserved, and `u16::MAX` is the internal
+unallocated marker.
 Per-archive or per-slot databases are therefore a bounded design: one slot uses
 one `MemoryId`, one `DbHandle`, and one SQLite image. The slot catalog
 (`archive_id -> slot_id -> MemoryId`) belongs to the consuming canister and

@@ -63,13 +63,12 @@ MemoryManager initialization in upgrade-sensitive code. The guard protects
 existing `ic-rusqlite` raw SQLite images whose first bytes are
 `SQLite format 3\0`; this release has no direct migration path for those images.
 
-The bundled MemoryManager-compatible `MemoryId` is `u8`-backed. Values
-`0..=254` are usable by applications. `MemoryId::new(255)` is invalid because
-`255` is the internal unallocated-bucket marker. This crate keeps the
-`ic-stable-structures` 0.7 MemoryManager stable-memory layout. If an existing
-MemoryManager-compatible image is corrupt, internally inconsistent, or
-physically truncated, initialization rejects it by panic/trap rather than a
-recoverable DB migration.
+The bundled MemoryManager-compatible `MemoryId` is `u16`-backed. Values
+`0..=32767` are usable by applications. Higher `u16` values are reserved, and
+`u16::MAX` is the internal unallocated-bucket marker. If an existing
+MemoryManager-compatible image is from an unsupported layout version, corrupt,
+internally inconsistent, or physically truncated, initialization rejects it by
+panic/trap rather than a recoverable DB migration.
 
 `MemoryManager::init_strict(memory)` is the safe initializer for callers that
 want non-empty / non-MemoryManager memory and invalid layouts as typed errors
@@ -181,8 +180,7 @@ The `2.0` line freezes these surfaces for all `2.x` releases:
   makes them logical data again
 - v6 direct initialization returns
   `StableMemoryError::UnsupportedLayoutVersion(6)`
-- bundled MemoryManager-compatible layout for `MemoryId` values `0..=254`,
-  matching the `ic-stable-structures` 0.7 memory-manager layout
+- bundled MemoryManager-compatible layout for `MemoryId` values `0..=32767`
 - public Rust API: top-level re-exports, `config`, `db`, and documented
   `Db`/`DbHandle` facade types. Low-level `read_metrics`, `sqlite_vfs`, and
   `stable` modules are not public compatibility surface

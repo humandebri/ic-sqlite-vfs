@@ -7,17 +7,19 @@ use proptest::test_runner::{Config, TestRunner};
 use std::cell::{Cell, RefCell};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
-use upstream_ic_stable_structures::memory_manager::{
-    MemoryId as UpstreamMemoryId, MemoryManager as UpstreamMemoryManager,
-};
-use upstream_ic_stable_structures::Memory as UpstreamMemory;
+
+const MAX_MEMORY_ID: u16 = 32_767;
+const UNALLOCATED_BUCKET_MARKER: u16 = u16::MAX;
+const HEADER_SIZE: u64 = 3 + 1 + 2 + 2 + 32 + 32_768 * 8;
+const BUCKET_OWNER_SIZE: u64 = 2;
+const TEST_MEMORY_IDS: [u16; 5] = [0, 1, 32_765, 32_766, 32_767];
 
 #[test]
 fn memory_manager_reloads_interleaved_bucket_layout() {
     let backing = DefaultMemoryImpl::default();
     let manager = MemoryManager::init_with_bucket_size(backing.clone(), 1);
-    let first = manager.get(MemoryId::new(1));
-    let second = manager.get(MemoryId::new(2));
+    let first = manager.get(MemoryId::new(MAX_MEMORY_ID - 1));
+    let second = manager.get(MemoryId::new(MAX_MEMORY_ID));
 
     assert_eq!(first.grow(2), 0);
     assert_eq!(second.grow(1), 0);
@@ -29,8 +31,8 @@ fn memory_manager_reloads_interleaved_bucket_layout() {
     assert_eq!(&magic, b"MGR");
 
     let reloaded = MemoryManager::init(backing);
-    let first = reloaded.get(MemoryId::new(1));
-    let second = reloaded.get(MemoryId::new(2));
+    let first = reloaded.get(MemoryId::new(MAX_MEMORY_ID - 1));
+    let second = reloaded.get(MemoryId::new(MAX_MEMORY_ID));
     let mut first_bytes = [0_u8; 3];
     let mut second_bytes = [0_u8; 3];
 
@@ -42,13 +44,42 @@ fn memory_manager_reloads_interleaved_bucket_layout() {
 }
 
 #[test]
-fn memory_manager_matches_upstream_layout_for_valid_operations() {
-    assert_matches_upstream_layout(1);
-    assert_matches_upstream_layout(128);
+fn memory_manager_reloads_highest_memory_id() {
+    let backing = DefaultMemoryImpl::default();
+    let manager = MemoryManager::init_with_bucket_size(backing.clone(), 1);
+    let memory = manager.get(MemoryId::new(MAX_MEMORY_ID));
+
+    assert_eq!(memory.grow(1), 0);
+    memory.write(STABLE_PAGE_SIZE - 4, &[9, 8, 7, 6]);
+
+    let reloaded = MemoryManager::init(backing);
+    let memory = reloaded.get(MemoryId::new(MAX_MEMORY_ID));
+    let mut bytes = [0_u8; 4];
+    memory.read(STABLE_PAGE_SIZE - 4, &mut bytes);
+
+    assert_eq!(bytes, [9, 8, 7, 6]);
 }
 
 #[test]
-fn pbt_memory_manager_matches_upstream_layout_for_random_operations() {
+#[should_panic]
+fn memory_id_rejects_first_reserved_id() {
+    let _ = MemoryId::new(MAX_MEMORY_ID + 1);
+}
+
+#[test]
+#[should_panic]
+fn memory_id_rejects_unallocated_marker_id() {
+    let _ = MemoryId::new(UNALLOCATED_BUCKET_MARKER);
+}
+
+#[test]
+fn memory_manager_reloads_valid_operations() {
+    assert_local_layout_roundtrip(1);
+    assert_local_layout_roundtrip(128);
+}
+
+#[test]
+fn pbt_memory_manager_reloads_random_operations() {
     let mut runner = TestRunner::new(Config {
         cases: 32,
         ..Config::default()
@@ -61,7 +92,7 @@ fn pbt_memory_manager_matches_upstream_layout_for_random_operations() {
                 operation_sequence(),
             ),
             |(bucket_size, operations)| {
-                assert_random_ops_match_upstream(bucket_size, &operations);
+                assert_random_ops_survive_reload(bucket_size, &operations);
                 Ok(())
             },
         )
@@ -105,20 +136,20 @@ fn init_with_bucket_size_rejects_zero_bucket_size() {
 
 #[test]
 fn grow_failure_returns_minus_one_without_metadata_changes() {
-    let backing = FailingGrowMemory::new(1);
+    let backing = FailingGrowMemory::new(6);
     let manager = MemoryManager::init_with_bucket_size(backing.clone(), 1);
     let memory = manager.get(MemoryId::new(0));
 
     assert_eq!(memory.grow(1), -1);
     assert_eq!(memory.size(), 0);
-    assert_eq!(backing.allocation_owner(0), 255);
+    assert_eq!(backing.allocation_owner(0), UNALLOCATED_BUCKET_MARKER);
 
-    backing.set_max_pages(2);
+    backing.set_max_pages(7);
     let reloaded = MemoryManager::init(backing.clone());
     let reloaded_memory = reloaded.get(MemoryId::new(0));
 
     assert_eq!(reloaded_memory.size(), 0);
-    assert_eq!(backing.allocation_owner(0), 255);
+    assert_eq!(backing.allocation_owner(0), UNALLOCATED_BUCKET_MARKER);
 }
 
 #[test]
@@ -141,8 +172,8 @@ fn strict_init_rejects_non_memory_manager_layout() {
 #[test]
 fn strict_init_returns_error_for_invalid_memory_manager_layout() {
     let backing = DefaultMemoryImpl::default();
-    assert_eq!(Memory::grow(&backing, 1), 0);
-    Memory::write(&backing, 0, &[b'M', b'G', b'R', 1]);
+    assert_eq!(Memory::grow(&backing, 6), 0);
+    Memory::write(&backing, 0, &[b'M', b'G', b'R', 2]);
 
     let error = match MemoryManager::init_strict(backing) {
         Ok(_) => panic!("strict init accepted invalid layout"),
@@ -153,6 +184,24 @@ fn strict_init_returns_error_for_invalid_memory_manager_layout() {
         error,
         ic_sqlite_vfs::MemoryManagerInitError::InvalidLayout(message)
             if message.contains("bucket size is zero")
+    ));
+}
+
+#[test]
+fn strict_init_rejects_old_memory_manager_version() {
+    let backing = DefaultMemoryImpl::default();
+    assert_eq!(Memory::grow(&backing, 6), 0);
+    Memory::write(&backing, 0, &[b'M', b'G', b'R', 1]);
+
+    let error = match MemoryManager::init_strict(backing) {
+        Ok(_) => panic!("strict init accepted old memory-manager layout"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::MemoryManagerInitError::InvalidLayout(message)
+            if message.contains("Unsupported version")
     ));
 }
 
@@ -174,31 +223,21 @@ fn grow_metadata_write_panic_rolls_back_allocation_table() {
         let reloaded = MemoryManager::init(backing.clone());
         let reloaded_memory = reloaded.get(MemoryId::new(0));
         assert_eq!(reloaded_memory.size(), 0);
-        assert_eq!(backing.allocation_owner(0), 255);
+        assert_eq!(backing.allocation_owner(0), UNALLOCATED_BUCKET_MARKER);
     }
 }
 
-fn assert_matches_upstream_layout(bucket_size_in_pages: u16) {
+fn assert_local_layout_roundtrip(bucket_size_in_pages: u16) {
     let local_backing = DefaultMemoryImpl::default();
-    let upstream_backing = upstream_ic_stable_structures::VectorMemory::default();
     let local_manager =
         MemoryManager::init_with_bucket_size(local_backing.clone(), bucket_size_in_pages);
-    let upstream_manager = UpstreamMemoryManager::init_with_bucket_size(
-        upstream_backing.clone(),
-        bucket_size_in_pages,
-    );
-    let local_memories: Vec<_> = (0_u8..5)
+    let local_memories: Vec<_> = TEST_MEMORY_IDS
+        .iter()
+        .copied()
         .map(|id| local_manager.get(MemoryId::new(id)))
         .collect();
-    let upstream_memories: Vec<_> = (0_u8..5)
-        .map(|id| upstream_manager.get(UpstreamMemoryId::new(id)))
-        .collect();
     let mut sizes = [0_u64; 5];
-
-    assert_eq!(
-        local_backing.borrow().as_slice(),
-        upstream_backing.borrow().as_slice()
-    );
+    let mut writes = Vec::new();
 
     for step in 0..384_u64 {
         let id = usize::try_from(step % sizes.len() as u64).unwrap();
@@ -206,9 +245,8 @@ fn assert_matches_upstream_layout(bucket_size_in_pages: u16) {
             0 => {
                 let pages = (step.wrapping_mul(7) % 5) + 1;
                 let local_old = Memory::grow(&local_memories[id], pages);
-                let upstream_old = UpstreamMemory::grow(&upstream_memories[id], pages);
                 assert_eq!(
-                    local_old, upstream_old,
+                    local_old, sizes[id] as i64,
                     "grow old size mismatch at step {step}"
                 );
                 sizes[id] += pages;
@@ -220,18 +258,15 @@ fn assert_matches_upstream_layout(bucket_size_in_pages: u16) {
                 let bytes = deterministic_bytes(step, len);
 
                 Memory::write(&local_memories[id], offset, &bytes);
-                UpstreamMemory::write(&upstream_memories[id], offset, &bytes);
+                writes.push((id, offset, bytes));
             }
             _ if sizes[id] > 0 => {
                 let capacity = sizes[id] * STABLE_PAGE_SIZE;
                 let len = ((step.wrapping_mul(17) % 2048) + 1).min(capacity) as usize;
                 let offset = step.wrapping_mul(4_099) % (capacity - len as u64 + 1);
                 let mut local = vec![0_u8; len];
-                let mut upstream = vec![0_u8; len];
 
                 Memory::read(&local_memories[id], offset, &mut local);
-                UpstreamMemory::read(&upstream_memories[id], offset, &mut upstream);
-                assert_eq!(local, upstream, "read mismatch at step {step}");
             }
             _ => {}
         }
@@ -239,34 +274,66 @@ fn assert_matches_upstream_layout(bucket_size_in_pages: u16) {
         for memory_id in 0..sizes.len() {
             assert_eq!(
                 Memory::size(&local_memories[memory_id]),
-                UpstreamMemory::size(&upstream_memories[memory_id]),
+                sizes[memory_id],
                 "memory size mismatch at step {step}"
             );
         }
-        assert_eq!(
-            local_backing.borrow().as_slice(),
-            upstream_backing.borrow().as_slice(),
-            "stable layout diverged at step {step}"
-        );
     }
 
-    assert_can_reload_with_either_manager(local_backing.clone(), upstream_backing.clone(), &sizes);
+    assert_can_reload_manager(local_backing, &sizes, &writes);
 }
 
-fn assert_can_reload_with_either_manager(
+fn assert_can_reload_manager(
     local_backing: DefaultMemoryImpl,
-    upstream_backing: upstream_ic_stable_structures::VectorMemory,
     sizes: &[u64; 5],
+    writes: &[(usize, u64, Vec<u8>)],
 ) {
-    let local_from_upstream = MemoryManager::init(upstream_backing.clone());
-    let upstream_from_local = UpstreamMemoryManager::init(local_backing.clone());
+    let reloaded = MemoryManager::init(local_backing);
+    let memories: Vec<_> = TEST_MEMORY_IDS
+        .iter()
+        .copied()
+        .map(|id| reloaded.get(MemoryId::new(id)))
+        .collect();
 
-    for id in 0_u8..5 {
-        let local = local_from_upstream.get(MemoryId::new(id));
-        let upstream = upstream_from_local.get(UpstreamMemoryId::new(id));
-        assert_eq!(Memory::size(&local), sizes[id as usize]);
-        assert_eq!(UpstreamMemory::size(&upstream), sizes[id as usize]);
+    for id in 0..sizes.len() {
+        assert_eq!(Memory::size(&memories[id]), sizes[id]);
     }
+    for (write_index, (id, offset, bytes)) in writes.iter().enumerate() {
+        let expected = expected_bytes_after_later_writes(writes, write_index);
+        let mut reloaded_bytes = vec![0_u8; bytes.len()];
+        Memory::read(&memories[*id], *offset, &mut reloaded_bytes);
+        assert!(
+            reloaded_bytes == expected,
+            "reloaded bytes mismatch for id {id} offset {offset} len {}",
+            bytes.len()
+        );
+    }
+}
+
+fn expected_bytes_after_later_writes(
+    writes: &[(usize, u64, Vec<u8>)],
+    write_index: usize,
+) -> Vec<u8> {
+    let (id, offset, bytes) = &writes[write_index];
+    let mut expected = bytes.clone();
+    let end = *offset + u64::try_from(bytes.len()).unwrap();
+    for (later_id, later_offset, later_bytes) in &writes[write_index + 1..] {
+        if later_id != id {
+            continue;
+        }
+        let later_end = *later_offset + u64::try_from(later_bytes.len()).unwrap();
+        let overlap_start = (*offset).max(*later_offset);
+        let overlap_end = end.min(later_end);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+        let expected_start = usize::try_from(overlap_start - *offset).unwrap();
+        let later_start = usize::try_from(overlap_start - *later_offset).unwrap();
+        let overlap_len = usize::try_from(overlap_end - overlap_start).unwrap();
+        expected[expected_start..expected_start + overlap_len]
+            .copy_from_slice(&later_bytes[later_start..later_start + overlap_len]);
+    }
+    expected
 }
 
 #[derive(Clone, Debug)]
@@ -309,31 +376,25 @@ fn operation_sequence() -> impl Strategy<Value = Vec<Operation>> {
     proptest::collection::vec(prop_oneof![grow, write, read], 0..160)
 }
 
-fn assert_random_ops_match_upstream(bucket_size_in_pages: u16, operations: &[Operation]) {
+fn assert_random_ops_survive_reload(bucket_size_in_pages: u16, operations: &[Operation]) {
     let local_backing = DefaultMemoryImpl::default();
-    let upstream_backing = upstream_ic_stable_structures::VectorMemory::default();
     let local_manager =
         MemoryManager::init_with_bucket_size(local_backing.clone(), bucket_size_in_pages);
-    let upstream_manager = UpstreamMemoryManager::init_with_bucket_size(
-        upstream_backing.clone(),
-        bucket_size_in_pages,
-    );
-    let local_memories: Vec<_> = (0_u8..5)
+    let local_memories: Vec<_> = TEST_MEMORY_IDS
+        .iter()
+        .copied()
         .map(|id| local_manager.get(MemoryId::new(id)))
         .collect();
-    let upstream_memories: Vec<_> = (0_u8..5)
-        .map(|id| upstream_manager.get(UpstreamMemoryId::new(id)))
-        .collect();
     let mut sizes = [0_u64; 5];
+    let mut writes = Vec::new();
 
     for (step, operation) in operations.iter().enumerate() {
         match *operation {
             Operation::Grow { id, pages_seed } => {
                 let pages = projected_grow_pages(pages_seed, bucket_size_in_pages);
                 let local_old = Memory::grow(&local_memories[id], pages);
-                let upstream_old = UpstreamMemory::grow(&upstream_memories[id], pages);
                 assert_eq!(
-                    local_old, upstream_old,
+                    local_old, sizes[id] as i64,
                     "grow old size mismatch at step {step}"
                 );
                 if local_old >= 0 {
@@ -352,7 +413,7 @@ fn assert_random_ops_match_upstream(bucket_size_in_pages: u16, operations: &[Ope
                 let bytes = deterministic_bytes(byte_seed, len);
 
                 Memory::write(&local_memories[id], offset, &bytes);
-                UpstreamMemory::write(&upstream_memories[id], offset, &bytes);
+                writes.push((id, offset, bytes));
             }
             Operation::Read {
                 id,
@@ -363,11 +424,8 @@ fn assert_random_ops_match_upstream(bucket_size_in_pages: u16, operations: &[Ope
                 let len = projected_len(len_seed, capacity, bucket_size_in_pages);
                 let offset = projected_offset(offset_seed, capacity, len, bucket_size_in_pages);
                 let mut local = vec![0_u8; len];
-                let mut upstream = vec![0_u8; len];
 
                 Memory::read(&local_memories[id], offset, &mut local);
-                UpstreamMemory::read(&upstream_memories[id], offset, &mut upstream);
-                assert_eq!(local, upstream, "read mismatch at step {step}");
             }
             _ => {}
         }
@@ -375,18 +433,13 @@ fn assert_random_ops_match_upstream(bucket_size_in_pages: u16, operations: &[Ope
         for memory_id in 0..sizes.len() {
             assert_eq!(
                 Memory::size(&local_memories[memory_id]),
-                UpstreamMemory::size(&upstream_memories[memory_id]),
+                sizes[memory_id],
                 "memory size mismatch at step {step}"
             );
         }
-        assert_eq!(
-            local_backing.borrow().as_slice(),
-            upstream_backing.borrow().as_slice(),
-            "stable layout diverged at step {step}"
-        );
     }
 
-    assert_can_reload_with_either_manager(local_backing, upstream_backing, &sizes);
+    assert_can_reload_manager(local_backing, &sizes, &writes);
 }
 
 fn projected_grow_pages(seed: u64, bucket_size_in_pages: u16) -> u64 {
@@ -460,10 +513,9 @@ impl FailingGrowMemory {
         self.max_pages.set(max_pages);
     }
 
-    fn allocation_owner(&self, bucket: u64) -> u8 {
-        const HEADER_SIZE: u64 = 3 + 1 + 2 + 2 + 32 + 255 * 8;
-
-        self.bytes.borrow()[(HEADER_SIZE + bucket) as usize]
+    fn allocation_owner(&self, bucket: u64) -> u16 {
+        let offset = usize::try_from(HEADER_SIZE + bucket * BUCKET_OWNER_SIZE).unwrap();
+        u16::from_le_bytes(self.bytes.borrow()[offset..offset + 2].try_into().unwrap())
     }
 }
 
@@ -517,10 +569,9 @@ impl PanickingWriteMemory {
         self.write_count.set(0);
     }
 
-    fn allocation_owner(&self, bucket: u64) -> u8 {
-        const HEADER_SIZE: u64 = 3 + 1 + 2 + 2 + 32 + 255 * 8;
-
-        self.bytes.borrow()[(HEADER_SIZE + bucket) as usize]
+    fn allocation_owner(&self, bucket: u64) -> u16 {
+        let offset = usize::try_from(HEADER_SIZE + bucket * BUCKET_OWNER_SIZE).unwrap();
+        u16::from_le_bytes(self.bytes.borrow()[offset..offset + 2].try_into().unwrap())
     }
 }
 

@@ -1,6 +1,6 @@
 //! Shared constants and helpers for the MemoryManager-compatible layout.
 //!
-//! Kept separate so the forked manager stays small and the byte format remains
+//! Kept separate so the local manager stays small and the byte format remains
 //! visible in one place.
 
 use crate::config::STABLE_PAGE_SIZE;
@@ -8,22 +8,30 @@ use crate::stable::raw_memory::Memory;
 use std::cell::Cell;
 
 pub(super) const MAGIC: &[u8; 3] = b"MGR";
-pub(super) const LAYOUT_VERSION: u8 = 1;
-pub(super) const MAX_NUM_MEMORIES: u8 = 255;
+pub(super) const LAYOUT_VERSION: u8 = 2;
+pub(super) const MAX_MEMORY_ID: u16 = 32_767;
+pub(super) const MAX_NUM_MEMORIES: usize = 32_768;
+pub(super) const MAX_NUM_MEMORIES_U64: u64 = 32_768;
 pub(super) const MAX_NUM_BUCKETS: u64 = 32_768;
 pub(super) const BUCKET_SIZE_IN_PAGES: u64 = 128;
-pub(super) const UNALLOCATED_BUCKET_MARKER: u8 = MAX_NUM_MEMORIES;
-pub(super) const BUCKETS_OFFSET_IN_PAGES: u64 = 1;
+pub(super) const UNALLOCATED_BUCKET_MARKER: u16 = u16::MAX;
+pub(super) const BUCKET_OWNER_SIZE: u64 = 2;
+pub(super) const BUCKET_OWNER_SIZE_USIZE: usize = 2;
 pub(super) const BUCKETS_OFFSET_IN_BYTES: u64 = BUCKETS_OFFSET_IN_PAGES * STABLE_PAGE_SIZE;
 pub(super) const HEADER_RESERVED_BYTES: usize = 32;
-pub(super) const HEADER_SIZE: u64 = 3 + 1 + 2 + 2 + HEADER_RESERVED_BYTES as u64 + 255 * 8;
+pub(super) const HEADER_RESERVED_BYTES_U64: u64 = 32;
+pub(super) const HEADER_SIZE: u64 =
+    3 + 1 + 2 + 2 + HEADER_RESERVED_BYTES_U64 + MAX_NUM_MEMORIES_U64 * 8;
+pub(super) const BUCKET_ALLOCATIONS_SIZE: u64 = MAX_NUM_BUCKETS * BUCKET_OWNER_SIZE;
+pub(super) const BUCKET_ALLOCATIONS_END: u64 = HEADER_SIZE + BUCKET_ALLOCATIONS_SIZE;
+pub(super) const BUCKETS_OFFSET_IN_PAGES: u64 = BUCKET_ALLOCATIONS_END.div_ceil(STABLE_PAGE_SIZE);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct MemoryId(pub(super) u8);
+pub struct MemoryId(pub(super) u16);
 
 impl MemoryId {
-    pub const fn new(id: u8) -> Self {
-        assert!(id != UNALLOCATED_BUCKET_MARKER);
+    pub const fn new(id: u16) -> Self {
+        assert!(id <= MAX_MEMORY_ID);
         Self(id)
     }
 }
@@ -79,7 +87,15 @@ impl BucketCache {
 }
 
 pub(super) fn bucket_allocations_address(id: BucketId) -> u64 {
-    HEADER_SIZE + u64::from(id.0)
+    HEADER_SIZE + u64::from(id.0) * BUCKET_OWNER_SIZE
+}
+
+pub(super) fn encode_bucket_owner(owner: u16) -> [u8; BUCKET_OWNER_SIZE_USIZE] {
+    owner.to_le_bytes()
+}
+
+pub(super) fn read_bucket_owner(bytes: &[u8]) -> u16 {
+    u16::from_le_bytes(bytes.try_into().expect("bucket owner field has 2 bytes"))
 }
 
 pub(super) fn virtual_segment_contains(

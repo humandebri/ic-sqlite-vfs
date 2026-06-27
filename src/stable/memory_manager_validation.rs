@@ -1,19 +1,20 @@
 //! `MemoryManager` load-time consistency checks.
 //!
-//! The stable layout stays byte-compatible with `ic-stable-structures`, but
-//! corrupt images are rejected before they can become in-memory state.
+//! Corrupt or unsupported images are rejected before they can become in-memory
+//! state.
 
 use crate::config::STABLE_PAGE_SIZE;
 use crate::stable::memory_layout::{
-    bucket_allocations_address, read_u64, BucketId, BUCKETS_OFFSET_IN_PAGES, HEADER_RESERVED_BYTES,
-    MAX_NUM_BUCKETS, MAX_NUM_MEMORIES, UNALLOCATED_BUCKET_MARKER,
+    bucket_allocations_address, read_bucket_owner, read_u64, BucketId, BUCKETS_OFFSET_IN_PAGES,
+    BUCKET_ALLOCATIONS_SIZE, HEADER_RESERVED_BYTES, MAX_NUM_BUCKETS, MAX_NUM_MEMORIES,
+    UNALLOCATED_BUCKET_MARKER,
 };
 use crate::stable::raw_memory::Memory;
 
 pub(super) struct LoadedMemoryManager {
     pub(super) allocated_buckets: u16,
     pub(super) bucket_size_in_pages: u16,
-    pub(super) memory_sizes_in_pages: [u64; MAX_NUM_MEMORIES as usize],
+    pub(super) memory_sizes_in_pages: Box<[u64]>,
     pub(super) memory_buckets: Vec<Vec<BucketId>>,
 }
 
@@ -31,6 +32,8 @@ pub(super) enum MemoryManagerLayoutError {
     MemorySizeOverflowsBytes(usize),
     #[error("invalid memory manager allocation table: allocated bucket has no owner")]
     AllocatedBucketHasNoOwner,
+    #[error("invalid memory manager allocation table: allocated bucket has reserved owner {0}")]
+    AllocatedBucketHasReservedOwner(u16),
     #[error("invalid memory manager allocation table: unallocated bucket has owner")]
     UnallocatedBucketHasOwner,
     #[error("invalid memory manager layout: memory {0} size and buckets mismatch")]
@@ -56,13 +59,13 @@ pub(super) fn try_load_validated_layout<M: Memory>(
 
     let memory_sizes_in_pages = read_memory_sizes(header);
     validate_memory_sizes_fit_bytes(&memory_sizes_in_pages)?;
+    validate_backing_memory_size(memory, allocated_buckets, bucket_size_in_pages)?;
     let memory_buckets = read_validated_buckets(memory, allocated_buckets)?;
     validate_bucket_counts(
         bucket_size_in_pages,
         &memory_sizes_in_pages,
         &memory_buckets,
     )?;
-    validate_backing_memory_size(memory, allocated_buckets, bucket_size_in_pages)?;
 
     Ok(LoadedMemoryManager {
         allocated_buckets,
@@ -89,8 +92,8 @@ fn validate_backing_memory_size<M: Memory>(
     Ok(())
 }
 
-fn read_memory_sizes(header: &[u8]) -> [u64; MAX_NUM_MEMORIES as usize] {
-    let mut sizes = [0_u64; MAX_NUM_MEMORIES as usize];
+fn read_memory_sizes(header: &[u8]) -> Box<[u64]> {
+    let mut sizes = vec![0_u64; MAX_NUM_MEMORIES].into_boxed_slice();
     let mut offset = 3 + 1 + 2 + 2 + HEADER_RESERVED_BYTES;
     for size in &mut sizes {
         *size = read_u64(&header[offset..offset + 8]);
@@ -99,9 +102,7 @@ fn read_memory_sizes(header: &[u8]) -> [u64; MAX_NUM_MEMORIES as usize] {
     sizes
 }
 
-fn validate_memory_sizes_fit_bytes(
-    sizes: &[u64; MAX_NUM_MEMORIES as usize],
-) -> Result<(), MemoryManagerLayoutError> {
+fn validate_memory_sizes_fit_bytes(sizes: &[u64]) -> Result<(), MemoryManagerLayoutError> {
     for (id, pages) in sizes.iter().enumerate() {
         if pages.checked_mul(STABLE_PAGE_SIZE).is_none() {
             return Err(MemoryManagerLayoutError::MemorySizeOverflowsBytes(id));
@@ -114,19 +115,35 @@ fn read_validated_buckets<M: Memory>(
     memory: &M,
     allocated_buckets: u16,
 ) -> Result<Vec<Vec<BucketId>>, MemoryManagerLayoutError> {
-    let mut buckets = vec![0_u8; MAX_NUM_BUCKETS as usize];
+    let mut buckets = vec![
+        0_u8;
+        usize::try_from(BUCKET_ALLOCATIONS_SIZE)
+            .expect("bucket allocations table size fits usize")
+    ];
     memory.read(bucket_allocations_address(BucketId(0)), &mut buckets);
 
     let allocated = usize::from(allocated_buckets);
-    let mut memory_buckets = vec![Vec::new(); MAX_NUM_MEMORIES as usize];
-    for (bucket, owner) in buckets[..allocated].iter().copied().enumerate() {
-        if owner == MAX_NUM_MEMORIES {
+    let allocated_bytes = allocated
+        .checked_mul(2)
+        .expect("allocated bucket owner table range fits usize");
+    let mut memory_buckets = vec![Vec::new(); MAX_NUM_MEMORIES];
+    for (bucket, owner_bytes) in buckets[..allocated_bytes].chunks_exact(2).enumerate() {
+        let owner = read_bucket_owner(owner_bytes);
+        if owner == UNALLOCATED_BUCKET_MARKER {
             return Err(MemoryManagerLayoutError::AllocatedBucketHasNoOwner);
         }
-        memory_buckets[owner as usize].push(BucketId(bucket as u16));
+        let owner_index = usize::from(owner);
+        if owner_index >= MAX_NUM_MEMORIES {
+            return Err(MemoryManagerLayoutError::AllocatedBucketHasReservedOwner(
+                owner,
+            ));
+        }
+        memory_buckets[owner_index].push(BucketId(
+            u16::try_from(bucket).expect("bucket index fits u16"),
+        ));
     }
-    for owner in &buckets[allocated..] {
-        if *owner != UNALLOCATED_BUCKET_MARKER {
+    for owner_bytes in buckets[allocated_bytes..].chunks_exact(2) {
+        if read_bucket_owner(owner_bytes) != UNALLOCATED_BUCKET_MARKER {
             return Err(MemoryManagerLayoutError::UnallocatedBucketHasOwner);
         }
     }
@@ -135,7 +152,7 @@ fn read_validated_buckets<M: Memory>(
 
 fn validate_bucket_counts(
     bucket_size_in_pages: u16,
-    memory_sizes_in_pages: &[u64; MAX_NUM_MEMORIES as usize],
+    memory_sizes_in_pages: &[u64],
     memory_buckets: &[Vec<BucketId>],
 ) -> Result<(), MemoryManagerLayoutError> {
     let bucket_size = u64::from(bucket_size_in_pages);

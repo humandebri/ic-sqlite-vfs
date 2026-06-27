@@ -167,8 +167,8 @@ src/stable/memory.rs:pub enum StableMemoryError {
 src/stable/memory.rs:pub type DbMemory = VirtualMemory<DefaultMemoryImpl>;
 src/stable/memory.rs:required_pages: u64,
 src/stable/memory.rs:size_bytes: u64,
-src/stable/memory_layout.rs:pub const fn new(id: u8) -> Self {
-src/stable/memory_layout.rs:pub struct MemoryId(pub(super) u8);
+src/stable/memory_layout.rs:pub const fn new(id: u16) -> Self {
+src/stable/memory_layout.rs:pub struct MemoryId(pub(super) u16);
 src/stable/memory_manager.rs:pub enum MemoryManagerInitError {
 src/stable/memory_manager.rs:pub fn get(&self, id: MemoryId) -> VirtualMemory<M> {
 src/stable/memory_manager.rs:pub fn init(memory: M) -> Self {

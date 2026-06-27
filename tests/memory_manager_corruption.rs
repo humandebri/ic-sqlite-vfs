@@ -3,12 +3,16 @@ use ic_sqlite_vfs::DefaultMemoryImpl;
 use ic_sqlite_vfs::{MemoryId, MemoryManager};
 
 const MAGIC: &[u8; 3] = b"MGR";
-const LAYOUT_VERSION: u8 = 1;
-const MAX_NUM_MEMORIES: usize = 255;
+const LAYOUT_VERSION: u8 = 2;
+const MAX_NUM_MEMORIES: usize = 32_768;
 const MAX_NUM_BUCKETS: usize = 32_768;
-const UNALLOCATED_BUCKET_MARKER: u8 = MAX_NUM_MEMORIES as u8;
+const UNALLOCATED_BUCKET_MARKER: u16 = u16::MAX;
+const RESERVED_BUCKET_OWNER: u16 = 32_768;
 const HEADER_RESERVED_BYTES: usize = 32;
 const HEADER_SIZE: usize = 3 + 1 + 2 + 2 + HEADER_RESERVED_BYTES + MAX_NUM_MEMORIES * 8;
+const BUCKET_OWNER_SIZE: usize = 2;
+const BUCKET_ALLOCATIONS_SIZE: usize = MAX_NUM_BUCKETS * BUCKET_OWNER_SIZE;
+const METADATA_PAGES: u64 = 6;
 
 #[test]
 #[should_panic(expected = "unallocated bucket has owner")]
@@ -39,6 +43,14 @@ fn rejects_owner_byte_after_allocated_bucket_range() {
 fn rejects_partial_grow_state_with_table_updated_before_header() {
     // Header still commits one bucket, but grow already wrote the next owner.
     let backing = corrupt_backing(1, 1, &[(0, 1)], Some(vec![(0, 0), (1, 0)]));
+
+    let _manager = MemoryManager::init(backing);
+}
+
+#[test]
+#[should_panic(expected = "reserved owner")]
+fn rejects_reserved_owner_for_allocated_bucket() {
+    let backing = corrupt_backing(1, 1, &[(0, 1)], Some(vec![(0, RESERVED_BUCKET_OWNER)]));
 
     let _manager = MemoryManager::init(backing);
 }
@@ -78,9 +90,25 @@ fn rejects_memory_size_that_overflows_byte_capacity() {
 #[test]
 #[should_panic(expected = "backing memory truncated")]
 fn rejects_valid_table_with_truncated_bucket_storage() {
-    let backing = corrupt_backing(1, 1, &[(0, 1)], Some(vec![(0, 0)]));
+    let backing = truncated_bucket_storage_backing(1, 1, &[(0, 1)], Some(vec![(0, 0)]));
 
     let _manager = MemoryManager::init(backing);
+}
+
+#[test]
+fn strict_init_returns_error_for_truncated_metadata_before_owner_table_read() {
+    let backing = truncated_metadata_backing(1, 1, &[(0, 1)]);
+
+    let error = match MemoryManager::init_strict(backing) {
+        Ok(_) => panic!("strict init accepted truncated metadata"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        ic_sqlite_vfs::MemoryManagerInitError::InvalidLayout(message)
+            if message.contains("backing memory truncated")
+    ));
 }
 
 #[test]
@@ -114,20 +142,30 @@ fn grow_overflow_returns_minus_one() {
 fn corrupt_backing(
     allocated_buckets: u16,
     bucket_size_in_pages: u16,
-    memory_sizes: &[(u8, u64)],
-    allocation_table: Option<Vec<(usize, u8)>>,
+    memory_sizes: &[(u16, u64)],
+    allocation_table: Option<Vec<(usize, u16)>>,
 ) -> DefaultMemoryImpl {
     let backing = DefaultMemoryImpl::default();
-    assert_eq!(Memory::grow(&backing, 1), 0);
+    assert_eq!(
+        Memory::grow(
+            &backing,
+            backing_pages(allocated_buckets, bucket_size_in_pages)
+        ),
+        0
+    );
     backing.write(
         0,
         &header(allocated_buckets, bucket_size_in_pages, memory_sizes),
     );
 
     if let Some(owners) = allocation_table {
-        let mut table = vec![UNALLOCATED_BUCKET_MARKER; MAX_NUM_BUCKETS];
+        let mut table = vec![0_u8; BUCKET_ALLOCATIONS_SIZE];
+        for owner in table.chunks_exact_mut(BUCKET_OWNER_SIZE) {
+            owner.copy_from_slice(&UNALLOCATED_BUCKET_MARKER.to_le_bytes());
+        }
         for (bucket, owner) in owners {
-            table[bucket] = owner;
+            let offset = bucket * BUCKET_OWNER_SIZE;
+            table[offset..offset + BUCKET_OWNER_SIZE].copy_from_slice(&owner.to_le_bytes());
         }
         backing.write(HEADER_SIZE as u64, &table);
     }
@@ -135,10 +173,59 @@ fn corrupt_backing(
     backing
 }
 
+fn backing_pages(allocated_buckets: u16, bucket_size_in_pages: u16) -> u64 {
+    if bucket_size_in_pages == 0 || usize::from(allocated_buckets) > MAX_NUM_BUCKETS {
+        return METADATA_PAGES;
+    }
+    METADATA_PAGES + u64::from(allocated_buckets) * u64::from(bucket_size_in_pages)
+}
+
+fn truncated_bucket_storage_backing(
+    allocated_buckets: u16,
+    bucket_size_in_pages: u16,
+    memory_sizes: &[(u16, u64)],
+    allocation_table: Option<Vec<(usize, u16)>>,
+) -> DefaultMemoryImpl {
+    let backing = DefaultMemoryImpl::default();
+    assert_eq!(Memory::grow(&backing, METADATA_PAGES), 0);
+    backing.write(
+        0,
+        &header(allocated_buckets, bucket_size_in_pages, memory_sizes),
+    );
+
+    if let Some(owners) = allocation_table {
+        let mut table = vec![0_u8; BUCKET_ALLOCATIONS_SIZE];
+        for owner in table.chunks_exact_mut(BUCKET_OWNER_SIZE) {
+            owner.copy_from_slice(&UNALLOCATED_BUCKET_MARKER.to_le_bytes());
+        }
+        for (bucket, owner) in owners {
+            let offset = bucket * BUCKET_OWNER_SIZE;
+            table[offset..offset + BUCKET_OWNER_SIZE].copy_from_slice(&owner.to_le_bytes());
+        }
+        backing.write(HEADER_SIZE as u64, &table);
+    }
+
+    backing
+}
+
+fn truncated_metadata_backing(
+    allocated_buckets: u16,
+    bucket_size_in_pages: u16,
+    memory_sizes: &[(u16, u64)],
+) -> DefaultMemoryImpl {
+    let backing = DefaultMemoryImpl::default();
+    assert_eq!(Memory::grow(&backing, METADATA_PAGES - 1), 0);
+    backing.write(
+        0,
+        &header(allocated_buckets, bucket_size_in_pages, memory_sizes),
+    );
+    backing
+}
+
 fn header(
     allocated_buckets: u16,
     bucket_size_in_pages: u16,
-    memory_sizes: &[(u8, u64)],
+    memory_sizes: &[(u16, u64)],
 ) -> [u8; HEADER_SIZE] {
     let mut header = [0_u8; HEADER_SIZE];
     header[0..3].copy_from_slice(MAGIC);

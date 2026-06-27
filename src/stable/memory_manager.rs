@@ -1,15 +1,15 @@
-//! Minimal fork of `ic-stable-structures` MemoryManager 0.7 layout.
+//! Local MemoryManager layout used by the bundled default stable-memory backend.
 //!
-//! The fork keeps the existing on-stable-memory format, but removes unrelated
-//! stable data structures from this crate's dependency graph.
+//! The manager keeps only the virtual-memory partitioning needed by this crate,
+//! without pulling unrelated stable data structures into the dependency graph.
 
 use crate::config::STABLE_PAGE_SIZE;
 pub use crate::stable::memory_layout::MemoryId;
 use crate::stable::memory_layout::{
-    bucket_allocations_address, write_growing, BucketCache, BucketId, VirtualSegment,
-    BUCKETS_OFFSET_IN_BYTES, BUCKETS_OFFSET_IN_PAGES, BUCKET_SIZE_IN_PAGES, HEADER_RESERVED_BYTES,
-    HEADER_SIZE, LAYOUT_VERSION, MAGIC, MAX_NUM_BUCKETS, MAX_NUM_MEMORIES,
-    UNALLOCATED_BUCKET_MARKER,
+    bucket_allocations_address, encode_bucket_owner, write_growing, BucketCache, BucketId,
+    VirtualSegment, BUCKETS_OFFSET_IN_BYTES, BUCKETS_OFFSET_IN_PAGES, BUCKET_ALLOCATIONS_SIZE,
+    BUCKET_SIZE_IN_PAGES, HEADER_RESERVED_BYTES, HEADER_SIZE, LAYOUT_VERSION, MAGIC,
+    MAX_NUM_BUCKETS, MAX_NUM_MEMORIES, UNALLOCATED_BUCKET_MARKER,
 };
 use crate::stable::memory_manager_validation::{load_validated_layout, try_load_validated_layout};
 use crate::stable::raw_memory::{Memory, MemoryBackendIdentity};
@@ -130,7 +130,7 @@ struct MemoryManagerInner<M: Memory> {
     memory: M,
     allocated_buckets: u16,
     bucket_size_in_pages: u16,
-    memory_sizes_in_pages: [u64; MAX_NUM_MEMORIES as usize],
+    memory_sizes_in_pages: Box<[u64]>,
     memory_buckets: Vec<Vec<BucketId>>,
 }
 impl<M: Memory> MemoryManagerInner<M> {
@@ -166,20 +166,28 @@ impl<M: Memory> MemoryManagerInner<M> {
             memory,
             allocated_buckets: 0,
             bucket_size_in_pages,
-            memory_sizes_in_pages: [0; MAX_NUM_MEMORIES as usize],
-            memory_buckets: vec![Vec::new(); MAX_NUM_MEMORIES as usize],
+            memory_sizes_in_pages: vec![0_u64; MAX_NUM_MEMORIES].into_boxed_slice(),
+            memory_buckets: vec![Vec::new(); MAX_NUM_MEMORIES],
         };
+        let mut allocation_table = vec![
+            0_u8;
+            usize::try_from(BUCKET_ALLOCATIONS_SIZE)
+                .expect("bucket allocations table size fits usize")
+        ];
+        for owner in allocation_table.chunks_exact_mut(2) {
+            owner.copy_from_slice(&encode_bucket_owner(UNALLOCATED_BUCKET_MARKER));
+        }
         write_growing(
             &manager.memory,
             bucket_allocations_address(BucketId(0)),
-            &[UNALLOCATED_BUCKET_MARKER; MAX_NUM_BUCKETS as usize],
+            &allocation_table,
         );
         manager.save_header();
         manager
     }
     fn load(memory: M) -> Self {
-        let mut header = vec![0_u8; HEADER_SIZE as usize];
-        memory.read(0, &mut header);
+        let header = read_header(&memory)
+            .unwrap_or_else(|| panic!("invalid memory manager layout: backing memory truncated"));
         assert_eq!(&header[0..3], MAGIC, "Bad magic.");
         assert_eq!(header[3], LAYOUT_VERSION, "Unsupported version.");
         let layout = load_validated_layout(&memory, &header);
@@ -194,8 +202,11 @@ impl<M: Memory> MemoryManagerInner<M> {
     }
 
     fn try_load(memory: M) -> Result<Self, MemoryManagerInitError> {
-        let mut header = vec![0_u8; HEADER_SIZE as usize];
-        memory.read(0, &mut header);
+        let Some(header) = read_header(&memory) else {
+            return Err(MemoryManagerInitError::InvalidLayout(
+                "invalid memory manager layout: backing memory truncated".to_string(),
+            ));
+        };
         if &header[0..3] != MAGIC {
             return Err(MemoryManagerInitError::NonMemoryManagerLayout);
         }
@@ -217,21 +228,21 @@ impl<M: Memory> MemoryManagerInner<M> {
     }
 
     fn save_header(&self) {
-        let mut header = [0_u8; HEADER_SIZE as usize];
+        let mut header = vec![0_u8; usize::try_from(HEADER_SIZE).expect("header size fits usize")];
         header[0..3].copy_from_slice(MAGIC);
         header[3] = LAYOUT_VERSION;
         header[4..6].copy_from_slice(&self.allocated_buckets.to_le_bytes());
         header[6..8].copy_from_slice(&self.bucket_size_in_pages.to_le_bytes());
         let mut offset = 3 + 1 + 2 + 2 + HEADER_RESERVED_BYTES;
-        for size in self.memory_sizes_in_pages {
+        for size in &self.memory_sizes_in_pages {
             header[offset..offset + 8].copy_from_slice(&size.to_le_bytes());
             offset += 8;
         }
-        write_growing(&self.memory, 0, &header);
+        write_growing(&self.memory, 0, header.as_slice());
     }
 
     fn memory_size(&self, id: MemoryId) -> u64 {
-        self.memory_sizes_in_pages[id.0 as usize]
+        self.memory_sizes_in_pages[usize::from(id.0)]
     }
 
     fn grow(&mut self, id: MemoryId, pages: u64) -> i64 {
@@ -253,7 +264,7 @@ impl<M: Memory> MemoryManagerInner<M> {
         let Ok(new_buckets_len) = usize::try_from(new_buckets) else {
             return -1;
         };
-        let memory_bucket = &mut self.memory_buckets[id.0 as usize];
+        let memory_bucket = &mut self.memory_buckets[usize::from(id.0)];
         if memory_bucket.try_reserve(new_buckets_len).is_err() {
             return -1;
         }
@@ -287,7 +298,11 @@ impl<M: Memory> MemoryManagerInner<M> {
         for _ in 0..new_buckets {
             let bucket = BucketId(self.allocated_buckets);
             memory_bucket.push(bucket);
-            write_growing(&self.memory, bucket_allocations_address(bucket), &[id.0]);
+            write_growing(
+                &self.memory,
+                bucket_allocations_address(bucket),
+                &encode_bucket_owner(id.0),
+            );
             rollback.buckets.push(bucket);
             self.allocated_buckets = self
                 .allocated_buckets
@@ -295,7 +310,7 @@ impl<M: Memory> MemoryManagerInner<M> {
                 .expect("allocated bucket count overflow");
         }
 
-        self.memory_sizes_in_pages[id.0 as usize] = new_size;
+        self.memory_sizes_in_pages[usize::from(id.0)] = new_size;
         self.save_header();
         rollback.committed = true;
         old_size as i64
@@ -355,7 +370,7 @@ impl<M: Memory> MemoryManagerInner<M> {
         mut f: impl FnMut(u64, u64),
     ) {
         let bucket_size = self.bucket_size_in_bytes();
-        let buckets = self.memory_buckets[id as usize].as_slice();
+        let buckets = self.memory_buckets[usize::from(id)].as_slice();
         let mut bucket_idx = (offset / bucket_size) as usize;
         let mut bucket_offset = offset % bucket_size;
         while len > 0 {
@@ -397,6 +412,16 @@ impl<M: Memory> MemoryManagerInner<M> {
     }
 }
 
+fn read_header<M: Memory>(memory: &M) -> Option<Vec<u8>> {
+    let backing_bytes = memory.size().checked_mul(STABLE_PAGE_SIZE)?;
+    if backing_bytes < HEADER_SIZE {
+        return None;
+    }
+    let mut header = vec![0_u8; usize::try_from(HEADER_SIZE).expect("header size fits usize")];
+    memory.read(0, &mut header);
+    Some(header)
+}
+
 struct AllocationRollback<'memory, M: Memory> {
     memory: *const M,
     buckets: Vec<BucketId>,
@@ -414,7 +439,7 @@ impl<M: Memory> Drop for AllocationRollback<'_, M> {
             write_growing(
                 memory,
                 bucket_allocations_address(bucket),
-                &[UNALLOCATED_BUCKET_MARKER],
+                &encode_bucket_owner(UNALLOCATED_BUCKET_MARKER),
             );
         }
     }

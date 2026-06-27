@@ -50,8 +50,7 @@ The consuming canister owns that slot catalog. Store
 `archive_id -> slot_id -> MemoryId` in stable state, choose the usable
 `MemoryId` range before launch, and never move an existing slot to another
 `MemoryId`. The bundled MemoryManager-compatible layout allows `MemoryId`
-values `0..=254`; `255` is reserved internally and `MemoryId::new(255)` is
-invalid.
+values `0..=32767`; higher `u16` values are reserved and invalid.
 Index DBs, catalog DBs, metadata stores, and reserved ranges consume the same
 finite ID space.
 
@@ -71,8 +70,7 @@ new occupant's SQLite image.
 Archive and restore are not provided by the current public API. A future
 bounded staging design must operate on one logical SQLite image at a time and
 preserve the slot catalog. Do not pack several independent SQLite databases
-into one `VirtualMemory`, and do not depend on a forked `u16` `MemoryId` layout
-for this crate.
+into one `VirtualMemory`.
 
 ## `ic-rusqlite` migration boundary
 
