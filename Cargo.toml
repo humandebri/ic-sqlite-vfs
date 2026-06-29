@@ -68,4 +68,3 @@ cc = "1.2"
 [dev-dependencies]
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 serial_test = "3"
-upstream-ic-stable-structures = { package = "ic-stable-structures", version = "=0.7.0" }
