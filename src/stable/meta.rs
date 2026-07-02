@@ -21,7 +21,13 @@ pub const FLAG_CHECKSUM_STALE: u64 = 1 << 1;
 pub const FLAG_CHECKSUM_REFRESHING: u64 = 1 << 2;
 
 thread_local! {
-    static SUPERBLOCK_CACHE: RefCell<BTreeMap<ContextId, Superblock>> = const { RefCell::new(BTreeMap::new()) };
+    static SUPERBLOCK_CACHE: RefCell<BTreeMap<SuperblockCacheKey, Superblock>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct SuperblockCacheKey {
+    context: ContextId,
+    generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -85,8 +91,8 @@ impl Superblock {
     }
 
     pub fn load() -> Result<Self, StableMemoryError> {
-        let context = memory::active_context_id()?;
-        if let Some(block) = SUPERBLOCK_CACHE.with(|cache| cache.borrow().get(&context).cloned()) {
+        let key = superblock_cache_key()?;
+        if let Some(block) = SUPERBLOCK_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
             return Ok(block);
         }
         #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
@@ -367,11 +373,18 @@ fn cache_superblock(block: &Superblock) {
 }
 
 fn cache_superblock_owned(block: Superblock) {
-    if let Ok(context) = memory::active_context_id() {
+    if let Ok(key) = superblock_cache_key() {
         SUPERBLOCK_CACHE.with(|cache| {
-            cache.borrow_mut().insert(context, block);
+            cache.borrow_mut().insert(key, block);
         });
     }
+}
+
+fn superblock_cache_key() -> Result<SuperblockCacheKey, StableMemoryError> {
+    Ok(SuperblockCacheKey {
+        context: memory::active_context_id()?,
+        generation: memory::cache_generation(),
+    })
 }
 
 fn four(bytes: &[u8; ENCODED_LEN], start: usize) -> [u8; 4] {

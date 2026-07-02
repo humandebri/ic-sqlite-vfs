@@ -84,6 +84,7 @@ thread_local! {
     static NEXT_CONTEXT_ID: Cell<u64> = const { Cell::new(1) };
     static DEFAULT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
     static CURRENT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
+    static CACHE_GENERATION: Cell<u64> = const { Cell::new(0) };
     static DB_MEMORY: RefCell<Vec<(ContextId, DbMemory)>> = const { RefCell::new(Vec::new()) };
     static REGISTERED_MEMORY: RefCell<Vec<(ContextId, MemoryIdentity)>> = const { RefCell::new(Vec::new()) };
 }
@@ -133,6 +134,10 @@ fn reject_registered_memory(identity: MemoryIdentity) -> Result<(), StableMemory
 
 pub fn default_context() -> Option<ContextId> {
     DEFAULT_CONTEXT.with(Cell::get)
+}
+
+pub(crate) fn cache_generation() -> u64 {
+    CACHE_GENERATION.with(Cell::get)
 }
 
 #[inline(always)]
@@ -364,7 +369,7 @@ pub(crate) fn clear_initialization() {
     NEXT_CONTEXT_ID.with(|next| next.set(1));
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
     clear_failpoint();
-    crate::stable::meta::clear_superblock_cache();
+    advance_cache_generation();
 }
 
 pub(crate) fn clear_failed_initialization(context: ContextId) {
@@ -392,7 +397,7 @@ pub(crate) fn clear_failed_initialization(context: ContextId) {
     FAILPOINTS.with(|slot| {
         slot.borrow_mut().remove(&context);
     });
-    crate::stable::meta::clear_superblock_cache();
+    advance_cache_generation();
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -415,7 +420,6 @@ pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
         assert!(memory.grow(pages) >= 0, "snapshot memory grows");
         memory.write(0, &snapshot);
     }
-    crate::stable::meta::clear_superblock_cache();
     memory
 }
 
@@ -443,6 +447,12 @@ fn with_memory<T>(f: impl FnOnce(&DbMemory) -> T) -> Result<T, StableMemoryError
         }
         Err(StableMemoryError::NotInitialized)
     })
+}
+
+fn advance_cache_generation() {
+    CACHE_GENERATION.with(|generation| {
+        generation.set(generation.get().wrapping_add(1));
+    });
 }
 
 struct ContextGuard {

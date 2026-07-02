@@ -1,4 +1,5 @@
 use ic_sqlite_vfs::test_support::memory;
+use ic_sqlite_vfs::test_support::Superblock;
 use ic_sqlite_vfs::DefaultMemoryImpl;
 use ic_sqlite_vfs::{MemoryId, MemoryManager, StableMemoryError};
 use proptest::prelude::*;
@@ -39,6 +40,30 @@ fn read_inside_capacity_succeeds_without_extra_growth() {
 
     assert_eq!(byte, [9]);
     assert_eq!(memory::size_pages(), pages);
+}
+
+#[test]
+#[serial_test::serial]
+fn reset_invalidates_superblock_cache_for_reused_context_id() {
+    memory::reset_for_tests();
+    let first_memory = MemoryManager::init(DefaultMemoryImpl::default()).get(MemoryId::new(42));
+    memory::init(first_memory).expect("first memory initializes");
+    let mut cached = Superblock::load().expect("superblock loads");
+    cached.db_size = 123;
+    cached.store().expect("superblock stores");
+    assert_eq!(
+        Superblock::load().expect("cached superblock loads").db_size,
+        123
+    );
+
+    memory::reset_for_tests();
+    let second_memory = MemoryManager::init(DefaultMemoryImpl::default()).get(MemoryId::new(42));
+    memory::init(second_memory).expect("second memory initializes");
+
+    assert_eq!(
+        Superblock::load().expect("fresh superblock loads").db_size,
+        0
+    );
 }
 
 #[test]
