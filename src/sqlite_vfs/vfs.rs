@@ -418,6 +418,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn x_open_accepts_supported_open_classes_and_rejects_wal() {
         memory::reset_for_tests();
         lock::reset_for_tests();
@@ -587,6 +588,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn x_get_last_error_copies_recorded_message() {
         memory::reset_for_tests();
         memory::init(memory::memory_for_tests()).unwrap();
@@ -609,6 +611,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn x_get_last_error_truncates_to_output_buffer() {
         memory::reset_for_tests();
         memory::init(memory::memory_for_tests()).unwrap();
@@ -631,6 +634,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn x_open_wal_rejection_sets_last_error_message() {
         memory::reset_for_tests();
         lock::reset_for_tests();

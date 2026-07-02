@@ -258,6 +258,7 @@ mod tests {
     const COUNTER_COUNT: usize = 21;
 
     #[test]
+    #[serial_test::serial]
     fn every_counter_records_when_metrics_are_enabled() {
         reset_read_metrics();
 
@@ -307,6 +308,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn reset_read_metrics_clears_every_counter_and_enables_metrics() {
         for counter in counters() {
             counter.store(41, Ordering::Relaxed);
@@ -324,6 +326,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn disabled_metrics_ignore_recorders() {
         reset_read_metrics();
         disable_read_metrics();

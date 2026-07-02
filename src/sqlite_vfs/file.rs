@@ -422,6 +422,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn file_control_handles_supported_opcodes() {
         let context = reset();
         let mut storage = MaybeUninit::<IcStableFile>::uninit();
@@ -521,6 +522,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn reserved_lock_is_visible_across_main_file_handles() {
         let context = reset();
         let mut first = MaybeUninit::<IcStableFile>::uninit();
@@ -569,6 +571,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn invalid_main_file_read_boundaries_return_read_errors() {
         let context = reset();
         let mut storage = MaybeUninit::<IcStableFile>::uninit();
@@ -589,6 +592,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn invalid_main_file_write_and_truncate_boundaries_return_errors() {
         let context = reset();
         let mut storage = MaybeUninit::<IcStableFile>::uninit();
@@ -610,6 +614,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn read_only_main_file_write_propagates_last_errno() {
         let context = reset();
         let mut storage = MaybeUninit::<IcStableFile>::uninit();
@@ -640,6 +645,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn temp_file_callbacks_cover_size_sync_and_truncate_boundaries() {
         let context = reset();
         let mut storage = MaybeUninit::<IcStableFile>::uninit();
