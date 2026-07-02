@@ -149,6 +149,15 @@ impl Db {
     pub fn refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, DbError> {
         Self::default_handle()?.refresh_checksum_chunk(max_bytes)
     }
+
+    pub(crate) fn storage_stats() -> Result<stable_blob::StorageStats, DbError> {
+        Self::default_handle()?.storage_stats()
+    }
+
+    #[cfg(feature = "canister-api-test-failpoints")]
+    pub(crate) fn rollback_update() {
+        stable_blob::rollback_update();
+    }
 }
 
 impl DbHandle {
@@ -250,6 +259,10 @@ impl DbHandle {
             clear_read_connection(self.context);
             stable_blob::refresh_checksum_chunk(max_bytes).map_err(DbError::from)
         })
+    }
+
+    pub(crate) fn storage_stats(self) -> Result<stable_blob::StorageStats, DbError> {
+        self.with_context(|| stable_blob::storage_stats().map_err(DbError::from))
     }
 }
 
