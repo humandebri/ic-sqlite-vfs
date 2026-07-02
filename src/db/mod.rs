@@ -150,6 +150,7 @@ impl Db {
         Self::default_handle()?.refresh_checksum_chunk(max_bytes)
     }
 
+    #[cfg(feature = "canister-api")]
     pub(crate) fn storage_stats() -> Result<stable_blob::StorageStats, DbError> {
         Self::default_handle()?.storage_stats()
     }
@@ -261,6 +262,7 @@ impl DbHandle {
         })
     }
 
+    #[cfg(feature = "canister-api")]
     pub(crate) fn storage_stats(self) -> Result<stable_blob::StorageStats, DbError> {
         self.with_context(|| stable_blob::storage_stats().map_err(DbError::from))
     }

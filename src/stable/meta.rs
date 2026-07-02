@@ -364,6 +364,7 @@ impl Superblock {
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 pub fn clear_superblock_cache() {
     SUPERBLOCK_CACHE.with(|cache| cache.borrow_mut().clear());
 }
