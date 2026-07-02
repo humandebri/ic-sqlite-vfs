@@ -306,7 +306,7 @@ pub fn export_chunk(offset: u64, len: u64) -> Result<Vec<u8>, StableMemoryError>
     Ok(out)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn import_chunk(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -334,7 +334,7 @@ pub fn import_chunk(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> 
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn begin_import(total_size: u64, expected_checksum: u64) -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -353,7 +353,7 @@ pub fn begin_import(total_size: u64, expected_checksum: u64) -> Result<(), Stabl
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn finish_import() -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -394,7 +394,7 @@ pub fn finish_import() -> Result<(), StableMemoryError> {
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn cancel_import() -> Result<(), StableMemoryError> {
     reject_during_update()?;
     let mut block = Superblock::load()?;
@@ -518,9 +518,7 @@ pub(crate) fn page_count_for_size(size: u64) -> Result<u64, StableMemoryError> {
 fn commit_overlay(overlay: Overlay, advance_tx: bool) -> Result<(), StableMemoryError> {
     hit_failpoint(StableBlobFailpoint::CommitCapacity)?;
     let profile_enabled = commit_profile_enabled();
-    let profile_start = commit_profile_start(profile_enabled);
     let block = Superblock::load()?;
-    commit_profile_record_load(profile_start);
     commit_overlay_in_place(&block, overlay, advance_tx, profile_enabled)
 }
 
@@ -627,7 +625,6 @@ macro_rules! commit_profile_recorder {
 }
 
 commit_profile_recorder!(commit_profile_record_capacity, record_commit_capacity);
-commit_profile_recorder!(commit_profile_record_load, record_commit_load);
 commit_profile_recorder!(commit_profile_record_page_write, record_commit_page_write);
 commit_profile_recorder!(
     commit_profile_record_superblock_store,
@@ -1501,6 +1498,23 @@ mod tests {
         let grown_over_import_slack = export_chunk(logical_import_offset, page_size()).unwrap();
 
         assert!(grown_over_import_slack.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cancel_import_keeps_active_image() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+
+        write_at(0, b"live").unwrap();
+        begin_import(page_size(), 0).unwrap();
+        import_chunk(0, &vec![0xAA; page_len()]).unwrap();
+
+        cancel_import().unwrap();
+
+        let block = Superblock::load().unwrap();
+        assert!(!block.is_importing());
+        assert_eq!(export_chunk(0, 4).unwrap(), b"live");
     }
 
     #[test]

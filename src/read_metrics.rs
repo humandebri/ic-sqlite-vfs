@@ -48,7 +48,6 @@ static STABLE_DATA_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
 static STABLE_GROW_CALLS: AtomicU64 = AtomicU64::new(0);
 static STABLE_GROW_PAGES: AtomicU64 = AtomicU64::new(0);
 static SUPERBLOCK_LOADS: AtomicU64 = AtomicU64::new(0);
-static COMMIT_LOAD: AtomicU64 = AtomicU64::new(0);
 static COMMIT_CAPACITY: AtomicU64 = AtomicU64::new(0);
 static COMMIT_PAGE_WRITE: AtomicU64 = AtomicU64::new(0);
 static COMMIT_SUPERBLOCK_STORE: AtomicU64 = AtomicU64::new(0);
@@ -89,7 +88,7 @@ pub fn read_metrics_snapshot() -> ReadMetrics {
         stable_grow_calls: STABLE_GROW_CALLS.load(Ordering::Relaxed),
         stable_grow_pages: STABLE_GROW_PAGES.load(Ordering::Relaxed),
         superblock_loads: SUPERBLOCK_LOADS.load(Ordering::Relaxed),
-        commit_load: COMMIT_LOAD.load(Ordering::Relaxed),
+        commit_load: 0,
         commit_capacity: COMMIT_CAPACITY.load(Ordering::Relaxed),
         commit_page_write: COMMIT_PAGE_WRITE.load(Ordering::Relaxed),
         commit_superblock_store: COMMIT_SUPERBLOCK_STORE.load(Ordering::Relaxed),
@@ -177,12 +176,6 @@ pub(crate) fn record_superblock_load() {
 }
 
 #[inline(always)]
-#[allow(dead_code)]
-pub(crate) fn record_commit_load(instructions: u64) {
-    add(&COMMIT_LOAD, instructions);
-}
-
-#[inline(always)]
 pub(crate) fn record_commit_capacity(instructions: u64) {
     add(&COMMIT_CAPACITY, instructions);
 }
@@ -197,7 +190,7 @@ pub(crate) fn record_commit_superblock_store(instructions: u64) {
     add(&COMMIT_SUPERBLOCK_STORE, instructions);
 }
 
-fn counters() -> [&'static AtomicU64; 21] {
+fn counters() -> [&'static AtomicU64; 20] {
     [
         &X_READ_CALLS,
         &X_READ_BYTES,
@@ -216,7 +209,6 @@ fn counters() -> [&'static AtomicU64; 21] {
         &STABLE_GROW_CALLS,
         &STABLE_GROW_PAGES,
         &SUPERBLOCK_LOADS,
-        &COMMIT_LOAD,
         &COMMIT_CAPACITY,
         &COMMIT_PAGE_WRITE,
         &COMMIT_SUPERBLOCK_STORE,
@@ -263,7 +255,7 @@ pub(crate) fn instruction_counter() -> u64 {
 mod tests {
     use super::*;
 
-    const COUNTER_COUNT: usize = 21;
+    const COUNTER_COUNT: usize = 20;
 
     #[test]
     fn every_counter_records_when_metrics_are_enabled() {
@@ -281,7 +273,6 @@ mod tests {
         record_stable_data_write(11);
         record_stable_grow(13);
         record_superblock_load();
-        record_commit_load(17);
         record_commit_capacity(19);
         record_commit_page_write(23);
         record_commit_superblock_store(29);
@@ -306,7 +297,7 @@ mod tests {
                 stable_grow_calls: 1,
                 stable_grow_pages: 13,
                 superblock_loads: 1,
-                commit_load: 17,
+                commit_load: 0,
                 commit_capacity: 19,
                 commit_page_write: 23,
                 commit_superblock_store: 29,

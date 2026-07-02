@@ -184,7 +184,7 @@ pub fn ensure_capacity(end_offset: u64) -> Result<(), StableMemoryError> {
     with_memory(|memory| ensure_memory_capacity(memory, end_offset))?
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn read(offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
     if dst.is_empty() {
         return Ok(());
@@ -230,28 +230,6 @@ pub fn write(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
         memory.write(offset, bytes);
         Ok(())
     })??;
-
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_stable_data_write(bytes.len());
-
-    #[cfg(any(test, feature = "canister-api-test-failpoints"))]
-    if hit_write_trap_failpoint() {
-        fail_after_stable_write();
-    }
-
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub(crate) fn write_preallocated(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    checked_end(offset, bytes.len())?;
-    with_memory(|memory| {
-        debug_assert_capacity(memory, offset, bytes.len(), "write_preallocated");
-        memory.write(offset, bytes);
-    })?;
 
     #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
     crate::read_metrics::record_stable_data_write(bytes.len());
@@ -366,19 +344,19 @@ fn debug_assert_capacity(memory: &DbMemory, offset: u64, len: usize, operation: 
     }
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn reset_for_tests() {
     clear_initialization();
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
     clear_failpoint();
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn set_next_context_id_for_tests(value: u64) {
     NEXT_CONTEXT_ID.with(|next| next.set(value));
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub(crate) fn clear_initialization() {
     DB_MEMORY.with(|memory| memory.borrow_mut().clear());
     REGISTERED_MEMORY.with(|memory| memory.borrow_mut().clear());
@@ -418,7 +396,7 @@ pub(crate) fn clear_failed_initialization(context: ContextId) {
     crate::stable::meta::clear_superblock_cache();
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn snapshot_for_tests() -> Vec<u8> {
     let len = usize::try_from(size_pages().saturating_mul(STABLE_PAGE_SIZE))
         .expect("test memory size fits usize");
@@ -427,7 +405,7 @@ pub fn snapshot_for_tests() -> Vec<u8> {
     out
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
     reset_for_tests();
     let memory = memory_for_tests();
@@ -442,7 +420,7 @@ pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
     memory
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn memory_for_tests() -> DbMemory {
     MemoryManager::init(DefaultMemoryImpl::default()).get(MemoryId::new(42))
 }
