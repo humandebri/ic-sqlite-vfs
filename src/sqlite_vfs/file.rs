@@ -396,8 +396,8 @@ unsafe fn write_c_int(arg: *mut c_void, value: c_int) -> c_int {
 #[cfg(test)]
 mod tests {
     use super::{
-        install, x_check_reserved_lock, x_close, x_device_characteristics, x_file_control, x_lock,
-        x_read, x_unlock,
+        install, x_check_reserved_lock, x_close, x_device_characteristics, x_file_control,
+        x_file_size, x_lock, x_read, x_sync, x_truncate, x_unlock, x_write,
     };
     use super::{FileKind, IcStableFile};
     use crate::sqlite_vfs::{ffi, lock, stable_blob, vfs};
@@ -566,5 +566,109 @@ mod tests {
             assert_eq!(x_close(raw), ffi::SQLITE_OK);
         }
         assert_eq!(out, [b'b', b'c', 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn invalid_main_file_read_boundaries_return_read_errors() {
+        let context = reset();
+        let mut storage = MaybeUninit::<IcStableFile>::uninit();
+        let raw = unsafe { install_main_file(&mut storage, context) };
+        let mut out = [0_u8; 1];
+
+        unsafe {
+            assert_eq!(
+                x_read(raw, out.as_mut_ptr().cast::<c_void>(), -1, 0),
+                ffi::SQLITE_IOERR_READ
+            );
+            assert_eq!(
+                x_read(raw, out.as_mut_ptr().cast::<c_void>(), 1, -1),
+                ffi::SQLITE_IOERR_READ
+            );
+            assert_eq!(x_close(raw), ffi::SQLITE_OK);
+        }
+    }
+
+    #[test]
+    fn invalid_main_file_write_and_truncate_boundaries_return_errors() {
+        let context = reset();
+        let mut storage = MaybeUninit::<IcStableFile>::uninit();
+        let raw = unsafe { install_main_file(&mut storage, context) };
+        let input = [1_u8; 1];
+
+        unsafe {
+            assert_eq!(
+                x_write(raw, input.as_ptr().cast::<c_void>(), -1, 0),
+                ffi::SQLITE_IOERR_WRITE
+            );
+            assert_eq!(
+                x_write(raw, input.as_ptr().cast::<c_void>(), 1, -1),
+                ffi::SQLITE_IOERR_WRITE
+            );
+            assert_eq!(x_truncate(raw, -1), ffi::SQLITE_IOERR_TRUNCATE);
+            assert_eq!(x_close(raw), ffi::SQLITE_OK);
+        }
+    }
+
+    #[test]
+    fn read_only_main_file_write_propagates_last_errno() {
+        let context = reset();
+        let mut storage = MaybeUninit::<IcStableFile>::uninit();
+        let raw = storage.as_mut_ptr().cast::<ffi::sqlite3_file>();
+        unsafe {
+            install(raw, FileKind::Main, true, context);
+        }
+        let input = [1_u8; 1];
+
+        let rc = memory::with_context(context, || unsafe {
+            x_write(raw, input.as_ptr().cast::<c_void>(), 1, 0)
+        });
+        assert_eq!(rc, ffi::SQLITE_READONLY);
+
+        unsafe {
+            let mut errno = 0;
+            assert_eq!(
+                x_file_control(
+                    raw,
+                    ffi::SQLITE_FCNTL_LAST_ERRNO,
+                    ptr::addr_of_mut!(errno).cast::<c_void>(),
+                ),
+                ffi::SQLITE_OK
+            );
+            assert_eq!(errno, ffi::SQLITE_READONLY);
+            assert_eq!(x_close(raw), ffi::SQLITE_OK);
+        }
+    }
+
+    #[test]
+    fn temp_file_callbacks_cover_size_sync_and_truncate_boundaries() {
+        let context = reset();
+        let mut storage = MaybeUninit::<IcStableFile>::uninit();
+        let raw = storage.as_mut_ptr().cast::<ffi::sqlite3_file>();
+        unsafe {
+            install(raw, FileKind::Temp(Default::default()), false, context);
+        }
+        let input = *b"abcd";
+        let mut out = [9_u8; 6];
+
+        unsafe {
+            assert_eq!(
+                x_write(raw, input.as_ptr().cast::<c_void>(), 4, 0),
+                ffi::SQLITE_OK
+            );
+            let mut size = -1;
+            assert_eq!(x_file_size(raw, ptr::addr_of_mut!(size)), ffi::SQLITE_OK);
+            assert_eq!(size, 4);
+            assert_eq!(
+                x_read(raw, out.as_mut_ptr().cast::<c_void>(), 6, 0),
+                ffi::SQLITE_IOERR_SHORT_READ
+            );
+            assert_eq!(out, [b'a', b'b', b'c', b'd', 0, 0]);
+            assert_eq!(x_sync(raw, 0), ffi::SQLITE_OK);
+            assert_eq!(x_truncate(raw, -1), ffi::SQLITE_IOERR_TRUNCATE);
+            assert_eq!(x_truncate(raw, 2), ffi::SQLITE_OK);
+            assert_eq!(x_file_size(raw, ptr::addr_of_mut!(size)), ffi::SQLITE_OK);
+            assert_eq!(size, 2);
+            assert_eq!(x_close(raw), ffi::SQLITE_OK);
+        }
     }
 }

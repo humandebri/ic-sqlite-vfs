@@ -258,3 +258,88 @@ pub(crate) fn instruction_counter() -> u64 {
         0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COUNTER_COUNT: usize = 21;
+
+    #[test]
+    fn every_counter_records_when_metrics_are_enabled() {
+        reset_read_metrics();
+
+        record_x_read(3);
+        record_x_write(5);
+        record_x_file_size();
+        record_x_lock();
+        record_x_unlock();
+        record_x_check_reserved_lock();
+        record_x_file_control();
+        record_x_device_characteristics();
+        record_stable_data_read(7);
+        record_stable_data_write(11);
+        record_stable_grow(13);
+        record_superblock_load();
+        record_commit_load(17);
+        record_commit_capacity(19);
+        record_commit_page_write(23);
+        record_commit_superblock_store(29);
+
+        assert_eq!(
+            read_metrics_snapshot(),
+            ReadMetrics {
+                x_read_calls: 1,
+                x_read_bytes: 3,
+                x_write_calls: 1,
+                x_write_bytes: 5,
+                x_file_size_calls: 1,
+                x_lock_calls: 1,
+                x_unlock_calls: 1,
+                x_check_reserved_lock_calls: 1,
+                x_file_control_calls: 1,
+                x_device_characteristics_calls: 1,
+                stable_data_read_calls: 1,
+                stable_data_read_bytes: 7,
+                stable_data_write_calls: 1,
+                stable_data_write_bytes: 11,
+                stable_grow_calls: 1,
+                stable_grow_pages: 13,
+                superblock_loads: 1,
+                commit_load: 17,
+                commit_capacity: 19,
+                commit_page_write: 23,
+                commit_superblock_store: 29,
+            }
+        );
+    }
+
+    #[test]
+    fn reset_read_metrics_clears_every_counter_and_enables_metrics() {
+        for counter in counters() {
+            counter.store(41, Ordering::Relaxed);
+        }
+        disable_read_metrics();
+
+        reset_read_metrics();
+
+        assert!(metrics_enabled());
+        assert_eq!(counters().len(), COUNTER_COUNT);
+        assert_eq!(read_metrics_snapshot(), ReadMetrics::default());
+        assert!(counters()
+            .iter()
+            .all(|counter| counter.load(Ordering::Relaxed) == 0));
+    }
+
+    #[test]
+    fn disabled_metrics_ignore_recorders() {
+        reset_read_metrics();
+        disable_read_metrics();
+
+        record_x_read(3);
+        record_stable_data_write(5);
+        record_commit_superblock_store(7);
+
+        assert_eq!(read_metrics_snapshot(), ReadMetrics::default());
+    }
+}

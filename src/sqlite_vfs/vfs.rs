@@ -366,7 +366,8 @@ fn current_time_nanos() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_open_flags, x_full_pathname, x_get_last_error, x_open, OpenAccess, OpenKind,
+        classify_open_flags, x_access, x_delete, x_full_pathname, x_get_last_error, x_open,
+        OpenAccess, OpenKind,
     };
     use crate::sqlite_vfs::{ffi, lock};
     use crate::stable::memory;
@@ -538,6 +539,54 @@ mod tests {
     }
 
     #[test]
+    fn x_full_pathname_rejects_zero_or_too_short_output_buffers() {
+        let main = CString::new("/main.db").unwrap();
+        let mut out = [0_i8; 4];
+
+        assert_eq!(
+            unsafe { x_full_pathname(ptr::null_mut(), main.as_ptr(), 0, out.as_mut_ptr()) },
+            ffi::SQLITE_CANTOPEN
+        );
+        assert_eq!(
+            unsafe {
+                x_full_pathname(
+                    ptr::null_mut(),
+                    main.as_ptr(),
+                    i32::try_from(out.len()).unwrap(),
+                    out.as_mut_ptr(),
+                )
+            },
+            ffi::SQLITE_CANTOPEN
+        );
+    }
+
+    #[test]
+    fn x_access_and_delete_distinguish_main_db_from_temp_paths() {
+        let main = CString::new("/main.db").unwrap();
+        let temp = CString::new("/tmp/sqlite-temp").unwrap();
+        let mut exists = -1;
+
+        unsafe {
+            assert_eq!(
+                x_access(ptr::null_mut(), main.as_ptr(), 0, ptr::addr_of_mut!(exists)),
+                ffi::SQLITE_OK
+            );
+            assert_eq!(exists, 1);
+            assert_eq!(
+                x_delete(ptr::null_mut(), main.as_ptr(), 0),
+                ffi::SQLITE_IOERR_DELETE
+            );
+
+            assert_eq!(
+                x_access(ptr::null_mut(), temp.as_ptr(), 0, ptr::addr_of_mut!(exists)),
+                ffi::SQLITE_OK
+            );
+            assert_eq!(exists, 0);
+            assert_eq!(x_delete(ptr::null_mut(), temp.as_ptr(), 0), ffi::SQLITE_OK);
+        }
+    }
+
+    #[test]
     fn x_get_last_error_copies_recorded_message() {
         memory::reset_for_tests();
         memory::init(memory::memory_for_tests()).unwrap();
@@ -552,6 +601,62 @@ mod tests {
             )
         };
 
+        assert!(copied > 0);
+        assert_eq!(
+            unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap(),
+            "WAL files are unsupported"
+        );
+    }
+
+    #[test]
+    fn x_get_last_error_truncates_to_output_buffer() {
+        memory::reset_for_tests();
+        memory::init(memory::memory_for_tests()).unwrap();
+        super::record_last_error(ffi::SQLITE_CANTOPEN, "WAL files are unsupported");
+
+        let mut buf = [0_i8; 5];
+        let copied = unsafe {
+            x_get_last_error(
+                ptr::null_mut(),
+                i32::try_from(buf.len()).unwrap(),
+                buf.as_mut_ptr(),
+            )
+        };
+
+        assert_eq!(copied, 4);
+        assert_eq!(
+            unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap(),
+            "WAL "
+        );
+    }
+
+    #[test]
+    fn x_open_wal_rejection_sets_last_error_message() {
+        memory::reset_for_tests();
+        lock::reset_for_tests();
+        memory::init(memory::memory_for_tests()).unwrap();
+        let mut storage = MaybeUninit::<crate::sqlite_vfs::file::IcStableFile>::uninit();
+        let wal = CString::new("/main.db-wal").unwrap();
+
+        let rc = unsafe {
+            x_open(
+                ptr::null_mut(),
+                wal.as_ptr(),
+                storage.as_mut_ptr().cast::<ffi::sqlite3_file>(),
+                ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_WAL,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_CANTOPEN);
+
+        let mut buf = [0_i8; 64];
+        let copied = unsafe {
+            x_get_last_error(
+                ptr::null_mut(),
+                i32::try_from(buf.len()).unwrap(),
+                buf.as_mut_ptr(),
+            )
+        };
         assert!(copied > 0);
         assert_eq!(
             unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap(),
