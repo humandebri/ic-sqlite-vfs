@@ -44,6 +44,7 @@ pub(crate) use state::PageOffsetCache;
 use state::FAR_PAGE_NO;
 #[cfg(test)]
 pub(crate) use state::{clear_failpoint, set_failpoint, StableBlobFailpoint};
+#[allow(unused_imports)]
 pub use state::{ChecksumRefresh, StorageStats};
 #[cfg(test)]
 use zero_extents::{
