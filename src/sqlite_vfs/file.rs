@@ -31,6 +31,39 @@ pub enum FileKind {
     Temp(TempFile),
 }
 
+enum IoMetric {
+    Read(usize),
+    Write(usize),
+    FileSize,
+    Lock,
+    Unlock,
+    CheckReservedLock,
+    FileControl,
+    DeviceCharacteristics,
+}
+
+fn record_metric(metric: IoMetric) {
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    {
+        match metric {
+            IoMetric::Read(amount) => crate::read_metrics::record_x_read(amount),
+            IoMetric::Write(amount) => crate::read_metrics::record_x_write(amount),
+            IoMetric::FileSize => crate::read_metrics::record_x_file_size(),
+            IoMetric::Lock => crate::read_metrics::record_x_lock(),
+            IoMetric::Unlock => crate::read_metrics::record_x_unlock(),
+            IoMetric::CheckReservedLock => crate::read_metrics::record_x_check_reserved_lock(),
+            IoMetric::FileControl => crate::read_metrics::record_x_file_control(),
+            IoMetric::DeviceCharacteristics => {
+                crate::read_metrics::record_x_device_characteristics()
+            }
+        }
+    }
+    #[cfg(not(any(test, debug_assertions, feature = "bench-profile")))]
+    {
+        let _ = metric;
+    }
+}
+
 impl IcStableFile {
     pub fn new(
         kind: FileKind,
@@ -117,8 +150,7 @@ unsafe extern "C" fn x_read(
         };
     }
     memory::with_context(file.context, || {
-        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-        crate::read_metrics::record_x_read(amount);
+        record_metric(IoMetric::Read(amount));
         let result = if file.read_only {
             let block = match &file.read_snapshot {
                 Some(block) => block,
@@ -180,8 +212,7 @@ unsafe extern "C" fn x_write(
         };
     }
     memory::with_context(file.context, || {
-        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-        crate::read_metrics::record_x_write(amount);
+        record_metric(IoMetric::Write(amount));
         match stable_blob::write_at(offset, bytes) {
             Ok(()) => ffi::SQLITE_OK,
             Err(error) => {
@@ -225,8 +256,7 @@ unsafe extern "C" fn x_file_size(
     file: *mut ffi::sqlite3_file,
     out: *mut ffi::sqlite3_int64,
 ) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_file_size();
+    record_metric(IoMetric::FileSize);
     let file = &mut *file.cast::<IcStableFile>();
     if let FileKind::Temp(temp) = &file.kind {
         let Ok(size) = ffi::sqlite3_int64::try_from(temp.len()) else {
@@ -279,8 +309,7 @@ unsafe extern "C" fn x_file_size(
 }
 
 unsafe extern "C" fn x_lock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_lock();
+    record_metric(IoMetric::Lock);
     let file = &mut *file.cast::<IcStableFile>();
     if !matches!(file.kind, FileKind::Main) {
         return ffi::SQLITE_OK;
@@ -290,8 +319,7 @@ unsafe extern "C" fn x_lock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int
 }
 
 unsafe extern "C" fn x_unlock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_unlock();
+    record_metric(IoMetric::Unlock);
     let file = &mut *file.cast::<IcStableFile>();
     if !matches!(file.kind, FileKind::Main) {
         return ffi::SQLITE_OK;
@@ -301,8 +329,7 @@ unsafe extern "C" fn x_unlock(file: *mut ffi::sqlite3_file, level: c_int) -> c_i
 }
 
 unsafe extern "C" fn x_check_reserved_lock(file: *mut ffi::sqlite3_file, out: *mut c_int) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_check_reserved_lock();
+    record_metric(IoMetric::CheckReservedLock);
     let file = &mut *file.cast::<IcStableFile>();
     if !matches!(file.kind, FileKind::Main) {
         *out = 0;
@@ -321,8 +348,7 @@ unsafe extern "C" fn x_file_control(
     op: c_int,
     arg: *mut c_void,
 ) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_file_control();
+    record_metric(IoMetric::FileControl);
     let file = &mut *file.cast::<IcStableFile>();
     match op {
         ffi::SQLITE_FCNTL_LOCKSTATE => write_c_int(arg, lock::level_for(file.context)),
@@ -360,8 +386,7 @@ unsafe extern "C" fn x_sector_size(_file: *mut ffi::sqlite3_file) -> c_int {
 }
 
 unsafe extern "C" fn x_device_characteristics(file: *mut ffi::sqlite3_file) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_device_characteristics();
+    record_metric(IoMetric::DeviceCharacteristics);
     let file = &mut *file.cast::<IcStableFile>();
     if file.powersafe_overwrite {
         // Stable writes affect only the requested byte range; image publish
