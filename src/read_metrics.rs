@@ -241,14 +241,7 @@ pub(crate) fn metrics_enabled() -> bool {
 
 #[inline(always)]
 pub(crate) fn instruction_counter() -> u64 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        ic_cdk::api::performance_counter(0)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        0
-    }
+    crate::ic0_shim::performance_counter(0)
 }
 
 #[cfg(test)]

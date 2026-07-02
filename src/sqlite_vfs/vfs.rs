@@ -350,7 +350,7 @@ fn normalized_main_path_bytes(path: &[u8]) -> &[u8] {
 fn current_time_nanos() -> u64 {
     #[cfg(target_arch = "wasm32")]
     {
-        ic_cdk::api::time()
+        crate::ic0_shim::time()
     }
 
     #[cfg(not(target_arch = "wasm32"))]

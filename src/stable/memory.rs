@@ -519,7 +519,7 @@ fn hit_write_trap_failpoint() -> bool {
 
 #[cfg(all(target_arch = "wasm32", feature = "canister-api-test-failpoints"))]
 fn fail_after_stable_write() -> ! {
-    ic_cdk::trap("stable write failpoint");
+    crate::ic0_shim::trap("stable write failpoint");
 }
 
 #[cfg(all(

@@ -48,7 +48,7 @@ include = [
 [features]
 default = ["sqlite-bundled"]
 bench-profile = []
-canister-api = []
+canister-api = ["dep:candid", "dep:ic-cdk"]
 canister-api-test-failpoints = ["canister-api"]
 sqlite-bundled = []
 sqlite-precompiled = []
@@ -57,8 +57,8 @@ sqlite-precompiled = []
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-candid = "0.10"
-ic-cdk = "0.20.1"
+candid = { version = "0.10", optional = true }
+ic-cdk = { version = "0.20.1", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 

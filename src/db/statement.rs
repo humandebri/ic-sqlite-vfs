@@ -1057,14 +1057,7 @@ fn step(statement: *mut ffi::sqlite3_stmt) -> Result<std::ffi::c_int, DbError> {
 
 #[cfg(feature = "bench-profile")]
 fn instruction_counter() -> u64 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        ic_cdk::api::performance_counter(0)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        0
-    }
+    crate::ic0_shim::performance_counter(0)
 }
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
