@@ -8,7 +8,7 @@ use crate::db::row::{FromColumn, Row};
 use crate::db::value::{bind_all_with_count, bind_named_all, ToSql};
 use crate::db::DbError;
 use crate::sqlite_vfs::ffi;
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
@@ -663,10 +663,7 @@ impl<'connection> Statement<'connection> {
     }
 
     fn reset_and_bind(&mut self, values: &[&dyn ToSql]) -> Result<(), DbError> {
-        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
-        if reset_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, reset_rc));
-        }
+        self.reset_statement()?;
         if self.parameter_count == 0 && values.is_empty() {
             return Ok(());
         }
@@ -675,32 +672,12 @@ impl<'connection> Statement<'connection> {
 
     #[inline(always)]
     fn reset_and_bind_single_text_borrowed(&mut self, value: &str) -> Result<(), DbError> {
-        if self.parameter_count != 1 {
-            return Err(DbError::ParameterCountMismatch {
-                expected: self.parameter_count,
-                actual: 1,
-            });
-        }
-        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
-        if reset_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, reset_rc));
-        }
-        bind_text_static(self.raw.as_ptr(), 1, value)
+        self.reset_and_bind_static([StaticBind::Text(value)])
     }
 
     #[inline(always)]
     fn reset_and_bind_single_i64(&mut self, value: i64) -> Result<(), DbError> {
-        if self.parameter_count != 1 {
-            return Err(DbError::ParameterCountMismatch {
-                expected: self.parameter_count,
-                actual: 1,
-            });
-        }
-        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
-        if reset_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, reset_rc));
-        }
-        bind_i64(self.raw.as_ptr(), 1, value)
+        self.reset_and_bind_static([StaticBind::I64(value)])
     }
 
     #[inline(always)]
@@ -709,86 +686,14 @@ impl<'connection> Statement<'connection> {
         first: &str,
         second: &str,
     ) -> Result<(), DbError> {
-        if self.parameter_count != 2 {
-            return Err(DbError::ParameterCountMismatch {
-                expected: self.parameter_count,
-                actual: 2,
-            });
-        }
-        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
-        if reset_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, reset_rc));
-        }
-        let first_len =
-            std::ffi::c_int::try_from(first.len()).map_err(|_| DbError::TextTooLarge)?;
-        let first_rc = unsafe {
-            ffi::sqlite3_bind_text(
-                self.raw.as_ptr(),
-                1,
-                first.as_ptr().cast(),
-                first_len,
-                ffi::SQLITE_STATIC(),
-            )
-        };
-        if first_rc != ffi::SQLITE_OK {
-            return Err(DbError::Sqlite(first_rc, "sqlite bind failed".to_string()));
-        }
-        let second_len =
-            std::ffi::c_int::try_from(second.len()).map_err(|_| DbError::TextTooLarge)?;
-        let second_rc = unsafe {
-            ffi::sqlite3_bind_text(
-                self.raw.as_ptr(),
-                2,
-                second.as_ptr().cast(),
-                second_len,
-                ffi::SQLITE_STATIC(),
-            )
-        };
-        if second_rc == ffi::SQLITE_OK {
-            Ok(())
-        } else {
-            Err(DbError::Sqlite(second_rc, "sqlite bind failed".to_string()))
-        }
+        self.reset_and_bind_static([StaticBind::Text(first), StaticBind::Text(second)])
     }
 
     fn reset_and_bind_text_iter<'value, I>(&mut self, values: I) -> Result<(), DbError>
     where
         I: ExactSizeIterator<Item = &'value str>,
     {
-        let actual = values.len();
-        if actual != self.parameter_count {
-            return Err(DbError::ParameterCountMismatch {
-                expected: self.parameter_count,
-                actual,
-            });
-        }
-        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
-        if reset_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, reset_rc));
-        }
-        for (param, value) in (1..).zip(values) {
-            let len = match std::ffi::c_int::try_from(value.len()) {
-                Ok(len) => len,
-                Err(_) => {
-                    self.clear_bindings();
-                    return Err(DbError::TextTooLarge);
-                }
-            };
-            let rc = unsafe {
-                ffi::sqlite3_bind_text(
-                    self.raw.as_ptr(),
-                    param,
-                    value.as_ptr().cast(),
-                    len,
-                    ffi::SQLITE_STATIC(),
-                )
-            };
-            if rc != ffi::SQLITE_OK {
-                self.clear_bindings();
-                return Err(DbError::Sqlite(rc, "sqlite bind failed".to_string()));
-            }
-        }
-        Ok(())
+        self.reset_and_bind_static_iter(values.map(StaticBind::Text), true)
     }
 
     #[inline(always)]
@@ -797,33 +702,7 @@ impl<'connection> Statement<'connection> {
         first: i64,
         second: &str,
     ) -> Result<(), DbError> {
-        if self.parameter_count != 2 {
-            return Err(DbError::ParameterCountMismatch {
-                expected: self.parameter_count,
-                actual: 2,
-            });
-        }
-        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
-        if reset_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, reset_rc));
-        }
-        bind_i64(self.raw.as_ptr(), 1, first)?;
-        let second_len =
-            std::ffi::c_int::try_from(second.len()).map_err(|_| DbError::TextTooLarge)?;
-        let second_rc = unsafe {
-            ffi::sqlite3_bind_text(
-                self.raw.as_ptr(),
-                2,
-                second.as_ptr().cast(),
-                second_len,
-                ffi::SQLITE_STATIC(),
-            )
-        };
-        if second_rc == ffi::SQLITE_OK {
-            Ok(())
-        } else {
-            Err(DbError::Sqlite(second_rc, "sqlite bind failed".to_string()))
-        }
+        self.reset_and_bind_static([StaticBind::I64(first), StaticBind::Text(second)])
     }
 
     #[inline(always)]
@@ -832,18 +711,7 @@ impl<'connection> Statement<'connection> {
         first: i64,
         second: &[u8],
     ) -> Result<(), DbError> {
-        if self.parameter_count != 2 {
-            return Err(DbError::ParameterCountMismatch {
-                expected: self.parameter_count,
-                actual: 2,
-            });
-        }
-        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
-        if reset_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, reset_rc));
-        }
-        bind_i64(self.raw.as_ptr(), 1, first)?;
-        bind_blob_static(self.raw.as_ptr(), 2, second)
+        self.reset_and_bind_static([StaticBind::I64(first), StaticBind::Blob(second)])
     }
 
     #[inline(always)]
@@ -853,48 +721,80 @@ impl<'connection> Statement<'connection> {
         second: i64,
         third: &str,
     ) -> Result<(), DbError> {
-        if self.parameter_count != 3 {
+        self.reset_and_bind_static([
+            StaticBind::I64(first),
+            StaticBind::I64(second),
+            StaticBind::Text(third),
+        ])
+    }
+
+    fn reset_and_bind_static<const N: usize>(
+        &mut self,
+        values: [StaticBind<'_>; N],
+    ) -> Result<(), DbError> {
+        self.reset_and_bind_static_iter(values.into_iter(), false)
+    }
+
+    fn reset_and_bind_static_iter<'value, I>(
+        &mut self,
+        values: I,
+        clear_on_error: bool,
+    ) -> Result<(), DbError>
+    where
+        I: ExactSizeIterator<Item = StaticBind<'value>>,
+    {
+        let actual = values.len();
+        if actual != self.parameter_count {
             return Err(DbError::ParameterCountMismatch {
                 expected: self.parameter_count,
-                actual: 3,
+                actual,
             });
         }
-        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
-        if reset_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, reset_rc));
+        self.reset_statement()?;
+        for (param, value) in (1..).zip(values) {
+            let result = value.bind_to(self.raw.as_ptr(), param);
+            if let Err(error) = result {
+                if clear_on_error {
+                    self.clear_bindings();
+                }
+                return Err(error);
+            }
         }
-        bind_i64(self.raw.as_ptr(), 1, first)?;
-        bind_i64(self.raw.as_ptr(), 2, second)?;
-        let third_len =
-            std::ffi::c_int::try_from(third.len()).map_err(|_| DbError::TextTooLarge)?;
-        let third_rc = unsafe {
-            ffi::sqlite3_bind_text(
-                self.raw.as_ptr(),
-                3,
-                third.as_ptr().cast(),
-                third_len,
-                ffi::SQLITE_STATIC(),
-            )
-        };
-        if third_rc == ffi::SQLITE_OK {
-            Ok(())
-        } else {
-            Err(DbError::Sqlite(third_rc, "sqlite bind failed".to_string()))
-        }
+        Ok(())
     }
 
     fn clear_bindings(&mut self) {
-        unsafe {
-            ffi::sqlite3_clear_bindings(self.raw.as_ptr());
+        sqlite_clear_bindings(self.raw.as_ptr());
+    }
+
+    fn reset_statement(&mut self) -> Result<(), DbError> {
+        let reset_rc = sqlite_reset(self.raw.as_ptr());
+        if reset_rc == ffi::SQLITE_OK {
+            Ok(())
+        } else {
+            Err(sqlite_error(self.db, reset_rc))
         }
     }
 
     fn reset_and_bind_named(&mut self, values: &[(&str, &dyn ToSql)]) -> Result<(), DbError> {
-        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
-        if reset_rc != ffi::SQLITE_OK {
-            return Err(sqlite_error(self.db, reset_rc));
-        }
+        self.reset_statement()?;
         bind_named_all(self.raw.as_ptr(), values)
+    }
+}
+
+enum StaticBind<'value> {
+    Text(&'value str),
+    Blob(&'value [u8]),
+    I64(i64),
+}
+
+impl StaticBind<'_> {
+    fn bind_to(&self, statement: *mut ffi::sqlite3_stmt, index: c_int) -> Result<(), DbError> {
+        match self {
+            Self::Text(value) => bind_text_static(statement, index, value),
+            Self::Blob(value) => bind_blob_static(statement, index, value),
+            Self::I64(value) => bind_i64(statement, index, *value),
+        }
     }
 }
 
@@ -902,7 +802,7 @@ static EMPTY_BLOB: u8 = 0;
 
 #[inline(always)]
 fn read_string_column_zero(statement: *mut ffi::sqlite3_stmt) -> Result<String, DbError> {
-    let actual = unsafe { ffi::sqlite3_column_type(statement, 0) };
+    let actual = sqlite_column_type(statement, 0);
     if actual != ffi::SQLITE_TEXT {
         return Err(DbError::TypeMismatch {
             index: 0,
@@ -910,11 +810,13 @@ fn read_string_column_zero(statement: *mut ffi::sqlite3_stmt) -> Result<String, 
             actual: sqlite_type_name(actual),
         });
     }
-    let text = unsafe { ffi::sqlite3_column_text(statement, 0) };
-    let len = unsafe { ffi::sqlite3_column_bytes(statement, 0) as usize };
+    let text = sqlite_column_text(statement, 0);
+    let len = sqlite_column_bytes(statement, 0);
     if len == 0 || text.is_null() {
         return Ok(String::new());
     }
+    // SAFETY: SQLite returned a non-null TEXT pointer valid until the next
+    // mutation of this statement, and `len` is the byte count for column 0.
     let bytes = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), len) };
     match std::str::from_utf8(bytes) {
         Ok(value) => Ok(value.to_owned()),
@@ -924,7 +826,7 @@ fn read_string_column_zero(statement: *mut ffi::sqlite3_stmt) -> Result<String, 
 
 #[inline(always)]
 fn read_string_column_zero_len(statement: *mut ffi::sqlite3_stmt) -> usize {
-    unsafe { ffi::sqlite3_column_bytes(statement, 0) as usize }
+    sqlite_column_bytes(statement, 0)
 }
 
 #[inline]
@@ -933,21 +835,8 @@ fn bind_text_static(
     index: std::ffi::c_int,
     value: &str,
 ) -> Result<(), DbError> {
-    let len = std::ffi::c_int::try_from(value.len()).map_err(|_| DbError::TextTooLarge)?;
-    let rc = unsafe {
-        ffi::sqlite3_bind_text(
-            statement,
-            index,
-            value.as_ptr().cast(),
-            len,
-            ffi::SQLITE_STATIC(),
-        )
-    };
-    if rc == ffi::SQLITE_OK {
-        Ok(())
-    } else {
-        Err(DbError::Sqlite(rc, "sqlite bind failed".to_string()))
-    }
+    let len = c_int::try_from(value.len()).map_err(|_| DbError::TextTooLarge)?;
+    bind_result(sqlite_bind_text_static(statement, index, value, len))
 }
 
 #[inline(always)]
@@ -956,18 +845,13 @@ fn bind_blob_static(
     index: std::ffi::c_int,
     value: &[u8],
 ) -> Result<(), DbError> {
-    let len = std::ffi::c_int::try_from(value.len()).map_err(|_| DbError::BlobTooLarge)?;
+    let len = c_int::try_from(value.len()).map_err(|_| DbError::BlobTooLarge)?;
     let ptr = if value.is_empty() {
         (&EMPTY_BLOB as *const u8).cast::<c_void>()
     } else {
         value.as_ptr().cast::<c_void>()
     };
-    let rc = unsafe { ffi::sqlite3_bind_blob(statement, index, ptr, len, ffi::SQLITE_STATIC()) };
-    if rc == ffi::SQLITE_OK {
-        Ok(())
-    } else {
-        Err(DbError::Sqlite(rc, "sqlite bind failed".to_string()))
-    }
+    bind_result(sqlite_bind_blob_static(statement, index, ptr, len))
 }
 
 #[inline(always)]
@@ -976,12 +860,76 @@ fn bind_i64(
     index: std::ffi::c_int,
     value: i64,
 ) -> Result<(), DbError> {
-    let rc = unsafe { ffi::sqlite3_bind_int64(statement, index, value) };
+    let rc = sqlite_bind_i64(statement, index, value);
+    bind_result(rc)
+}
+
+fn bind_result(rc: c_int) -> Result<(), DbError> {
     if rc == ffi::SQLITE_OK {
         Ok(())
     } else {
         Err(DbError::Sqlite(rc, "sqlite bind failed".to_string()))
     }
+}
+
+fn sqlite_reset(statement: *mut ffi::sqlite3_stmt) -> c_int {
+    // SAFETY: callers pass a live sqlite3_stmt owned by Statement.
+    unsafe { ffi::sqlite3_reset(statement) }
+}
+
+fn sqlite_clear_bindings(statement: *mut ffi::sqlite3_stmt) {
+    // SAFETY: callers pass a live sqlite3_stmt owned by Statement.
+    unsafe {
+        ffi::sqlite3_clear_bindings(statement);
+    }
+}
+
+fn sqlite_column_type(statement: *mut ffi::sqlite3_stmt, index: c_int) -> c_int {
+    // SAFETY: callers read a column from the current SQLITE_ROW statement.
+    unsafe { ffi::sqlite3_column_type(statement, index) }
+}
+
+fn sqlite_column_text(statement: *mut ffi::sqlite3_stmt, index: c_int) -> *const u8 {
+    // SAFETY: callers read a column from the current SQLITE_ROW statement.
+    unsafe { ffi::sqlite3_column_text(statement, index) }
+}
+
+fn sqlite_column_bytes(statement: *mut ffi::sqlite3_stmt, index: c_int) -> usize {
+    // SAFETY: callers read a column from the current SQLITE_ROW statement.
+    unsafe { ffi::sqlite3_column_bytes(statement, index) as usize }
+}
+
+fn sqlite_bind_text_static(
+    statement: *mut ffi::sqlite3_stmt,
+    index: c_int,
+    value: &str,
+    len: c_int,
+) -> c_int {
+    // SAFETY: `value` remains live until bindings are cleared by the caller.
+    unsafe {
+        ffi::sqlite3_bind_text(
+            statement,
+            index,
+            value.as_ptr().cast(),
+            len,
+            ffi::SQLITE_STATIC(),
+        )
+    }
+}
+
+fn sqlite_bind_blob_static(
+    statement: *mut ffi::sqlite3_stmt,
+    index: c_int,
+    ptr: *const c_void,
+    len: c_int,
+) -> c_int {
+    // SAFETY: `ptr` points to a caller-owned blob kept live until bindings clear.
+    unsafe { ffi::sqlite3_bind_blob(statement, index, ptr, len, ffi::SQLITE_STATIC()) }
+}
+
+fn sqlite_bind_i64(statement: *mut ffi::sqlite3_stmt, index: c_int, value: i64) -> c_int {
+    // SAFETY: callers pass a live sqlite3_stmt and a 1-based parameter index.
+    unsafe { ffi::sqlite3_bind_int64(statement, index, value) }
 }
 
 fn sqlite_type_name(code: std::ffi::c_int) -> &'static str {
