@@ -4,7 +4,6 @@
 //! coexist with other stable structures managed by the same MemoryManager.
 
 use crate::config::STABLE_PAGE_SIZE;
-use crate::stable::memory_manager::{MemoryId, MemoryManager};
 use crate::stable::memory_manager::{MemoryIdentity, VirtualMemory};
 use crate::stable::raw_memory::{DefaultMemoryImpl, Memory};
 use std::cell::{Cell, RefCell};
@@ -422,6 +421,8 @@ pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
 
 #[cfg(any(test, debug_assertions))]
 pub fn memory_for_tests() -> DbMemory {
+    use crate::stable::memory_manager::{MemoryId, MemoryManager};
+
     MemoryManager::init(DefaultMemoryImpl::default()).get(MemoryId::new(42))
 }
 
