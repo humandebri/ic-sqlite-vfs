@@ -23,6 +23,7 @@ pub struct MemoryId(pub(super) u8);
 
 impl MemoryId {
     pub const fn new(id: u8) -> Self {
+        // Invariant: 255 is the allocation-table marker, not an addressable memory.
         assert!(id != UNALLOCATED_BUCKET_MARKER);
         Self(id)
     }
@@ -100,21 +101,25 @@ pub(super) fn virtual_segment_contains(
 }
 
 pub(super) fn write_growing<M: Memory>(memory: &M, offset: u64, bytes: &[u8]) {
+    // Invariant: metadata writes use small fixed offsets and table sizes.
     let end = offset
         .checked_add(bytes.len() as u64)
         .expect("offset overflow");
+    // Invariant: Memory::size is stable-page based and expected to fit bytes here.
     let size_bytes = memory
         .size()
         .checked_mul(STABLE_PAGE_SIZE)
         .expect("memory size overflow");
     if end > size_bytes {
         let pages = (end - size_bytes).div_ceil(STABLE_PAGE_SIZE);
+        // Initialization cannot proceed if the backing memory refuses metadata growth.
         assert!(memory.grow(pages) >= 0, "stable memory grow failed");
     }
     memory.write(offset, bytes);
 }
 
 pub(super) fn read_u64(bytes: &[u8]) -> u64 {
+    // Invariant: callers pass exact 8-byte header fields.
     u64::from_le_bytes(bytes.try_into().expect("u64 field has 8 bytes"))
 }
 

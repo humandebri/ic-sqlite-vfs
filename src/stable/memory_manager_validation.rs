@@ -38,6 +38,8 @@ pub(super) enum MemoryManagerLayoutError {
 }
 
 pub(super) fn load_validated_layout<M: Memory>(memory: &M, header: &[u8]) -> LoadedMemoryManager {
+    // Legacy infallible MemoryManager::init reports corrupt committed layouts by
+    // panic; MemoryManager::init_strict uses try_load_validated_layout for errors.
     try_load_validated_layout(memory, header).unwrap_or_else(|error| panic!("{error}"))
 }
 

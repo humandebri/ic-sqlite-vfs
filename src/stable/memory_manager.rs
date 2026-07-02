@@ -48,6 +48,8 @@ impl<M: Memory> MemoryManager<M> {
 
     pub fn init_with_bucket_size(memory: M, bucket_size_in_pages: u16) -> Self {
         if bucket_size_in_pages == 0 {
+            // Legacy infallible init mirrors ic-stable-structures panic behavior;
+            // callers that need MemoryManagerInitError use init_strict_with_bucket_size.
             panic!("bucket size must be greater than zero");
         }
         Self {
@@ -180,6 +182,8 @@ impl<M: Memory> MemoryManagerInner<M> {
     fn load(memory: M) -> Self {
         let mut header = vec![0_u8; HEADER_SIZE as usize];
         memory.read(0, &mut header);
+        // Legacy infallible load keeps the historical panic surface; strict
+        // initialization validates the same header and returns MemoryManagerInitError.
         assert_eq!(&header[0..3], MAGIC, "Bad magic.");
         assert_eq!(header[3], LAYOUT_VERSION, "Unsupported version.");
         let layout = load_validated_layout(&memory, &header);
@@ -289,6 +293,8 @@ impl<M: Memory> MemoryManagerInner<M> {
             memory_bucket.push(bucket);
             write_growing(&self.memory, bucket_allocations_address(bucket), &[id.0]);
             rollback.buckets.push(bucket);
+            // Invariant: target_allocated_buckets was checked against MAX_NUM_BUCKETS
+            // before this loop, so the u16 bucket counter cannot overflow here.
             self.allocated_buckets = self
                 .allocated_buckets
                 .checked_add(1)
@@ -359,6 +365,8 @@ impl<M: Memory> MemoryManagerInner<M> {
         let mut bucket_idx = (offset / bucket_size) as usize;
         let mut bucket_offset = offset % bucket_size;
         while len > 0 {
+            // Invariant: assert_bounds already proved the requested range fits this
+            // virtual memory, so every covered bucket index must exist.
             let bucket = buckets.get(bucket_idx).expect("bucket idx out of bounds");
             let bucket_address = self.bucket_address(*bucket);
             let segment_len = (bucket_size - bucket_offset).min(len);
@@ -374,6 +382,8 @@ impl<M: Memory> MemoryManagerInner<M> {
     }
 
     fn assert_bounds(&self, id: MemoryId, offset: u64, len: u64, operation: &str) {
+        // Runtime Memory trait contract: out-of-bounds read/write traps instead of
+        // returning a recoverable error, matching ic-stable-structures behavior.
         let end = offset
             .checked_add(len)
             .unwrap_or_else(|| panic!("{id:?}: {operation} out of bounds"));
