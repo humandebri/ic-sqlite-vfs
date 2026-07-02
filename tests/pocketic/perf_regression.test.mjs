@@ -518,6 +518,7 @@ function assertWriteProfile(write, profile) {
 
   assert(profile.x_write_calls > 0n, "bench_write_profile reported no xWrite calls");
   assert(profile.stable_data_write_calls > 0n, "bench_write_profile reported no stable writes");
+  assert(profile.commit_load > 0n, "bench_write_profile reported no commit load work");
   assert(profile.commit_capacity > 0n, "bench_write_profile reported no commit capacity work");
   assert(profile.commit_page_write > 0n, "bench_write_profile reported no commit page write work");
   assert(
@@ -526,6 +527,7 @@ function assertWriteProfile(write, profile) {
   );
 
   const commitParts =
+    profile.commit_load +
     profile.commit_capacity +
     profile.commit_page_write +
     profile.commit_superblock_store;
@@ -564,6 +566,7 @@ function assertGrowthProfile(growth, profile, expectedWrites) {
   assert(profile.execute_total > 0n, "bench_growth_profile reported no execute work");
   assert(profile.x_write_calls > 0n, "bench_growth_profile reported no xWrite calls");
   assert(profile.stable_data_write_calls > 0n, "bench_growth_profile reported no stable writes");
+  assert(profile.commit_load > 0n, "bench_growth_profile reported no commit load work");
   assert(profile.commit_capacity > 0n, "bench_growth_profile reported no commit capacity work");
   assert(profile.commit_page_write > 0n, "bench_growth_profile reported no commit page write work");
   assert(
@@ -572,6 +575,7 @@ function assertGrowthProfile(growth, profile, expectedWrites) {
   );
 
   const commitParts =
+    profile.commit_load +
     profile.commit_capacity +
     profile.commit_page_write +
     profile.commit_superblock_store;

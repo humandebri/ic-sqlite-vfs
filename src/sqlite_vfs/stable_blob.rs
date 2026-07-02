@@ -518,7 +518,9 @@ pub(crate) fn page_count_for_size(size: u64) -> Result<u64, StableMemoryError> {
 fn commit_overlay(overlay: Overlay, advance_tx: bool) -> Result<(), StableMemoryError> {
     hit_failpoint(StableBlobFailpoint::CommitCapacity)?;
     let profile_enabled = commit_profile_enabled();
+    let profile_start = commit_profile_start(profile_enabled);
     let block = Superblock::load()?;
+    commit_profile_record_load(profile_start);
     commit_overlay_in_place(&block, overlay, advance_tx, profile_enabled)
 }
 
@@ -625,6 +627,7 @@ macro_rules! commit_profile_recorder {
 }
 
 commit_profile_recorder!(commit_profile_record_capacity, record_commit_capacity);
+commit_profile_recorder!(commit_profile_record_load, record_commit_load);
 commit_profile_recorder!(commit_profile_record_page_write, record_commit_page_write);
 commit_profile_recorder!(
     commit_profile_record_superblock_store,
