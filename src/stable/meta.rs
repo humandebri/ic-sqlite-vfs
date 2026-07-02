@@ -369,6 +369,11 @@ pub fn clear_superblock_cache() {
     SUPERBLOCK_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
+#[cfg(test)]
+fn superblock_cache_len() -> usize {
+    SUPERBLOCK_CACHE.with(|cache| cache.borrow().len())
+}
+
 fn cache_superblock(block: &Superblock) {
     cache_superblock_owned(block.clone());
 }
@@ -376,7 +381,9 @@ fn cache_superblock(block: &Superblock) {
 fn cache_superblock_owned(block: Superblock) {
     if let Ok(key) = superblock_cache_key() {
         SUPERBLOCK_CACHE.with(|cache| {
-            cache.borrow_mut().insert(key, block);
+            let mut cache = cache.borrow_mut();
+            cache.retain(|cached_key, _| cached_key.generation == key.generation);
+            cache.insert(key, block);
         });
     }
 }
@@ -537,6 +544,22 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cache_insert_prunes_stale_generations() {
+        crate::stable::memory::reset_for_tests();
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+        Superblock::load().unwrap();
+        assert_eq!(superblock_cache_len(), 1);
+
+        crate::stable::memory::reset_for_tests();
+        assert_eq!(superblock_cache_len(), 1);
+        crate::stable::memory::init(crate::stable::memory::memory_for_tests()).unwrap();
+        Superblock::load().unwrap();
+
+        assert_eq!(superblock_cache_len(), 1);
     }
 
     #[test]
