@@ -46,6 +46,8 @@ impl StatementCache {
     fn take(&mut self, sql: &str) -> Option<(String, NonNull<ffi::sqlite3_stmt>, usize)> {
         if let Some(entry) = self.statements.last() {
             if entry.sql == sql {
+                // Invariant: `last()` just returned `Some`, and no code can
+                // mutate `statements` between the check and this `pop()`.
                 let entry = self.statements.pop().expect("last cached statement exists");
                 return Some((entry.sql, entry.statement, entry.parameter_count));
             }
@@ -472,6 +474,8 @@ impl<'connection> Deref for CachedStatement<'connection> {
     type Target = Statement<'connection>;
 
     fn deref(&self) -> &Self::Target {
+        // Invariant: `statement` is `Some` for every live `CachedStatement`;
+        // `discard` consumes `self`, and `drop` is the only path that takes it.
         self.statement
             .as_ref()
             .expect("cached statement is present")
@@ -480,6 +484,8 @@ impl<'connection> Deref for CachedStatement<'connection> {
 
 impl DerefMut for CachedStatement<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // Invariant: mutable access requires a live value. The only method that
+        // clears `statement` consumes `self`, so callers cannot observe `None`.
         self.statement
             .as_mut()
             .expect("cached statement is present")
