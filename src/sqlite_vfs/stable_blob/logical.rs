@@ -253,6 +253,8 @@ pub(super) fn page_size() -> u64 {
 }
 
 pub(super) fn page_len() -> usize {
+    // Invariant: SQLITE_PAGE_SIZE is a u32 compile-time constant, so it always
+    // fits usize on supported Rust targets.
     usize::try_from(SQLITE_PAGE_SIZE).expect("SQLite page size fits usize")
 }
 

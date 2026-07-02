@@ -57,6 +57,9 @@ fn commit_overlay_in_place(
     }
     commit_profile_record_page_write(profile_start);
 
+    // docs/API_STABILITY.md defines this as trap-for-rollback durability:
+    // after dirty pages are written, publish failures must remain panics so IC
+    // message rollback discards all stable-memory writes from this execution.
     if let Err(error) = hit_failpoint(StableBlobFailpoint::CommitSuperblockStore) {
         panic!("failed to publish in-place commit after page writes: {error}");
     }
@@ -64,6 +67,8 @@ fn commit_overlay_in_place(
     let result =
         store_commit_db_image(advance_tx, block.db_base_offset, overlay_size, zero_extents);
     commit_profile_record_superblock_store(profile_start);
+    // MUST NOT become a recoverable error; recovering here would expose a
+    // partial in-place commit instead of relying on the documented trap rollback.
     if let Err(error) = result {
         panic!("failed to publish in-place commit after page writes: {error}");
     }
