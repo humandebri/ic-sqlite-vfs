@@ -1,4 +1,3 @@
-
 use super::open_read_write;
 use crate::config::{SQLITE_URI, SQLITE_URI_NUL, STATEMENT_CACHE_CAPACITY, VFS_NAME, VFS_NAME_NUL};
 use crate::sqlite_vfs::{lock, stable_blob};

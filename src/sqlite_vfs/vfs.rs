@@ -77,6 +77,8 @@ pub(crate) struct OpenOptions {
     pub delete_on_close: bool,
 }
 
+// === FFI callback boundary ===
+
 /// # Safety
 ///
 /// SQLite calls this during global VFS initialization. The returned pointer is a
@@ -269,6 +271,8 @@ unsafe extern "C" fn x_get_last_error(
         c_int::try_from(copy_len).unwrap_or(c_int::MAX)
     })
 }
+
+// === Safe VFS logic and helpers ===
 
 pub(crate) fn record_last_error(errno: c_int, message: impl Into<String>) {
     if let Ok(context) = memory::active_context_id() {

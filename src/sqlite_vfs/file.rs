@@ -107,6 +107,8 @@ pub static IO_METHODS: ffi::sqlite3_io_methods = ffi::sqlite3_io_methods {
     xUnfetch: None,
 };
 
+// === FFI callback boundary ===
+
 /// # Safety
 ///
 /// `p_file` must point to at least `size_of::<IcStableFile>()` bytes allocated
@@ -396,6 +398,8 @@ unsafe extern "C" fn x_device_characteristics(file: *mut ffi::sqlite3_file) -> c
         0
     }
 }
+
+// === Safe callback helpers ===
 
 fn checked_amount(amount: c_int) -> Option<usize> {
     if amount < 0 {
