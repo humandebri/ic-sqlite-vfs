@@ -7,7 +7,7 @@ use crate::config::{MAIN_DB_PATH, VFS_NAME_NUL};
 use crate::sqlite_vfs::ffi;
 use crate::sqlite_vfs::file::{self, FileKind};
 use crate::sqlite_vfs::temp::TempFile;
-use crate::stable::memory::{self, ContextId};
+use crate::stable::memory;
 use crate::stable::meta::Superblock;
 use std::ffi::{c_char, c_int, CStr};
 use std::ptr;
