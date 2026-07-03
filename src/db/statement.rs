@@ -150,16 +150,16 @@ impl<'connection> Statement<'connection> {
     ) -> Result<ExecuteTextTextProfile, DbError> {
         let mut profile = ExecuteTextTextProfile::default();
 
-        let start = instruction_counter();
+        let start = crate::profiling::ProfileTimer::start();
         if let Err(error) = self.reset_and_bind_two_text_borrowed(first, second) {
             self.clear_bindings();
             return Err(error);
         }
-        profile.reset_bind = instruction_counter().saturating_sub(start);
+        profile.reset_bind = start.elapsed();
 
-        let start = instruction_counter();
+        let start = crate::profiling::ProfileTimer::start();
         let rc = step(self.raw.as_ptr());
-        profile.step = instruction_counter().saturating_sub(start);
+        profile.step = start.elapsed();
 
         let result = match rc {
             Ok(ffi::SQLITE_DONE) => Ok(profile),
@@ -359,14 +359,14 @@ impl<'connection> Statement<'connection> {
     {
         let mut profile = QueryTextLenSumProfile::default();
 
-        let start = instruction_counter();
+        let start = crate::profiling::ProfileTimer::start();
         if let Err(error) = self.reset_and_bind_text_iter(values) {
             self.clear_bindings();
             return Err(error);
         }
-        profile.reset_bind = instruction_counter().saturating_sub(start);
+        profile.reset_bind = start.elapsed();
 
-        let start = instruction_counter();
+        let start = crate::profiling::ProfileTimer::start();
         let statement = self.raw.as_ptr();
         let mut total = 0_u64;
         loop {
@@ -375,7 +375,7 @@ impl<'connection> Statement<'connection> {
                     total = total.wrapping_add(read_string_column_zero_len(statement) as u64);
                 }
                 Ok(ffi::SQLITE_DONE) => {
-                    profile.row_scan = instruction_counter().saturating_sub(start);
+                    profile.row_scan = start.elapsed();
                     self.clear_bindings();
                     return Ok((total, profile));
                 }
@@ -565,22 +565,22 @@ impl<'connection> Statement<'connection> {
     ) -> Result<(Option<String>, QueryOptionalStringTextProfile), DbError> {
         let mut profile = QueryOptionalStringTextProfile::default();
 
-        let start = instruction_counter();
+        let start = crate::profiling::ProfileTimer::start();
         if let Err(error) = self.reset_and_bind_single_text_borrowed(value) {
             self.clear_bindings();
             return Err(error);
         }
-        profile.reset_bind = instruction_counter().saturating_sub(start);
+        profile.reset_bind = start.elapsed();
 
-        let start = instruction_counter();
+        let start = crate::profiling::ProfileTimer::start();
         let rc = step(self.raw.as_ptr());
-        profile.step = instruction_counter().saturating_sub(start);
+        profile.step = start.elapsed();
 
         match rc {
             Ok(ffi::SQLITE_ROW) => {
-                let start = instruction_counter();
+                let start = crate::profiling::ProfileTimer::start();
                 let value = read_string_column_zero(self.raw.as_ptr()).map(Some);
-                profile.column_read = instruction_counter().saturating_sub(start);
+                profile.column_read = start.elapsed();
                 self.clear_bindings();
                 value.map(|value| (value, profile))
             }
@@ -607,22 +607,22 @@ impl<'connection> Statement<'connection> {
     ) -> Result<(Option<usize>, QueryOptionalStringTextProfile), DbError> {
         let mut profile = QueryOptionalStringTextProfile::default();
 
-        let start = instruction_counter();
+        let start = crate::profiling::ProfileTimer::start();
         if let Err(error) = self.reset_and_bind_single_text_borrowed(value) {
             self.clear_bindings();
             return Err(error);
         }
-        profile.reset_bind = instruction_counter().saturating_sub(start);
+        profile.reset_bind = start.elapsed();
 
-        let start = instruction_counter();
+        let start = crate::profiling::ProfileTimer::start();
         let rc = step(self.raw.as_ptr());
-        profile.step = instruction_counter().saturating_sub(start);
+        profile.step = start.elapsed();
 
         match rc {
             Ok(ffi::SQLITE_ROW) => {
-                let start = instruction_counter();
+                let start = crate::profiling::ProfileTimer::start();
                 let value = Some(read_string_column_zero_len(self.raw.as_ptr()));
-                profile.column_read = instruction_counter().saturating_sub(start);
+                profile.column_read = start.elapsed();
                 self.clear_bindings();
                 Ok((value, profile))
             }
@@ -1001,11 +1001,6 @@ fn step(statement: *mut ffi::sqlite3_stmt) -> Result<std::ffi::c_int, DbError> {
         return Err(DbError::Sqlite(code, "sqlite step failpoint".to_string()));
     }
     Ok(unsafe { ffi::sqlite3_step(statement) })
-}
-
-#[cfg(feature = "bench-profile")]
-fn instruction_counter() -> u64 {
-    crate::ic0_shim::performance_counter(0)
 }
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]

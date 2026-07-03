@@ -243,11 +243,6 @@ pub(crate) fn metrics_enabled() -> bool {
     METRICS_ENABLED.load(Ordering::Relaxed)
 }
 
-#[inline(always)]
-pub(crate) fn instruction_counter() -> u64 {
-    crate::ic0_shim::performance_counter(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

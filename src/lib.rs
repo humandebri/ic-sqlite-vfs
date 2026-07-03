@@ -16,6 +16,7 @@ pub mod config;
 pub mod db;
 #[doc(hidden)]
 mod ic0_shim;
+mod profiling;
 #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
 #[doc(hidden)]
 mod read_metrics;
