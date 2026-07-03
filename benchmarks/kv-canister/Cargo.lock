@@ -285,9 +285,7 @@ dependencies = [
 name = "ic-sqlite-vfs"
 version = "2.0.0"
 dependencies = [
- "candid",
  "cc",
- "ic-cdk",
  "serde",
  "thiserror 2.0.18",
 ]

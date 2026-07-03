@@ -10,36 +10,36 @@ src/config.rs:pub const SUPERBLOCK_OFFSET: u64 = 0;
 src/config.rs:pub const SUPERBLOCK_SIZE: u64 = STABLE_PAGE_SIZE;
 src/config.rs:pub const VFS_NAME: &str = "icstable";
 src/config.rs:pub const VFS_NAME_NUL: &[u8] = b"icstable\0";
-src/db/connection.rs:pub fn changes(&self) -> u64 {
-src/db/connection.rs:pub fn discard(mut self) {
-src/db/connection.rs:pub fn execute(&self, sql: &str, values: &[&dyn ToSql]) -> Result<(), DbError> {
-src/db/connection.rs:pub fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
-src/db/connection.rs:pub fn execute_named(&self, sql: &str, values: &[(&str, &dyn ToSql)]) -> Result<(), DbError> {
-src/db/connection.rs:pub fn execute_text_text(&self, sql: &str, first: &str, second: &str) -> Result<(), DbError> {
-src/db/connection.rs:pub fn exists(&self, sql: &str, values: &[&dyn ToSql]) -> Result<bool, DbError> {
-src/db/connection.rs:pub fn prepare(&self, sql: &str) -> Result<Statement<'_>, DbError> {
-src/db/connection.rs:pub fn prepare_cached(&self, sql: &str) -> Result<CachedStatement<'_>, DbError> {
-src/db/connection.rs:pub fn query_all<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<Vec<T>, DbError>
-src/db/connection.rs:pub fn query_all_named<T, F>(
-src/db/connection.rs:pub fn query_column<T: FromColumn>(
-src/db/connection.rs:pub fn query_column_named<T: FromColumn>(
-src/db/connection.rs:pub fn query_map<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<Vec<T>, DbError>
-src/db/connection.rs:pub fn query_map_named<T, F>(
-src/db/connection.rs:pub fn query_one<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<T, DbError>
-src/db/connection.rs:pub fn query_one_named<T, F>(
-src/db/connection.rs:pub fn query_optional<T, F>(
-src/db/connection.rs:pub fn query_optional_named<T, F>(
-src/db/connection.rs:pub fn query_optional_scalar<T: FromColumn>(
-src/db/connection.rs:pub fn query_optional_scalar_named<T: FromColumn>(
-src/db/connection.rs:pub fn query_optional_string_text(
-src/db/connection.rs:pub fn query_row<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<T, DbError>
-src/db/connection.rs:pub fn query_row_named<T, F>(
-src/db/connection.rs:pub fn query_scalar<T: FromColumn>(
-src/db/connection.rs:pub fn query_scalar_named<T: FromColumn>(
-src/db/connection.rs:pub fn query_text_iter_text_len_sum<'value, I>(
-src/db/connection.rs:pub fn raw(&self) -> *mut ffi::sqlite3 {
-src/db/connection.rs:pub struct CachedStatement<'connection> {
-src/db/connection.rs:pub struct Connection {
+src/db/connection/mod.rs:pub fn changes(&self) -> u64 {
+src/db/connection/mod.rs:pub fn discard(mut self) {
+src/db/connection/mod.rs:pub fn execute(&self, sql: &str, values: &[&dyn ToSql]) -> Result<(), DbError> {
+src/db/connection/mod.rs:pub fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
+src/db/connection/mod.rs:pub fn execute_named(&self, sql: &str, values: &[(&str, &dyn ToSql)]) -> Result<(), DbError> {
+src/db/connection/mod.rs:pub fn execute_text_text(&self, sql: &str, first: &str, second: &str) -> Result<(), DbError> {
+src/db/connection/mod.rs:pub fn exists(&self, sql: &str, values: &[&dyn ToSql]) -> Result<bool, DbError> {
+src/db/connection/mod.rs:pub fn prepare(&self, sql: &str) -> Result<Statement<'_>, DbError> {
+src/db/connection/mod.rs:pub fn prepare_cached(&self, sql: &str) -> Result<CachedStatement<'_>, DbError> {
+src/db/connection/mod.rs:pub fn query_all<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<Vec<T>, DbError>
+src/db/connection/mod.rs:pub fn query_all_named<T, F>(
+src/db/connection/mod.rs:pub fn query_column<T: FromColumn>(
+src/db/connection/mod.rs:pub fn query_column_named<T: FromColumn>(
+src/db/connection/mod.rs:pub fn query_map<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<Vec<T>, DbError>
+src/db/connection/mod.rs:pub fn query_map_named<T, F>(
+src/db/connection/mod.rs:pub fn query_one<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<T, DbError>
+src/db/connection/mod.rs:pub fn query_one_named<T, F>(
+src/db/connection/mod.rs:pub fn query_optional<T, F>(
+src/db/connection/mod.rs:pub fn query_optional_named<T, F>(
+src/db/connection/mod.rs:pub fn query_optional_scalar<T: FromColumn>(
+src/db/connection/mod.rs:pub fn query_optional_scalar_named<T: FromColumn>(
+src/db/connection/mod.rs:pub fn query_optional_string_text(
+src/db/connection/mod.rs:pub fn query_row<T, F>(&self, sql: &str, values: &[&dyn ToSql], f: F) -> Result<T, DbError>
+src/db/connection/mod.rs:pub fn query_row_named<T, F>(
+src/db/connection/mod.rs:pub fn query_scalar<T: FromColumn>(
+src/db/connection/mod.rs:pub fn query_scalar_named<T: FromColumn>(
+src/db/connection/mod.rs:pub fn query_text_iter_text_len_sum<'value, I>(
+src/db/connection/mod.rs:pub fn raw(&self) -> *mut ffi::sqlite3 {
+src/db/connection/mod.rs:pub struct CachedStatement<'connection> {
+src/db/connection/mod.rs:pub struct Connection {
 src/db/migrate.rs:pub fn apply(connection: &Connection, migrations: &[Migration]) -> Result<(), DbError> {
 src/db/migrate.rs:pub sql: &'static str,
 src/db/migrate.rs:pub struct Migration {
