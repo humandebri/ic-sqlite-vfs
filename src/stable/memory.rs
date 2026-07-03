@@ -85,8 +85,20 @@ thread_local! {
     static DEFAULT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
     static CURRENT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
     static CACHE_GENERATION: Cell<u64> = const { Cell::new(0) };
-    static DB_MEMORY: RefCell<Vec<(ContextId, DbMemory)>> = const { RefCell::new(Vec::new()) };
+    static DB_MEMORY: RefCell<Vec<ContextState>> = const { RefCell::new(Vec::new()) };
     static REGISTERED_MEMORY: RefCell<Vec<(ContextId, MemoryIdentity)>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ContextState {
+    context: ContextId,
+    memory: DbMemory,
+    last_error: Option<ContextLastError>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContextLastError {
+    pub(crate) errno: i32,
+    pub(crate) message: String,
 }
 
 pub fn init(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
@@ -110,7 +122,11 @@ pub fn init_context(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
         context
     });
     DB_MEMORY.with(|slot| {
-        slot.borrow_mut().push((context, memory));
+        slot.borrow_mut().push(ContextState {
+            context,
+            memory,
+            last_error: None,
+        });
     });
     REGISTERED_MEMORY.with(|slot| {
         slot.borrow_mut().push((context, identity));
@@ -157,6 +173,31 @@ pub fn with_context<T>(context: ContextId, f: impl FnOnce() -> T) -> T {
     });
     let _guard = ContextGuard { previous };
     f()
+}
+
+pub(crate) fn record_last_error(context: ContextId, errno: i32, message: String) {
+    DB_MEMORY.with(|slot| {
+        if let Some(state) = slot
+            .borrow_mut()
+            .iter_mut()
+            .find(|state| state.context == context)
+        {
+            state.last_error = Some(ContextLastError { errno, message });
+        }
+    });
+}
+
+pub(crate) fn last_error(context: ContextId) -> Option<ContextLastError> {
+    DB_MEMORY.with(|slot| {
+        slot.borrow()
+            .iter()
+            .find(|state| state.context == context)
+            .and_then(|state| state.last_error.clone())
+    })
+}
+
+pub(crate) fn last_errno(context: ContextId) -> i32 {
+    last_error(context).map_or(0, |error| error.errno)
 }
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
@@ -374,9 +415,7 @@ pub(crate) fn clear_initialization() {
 
 pub(crate) fn clear_failed_initialization(context: ContextId) {
     DB_MEMORY.with(|memory| {
-        memory
-            .borrow_mut()
-            .retain(|(stored_context, _)| *stored_context != context);
+        memory.borrow_mut().retain(|state| state.context != context);
     });
     REGISTERED_MEMORY.with(|memory| {
         memory
@@ -435,14 +474,14 @@ fn with_memory<T>(f: impl FnOnce(&DbMemory) -> T) -> Result<T, StableMemoryError
     let context = active_context_id()?;
     DB_MEMORY.with(|slot| {
         let slot = slot.borrow();
-        if let Some((stored_context, memory)) = slot.first() {
-            if *stored_context == context {
-                return Ok(f(memory));
+        if let Some(state) = slot.first() {
+            if state.context == context {
+                return Ok(f(&state.memory));
             }
         }
-        for (stored_context, memory) in slot.iter().skip(1) {
-            if *stored_context == context {
-                return Ok(f(memory));
+        for state in slot.iter().skip(1) {
+            if state.context == context {
+                return Ok(f(&state.memory));
             }
         }
         Err(StableMemoryError::NotInitialized)

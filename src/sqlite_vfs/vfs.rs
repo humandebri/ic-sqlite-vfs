@@ -9,8 +9,6 @@ use crate::sqlite_vfs::file::{self, FileKind};
 use crate::sqlite_vfs::temp::TempFile;
 use crate::stable::memory::{self, ContextId};
 use crate::stable::meta::Superblock;
-use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, CStr};
 use std::ptr;
 use std::sync::Once;
@@ -41,16 +39,6 @@ pub static mut VFS: ffi::sqlite3_vfs = ffi::sqlite3_vfs {
 };
 
 static PREPARE_ONCE: Once = Once::new();
-
-thread_local! {
-    static LAST_ERROR: RefCell<BTreeMap<ContextId, VfsError>> = const { RefCell::new(BTreeMap::new()) };
-}
-
-#[derive(Clone, Debug)]
-struct VfsError {
-    errno: c_int,
-    message: String,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenKind {
@@ -255,21 +243,19 @@ unsafe extern "C" fn x_get_last_error(
     let Some(max_len) = usize::try_from(len).ok() else {
         return 0;
     };
-    LAST_ERROR.with(|slot| {
-        let Ok(context) = memory::active_context_id() else {
-            *out = 0;
-            return 0;
-        };
-        let Some(error) = slot.borrow().get(&context).cloned() else {
-            *out = 0;
-            return 0;
-        };
-        let bytes = error.message.as_bytes();
-        let copy_len = bytes.len().min(max_len.saturating_sub(1));
-        ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), out, copy_len);
-        *out.add(copy_len) = 0;
-        c_int::try_from(copy_len).unwrap_or(c_int::MAX)
-    })
+    let Ok(context) = memory::active_context_id() else {
+        *out = 0;
+        return 0;
+    };
+    let Some(error) = memory::last_error(context) else {
+        *out = 0;
+        return 0;
+    };
+    let bytes = error.message.as_bytes();
+    let copy_len = bytes.len().min(max_len.saturating_sub(1));
+    ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), out, copy_len);
+    *out.add(copy_len) = 0;
+    c_int::try_from(copy_len).unwrap_or(c_int::MAX)
 }
 
 // === Safe VFS logic and helpers ===
@@ -285,22 +271,14 @@ pub(crate) fn record_last_error_for(
     errno: c_int,
     message: impl Into<String>,
 ) {
-    LAST_ERROR.with(|slot| {
-        slot.borrow_mut().insert(
-            context,
-            VfsError {
-                errno,
-                message: message.into(),
-            },
-        );
-    });
+    memory::record_last_error(context, errno, message.into());
 }
 
 pub(crate) fn last_errno() -> c_int {
     let Ok(context) = memory::active_context_id() else {
         return 0;
     };
-    LAST_ERROR.with(|slot| slot.borrow().get(&context).map_or(0, |error| error.errno))
+    memory::last_errno(context)
 }
 
 pub(crate) fn classify_open_flags(flags: c_int) -> OpenOptions {
