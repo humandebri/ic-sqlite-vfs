@@ -31,27 +31,50 @@ pub struct ReadMetrics {
 }
 
 static METRICS_ENABLED: AtomicBool = AtomicBool::new(false);
-static X_READ_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_READ_BYTES: AtomicU64 = AtomicU64::new(0);
-static X_WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
-static X_FILE_SIZE_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_LOCK_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_UNLOCK_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_CHECK_RESERVED_LOCK_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_FILE_CONTROL_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_DEVICE_CHARACTERISTICS_CALLS: AtomicU64 = AtomicU64::new(0);
-static STABLE_DATA_READ_CALLS: AtomicU64 = AtomicU64::new(0);
-static STABLE_DATA_READ_BYTES: AtomicU64 = AtomicU64::new(0);
-static STABLE_DATA_WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
-static STABLE_DATA_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
-static STABLE_GROW_CALLS: AtomicU64 = AtomicU64::new(0);
-static STABLE_GROW_PAGES: AtomicU64 = AtomicU64::new(0);
-static SUPERBLOCK_LOADS: AtomicU64 = AtomicU64::new(0);
-static COMMIT_LOAD: AtomicU64 = AtomicU64::new(0);
-static COMMIT_CAPACITY: AtomicU64 = AtomicU64::new(0);
-static COMMIT_PAGE_WRITE: AtomicU64 = AtomicU64::new(0);
-static COMMIT_SUPERBLOCK_STORE: AtomicU64 = AtomicU64::new(0);
+
+macro_rules! read_metric_counters {
+    ($macro:ident) => {
+        $macro! {
+            X_READ_CALLS,
+            X_READ_BYTES,
+            X_WRITE_CALLS,
+            X_WRITE_BYTES,
+            X_FILE_SIZE_CALLS,
+            X_LOCK_CALLS,
+            X_UNLOCK_CALLS,
+            X_CHECK_RESERVED_LOCK_CALLS,
+            X_FILE_CONTROL_CALLS,
+            X_DEVICE_CHARACTERISTICS_CALLS,
+            STABLE_DATA_READ_CALLS,
+            STABLE_DATA_READ_BYTES,
+            STABLE_DATA_WRITE_CALLS,
+            STABLE_DATA_WRITE_BYTES,
+            STABLE_GROW_CALLS,
+            STABLE_GROW_PAGES,
+            SUPERBLOCK_LOADS,
+            COMMIT_LOAD,
+            COMMIT_CAPACITY,
+            COMMIT_PAGE_WRITE,
+            COMMIT_SUPERBLOCK_STORE,
+        }
+    };
+}
+
+macro_rules! define_read_metric_counters {
+    ($($counter:ident),+ $(,)?) => {
+        $(static $counter: AtomicU64 = AtomicU64::new(0);)+
+
+        const COUNTER_COUNT: usize = [$(
+            stringify!($counter)
+        ),+].len();
+
+        fn counters() -> [&'static AtomicU64; COUNTER_COUNT] {
+            [$(&$counter),+]
+        }
+    };
+}
+
+read_metric_counters!(define_read_metric_counters);
 
 #[doc(hidden)]
 #[inline(always)]
@@ -196,32 +219,6 @@ pub(crate) fn record_commit_superblock_store(instructions: u64) {
     add(&COMMIT_SUPERBLOCK_STORE, instructions);
 }
 
-fn counters() -> [&'static AtomicU64; 21] {
-    [
-        &X_READ_CALLS,
-        &X_READ_BYTES,
-        &X_WRITE_CALLS,
-        &X_WRITE_BYTES,
-        &X_FILE_SIZE_CALLS,
-        &X_LOCK_CALLS,
-        &X_UNLOCK_CALLS,
-        &X_CHECK_RESERVED_LOCK_CALLS,
-        &X_FILE_CONTROL_CALLS,
-        &X_DEVICE_CHARACTERISTICS_CALLS,
-        &STABLE_DATA_READ_CALLS,
-        &STABLE_DATA_READ_BYTES,
-        &STABLE_DATA_WRITE_CALLS,
-        &STABLE_DATA_WRITE_BYTES,
-        &STABLE_GROW_CALLS,
-        &STABLE_GROW_PAGES,
-        &SUPERBLOCK_LOADS,
-        &COMMIT_LOAD,
-        &COMMIT_CAPACITY,
-        &COMMIT_PAGE_WRITE,
-        &COMMIT_SUPERBLOCK_STORE,
-    ]
-}
-
 #[inline(always)]
 fn increment(counter: &AtomicU64) {
     if metrics_enabled() {
@@ -254,8 +251,6 @@ pub(crate) fn instruction_counter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const COUNTER_COUNT: usize = 21;
 
     #[test]
     #[serial_test::serial]
