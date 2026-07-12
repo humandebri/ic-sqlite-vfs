@@ -194,10 +194,10 @@ Phase 4(分割)は Phase 3(結合是正)の後に行うこと。先に分割す�
 1. **2.x の rustdoc 可視な公開アイテム・シグネチャ・セマンティクス**(major リリースなしでの変更禁止) — docs/API_STABILITY.md:7-11
 2. **v8 stable layout**: ICSQLITE magic、superblock v8、0..64KiB superblock 領域、db_base_offset 以降の固定ページオフセット — docs/API_STABILITY.md:174-180
 3. **v6 レイアウトの直接 init は `UnsupportedLayoutVersion(6)` を返し続ける**(暗黙マイグレーション禁止) — docs/API_STABILITY.md:181-182
-4. **バンドル MemoryManager のレイアウト互換**: upstream ic-stable-structures 0.7.x フィクスチャとのパリティ — docs/API_STABILITY.md:183、scripts/sqlite-critical-check.sh:203-213(compat-fixtures 3 クレートを実行)。※「MemoryId 0..=32767」は u16 ブランチ由来の記述。リファクタスタックは main(u8 MemoryId)ベースに載せ替え済み(2026-07-02、旧スタックは backup/u16base-* に保全)
+4. **バンドル MemoryManager のレイアウト互換**: upstream ic-stable-structures 0.7.x とのパリティ — docs/API_STABILITY.md:183、ルート統合テスト(固定 0.7.0)、compat-fixtures/ic-stable-structures-072(固定 0.7.2)、compat-fixtures/ic-stable-structures-latest-07(実行時の最新 0.7.x)で検証。※「MemoryId 0..=32767」は u16 ブランチ由来の記述。リファクタスタックは main(u8 MemoryId)ベースに載せ替え済み(2026-07-02、旧スタックは backup/u16base-* に保全)
 5. **下流ビルド経路**: `default-features = false` + `sqlite-precompiled` — docs/API_STABILITY.md:187、build.rs の wasm 限定パス
 
-compat-fixtures の消費関係: compat-fixtures/common/memory_manager_matrix.rs を ic-stable-structures-070 / -072 / -latest-07 の 3 テストクレートが共有し、CI の sqlite-critical-check.sh:203-213 が実行する。これらは Phase 3(V2: meta キャッシュ)・Phase 4(分割)の主要な回帰検出網でもある。
+compat-fixtures の消費関係: compat-fixtures/common/memory_manager_matrix.rs は固定 0.7.2 と最新 0.7.x の fixture が共有し、CI の sqlite-critical-check.sh が両方を必須実行する。ルートの tests/memory_manager_compat.rs は固定 0.7.0 と比較する。これらは Phase 3(V2: meta キャッシュ)・Phase 4(分割)の主要な回帰検出網でもある。
 
 ## 8. 調査ステータス(全4波・14タスク完了)
 
