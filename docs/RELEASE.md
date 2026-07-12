@@ -29,6 +29,9 @@ GitHub Release artifact は `sqlite-precompiled,canister-api` の release profil
 `scripts/sqlite-critical-check.sh` は基礎検査、Verus proof、PocketIC regression、
 PocketIC performance/capacity regression を実行する。package contents は workflow
 と release gate で明示実行する。
+SQLite公開TCL `alltest` はUnix VFSを検査するadvisory testであり、icstable VFSのrelease gateには含めない。
+公開TCLテストを全件合格したとは表記しない。
+同梱SQLiteのsource IDまたはcompile flagを変更した場合は、`docs/SQLITE_PUBLIC_TEST_RESULTS.md`の条件で公開fuzzとTCLテストを再実行する。標準構成では既存の不一致との差分と全スイート末尾への到達を確認し、同梱相当構成では記録済みの非互換除外後に新規不一致がないことと全スイート末尾への到達を確認する。
 PocketIC regression の
 `PocketIC trap after dirty page write rolls back before superblock publish` は
 in-place commit の rollback 契約を確認する release blocker とする。このテストは

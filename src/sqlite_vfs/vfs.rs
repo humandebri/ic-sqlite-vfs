@@ -7,10 +7,8 @@ use crate::config::{MAIN_DB_PATH, VFS_NAME_NUL};
 use crate::sqlite_vfs::ffi;
 use crate::sqlite_vfs::file::{self, FileKind};
 use crate::sqlite_vfs::temp::TempFile;
-use crate::stable::memory::{self, ContextId};
+use crate::stable::memory;
 use crate::stable::meta::Superblock;
-use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, CStr};
 use std::ptr;
 use std::sync::Once;
@@ -42,16 +40,6 @@ pub static mut VFS: ffi::sqlite3_vfs = ffi::sqlite3_vfs {
 
 static PREPARE_ONCE: Once = Once::new();
 
-thread_local! {
-    static LAST_ERROR: RefCell<BTreeMap<ContextId, VfsError>> = const { RefCell::new(BTreeMap::new()) };
-}
-
-#[derive(Clone, Debug)]
-struct VfsError {
-    errno: c_int,
-    message: String,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenKind {
     MainDb,
@@ -76,6 +64,8 @@ pub(crate) struct OpenOptions {
     pub uri: bool,
     pub delete_on_close: bool,
 }
+
+// === FFI callback boundary ===
 
 /// # Safety
 ///
@@ -253,22 +243,22 @@ unsafe extern "C" fn x_get_last_error(
     let Some(max_len) = usize::try_from(len).ok() else {
         return 0;
     };
-    LAST_ERROR.with(|slot| {
-        let Ok(context) = memory::active_context_id() else {
-            *out = 0;
-            return 0;
-        };
-        let Some(error) = slot.borrow().get(&context).cloned() else {
-            *out = 0;
-            return 0;
-        };
-        let bytes = error.message.as_bytes();
-        let copy_len = bytes.len().min(max_len.saturating_sub(1));
-        ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), out, copy_len);
-        *out.add(copy_len) = 0;
-        c_int::try_from(copy_len).unwrap_or(c_int::MAX)
-    })
+    let Ok(context) = memory::active_context_id() else {
+        *out = 0;
+        return 0;
+    };
+    let Some(error) = memory::last_error(context) else {
+        *out = 0;
+        return 0;
+    };
+    let bytes = error.message.as_bytes();
+    let copy_len = bytes.len().min(max_len.saturating_sub(1));
+    ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), out, copy_len);
+    *out.add(copy_len) = 0;
+    c_int::try_from(copy_len).unwrap_or(c_int::MAX)
 }
+
+// === Safe VFS logic and helpers ===
 
 pub(crate) fn record_last_error(errno: c_int, message: impl Into<String>) {
     if let Ok(context) = memory::active_context_id() {
@@ -281,22 +271,14 @@ pub(crate) fn record_last_error_for(
     errno: c_int,
     message: impl Into<String>,
 ) {
-    LAST_ERROR.with(|slot| {
-        slot.borrow_mut().insert(
-            context,
-            VfsError {
-                errno,
-                message: message.into(),
-            },
-        );
-    });
+    memory::record_last_error(context, errno, message.into());
 }
 
 pub(crate) fn last_errno() -> c_int {
     let Ok(context) = memory::active_context_id() else {
         return 0;
     };
-    LAST_ERROR.with(|slot| slot.borrow().get(&context).map_or(0, |error| error.errno))
+    memory::last_errno(context)
 }
 
 pub(crate) fn classify_open_flags(flags: c_int) -> OpenOptions {
@@ -350,7 +332,7 @@ fn normalized_main_path_bytes(path: &[u8]) -> &[u8] {
 fn current_time_nanos() -> u64 {
     #[cfg(target_arch = "wasm32")]
     {
-        ic_cdk::api::time()
+        crate::ic0_shim::time()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -366,7 +348,8 @@ fn current_time_nanos() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_open_flags, x_full_pathname, x_get_last_error, x_open, OpenAccess, OpenKind,
+        classify_open_flags, x_access, x_delete, x_full_pathname, x_get_last_error, x_open,
+        OpenAccess, OpenKind,
     };
     use crate::sqlite_vfs::{ffi, lock};
     use crate::stable::memory;
@@ -417,6 +400,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn x_open_accepts_supported_open_classes_and_rejects_wal() {
         memory::reset_for_tests();
         lock::reset_for_tests();
@@ -538,6 +522,55 @@ mod tests {
     }
 
     #[test]
+    fn x_full_pathname_rejects_zero_or_too_short_output_buffers() {
+        let main = CString::new("/main.db").unwrap();
+        let mut out = [0_i8; 4];
+
+        assert_eq!(
+            unsafe { x_full_pathname(ptr::null_mut(), main.as_ptr(), 0, out.as_mut_ptr()) },
+            ffi::SQLITE_CANTOPEN
+        );
+        assert_eq!(
+            unsafe {
+                x_full_pathname(
+                    ptr::null_mut(),
+                    main.as_ptr(),
+                    i32::try_from(out.len()).unwrap(),
+                    out.as_mut_ptr(),
+                )
+            },
+            ffi::SQLITE_CANTOPEN
+        );
+    }
+
+    #[test]
+    fn x_access_and_delete_distinguish_main_db_from_temp_paths() {
+        let main = CString::new("/main.db").unwrap();
+        let temp = CString::new("/tmp/sqlite-temp").unwrap();
+        let mut exists = -1;
+
+        unsafe {
+            assert_eq!(
+                x_access(ptr::null_mut(), main.as_ptr(), 0, ptr::addr_of_mut!(exists)),
+                ffi::SQLITE_OK
+            );
+            assert_eq!(exists, 1);
+            assert_eq!(
+                x_delete(ptr::null_mut(), main.as_ptr(), 0),
+                ffi::SQLITE_IOERR_DELETE
+            );
+
+            assert_eq!(
+                x_access(ptr::null_mut(), temp.as_ptr(), 0, ptr::addr_of_mut!(exists)),
+                ffi::SQLITE_OK
+            );
+            assert_eq!(exists, 0);
+            assert_eq!(x_delete(ptr::null_mut(), temp.as_ptr(), 0), ffi::SQLITE_OK);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn x_get_last_error_copies_recorded_message() {
         memory::reset_for_tests();
         memory::init(memory::memory_for_tests()).unwrap();
@@ -552,6 +585,64 @@ mod tests {
             )
         };
 
+        assert!(copied > 0);
+        assert_eq!(
+            unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap(),
+            "WAL files are unsupported"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn x_get_last_error_truncates_to_output_buffer() {
+        memory::reset_for_tests();
+        memory::init(memory::memory_for_tests()).unwrap();
+        super::record_last_error(ffi::SQLITE_CANTOPEN, "WAL files are unsupported");
+
+        let mut buf = [0_i8; 5];
+        let copied = unsafe {
+            x_get_last_error(
+                ptr::null_mut(),
+                i32::try_from(buf.len()).unwrap(),
+                buf.as_mut_ptr(),
+            )
+        };
+
+        assert_eq!(copied, 4);
+        assert_eq!(
+            unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap(),
+            "WAL "
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn x_open_wal_rejection_sets_last_error_message() {
+        memory::reset_for_tests();
+        lock::reset_for_tests();
+        memory::init(memory::memory_for_tests()).unwrap();
+        let mut storage = MaybeUninit::<crate::sqlite_vfs::file::IcStableFile>::uninit();
+        let wal = CString::new("/main.db-wal").unwrap();
+
+        let rc = unsafe {
+            x_open(
+                ptr::null_mut(),
+                wal.as_ptr(),
+                storage.as_mut_ptr().cast::<ffi::sqlite3_file>(),
+                ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_WAL,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_CANTOPEN);
+
+        let mut buf = [0_i8; 64];
+        let copied = unsafe {
+            x_get_last_error(
+                ptr::null_mut(),
+                i32::try_from(buf.len()).unwrap(),
+                buf.as_mut_ptr(),
+            )
+        };
         assert!(copied > 0);
         assert_eq!(
             unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap(),

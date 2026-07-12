@@ -4,7 +4,6 @@
 //! coexist with other stable structures managed by the same MemoryManager.
 
 use crate::config::STABLE_PAGE_SIZE;
-use crate::stable::memory_manager::{MemoryId, MemoryManager};
 use crate::stable::memory_manager::{MemoryIdentity, VirtualMemory};
 use crate::stable::raw_memory::{DefaultMemoryImpl, Memory};
 use std::cell::{Cell, RefCell};
@@ -85,8 +84,21 @@ thread_local! {
     static NEXT_CONTEXT_ID: Cell<u64> = const { Cell::new(1) };
     static DEFAULT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
     static CURRENT_CONTEXT: Cell<Option<ContextId>> = const { Cell::new(None) };
-    static DB_MEMORY: RefCell<Vec<(ContextId, DbMemory)>> = const { RefCell::new(Vec::new()) };
+    static CACHE_GENERATION: Cell<u64> = const { Cell::new(0) };
+    static DB_MEMORY: RefCell<Vec<ContextState>> = const { RefCell::new(Vec::new()) };
     static REGISTERED_MEMORY: RefCell<Vec<(ContextId, MemoryIdentity)>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ContextState {
+    context: ContextId,
+    memory: DbMemory,
+    last_error: Option<ContextLastError>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContextLastError {
+    pub(crate) errno: i32,
+    pub(crate) message: String,
 }
 
 pub fn init(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
@@ -110,7 +122,11 @@ pub fn init_context(memory: DbMemory) -> Result<ContextId, StableMemoryError> {
         context
     });
     DB_MEMORY.with(|slot| {
-        slot.borrow_mut().push((context, memory));
+        slot.borrow_mut().push(ContextState {
+            context,
+            memory,
+            last_error: None,
+        });
     });
     REGISTERED_MEMORY.with(|slot| {
         slot.borrow_mut().push((context, identity));
@@ -136,6 +152,10 @@ pub fn default_context() -> Option<ContextId> {
     DEFAULT_CONTEXT.with(Cell::get)
 }
 
+pub(crate) fn cache_generation() -> u64 {
+    CACHE_GENERATION.with(Cell::get)
+}
+
 #[inline(always)]
 pub fn active_context_id() -> Result<ContextId, StableMemoryError> {
     if let Some(context) = CURRENT_CONTEXT.with(Cell::get) {
@@ -153,6 +173,31 @@ pub fn with_context<T>(context: ContextId, f: impl FnOnce() -> T) -> T {
     });
     let _guard = ContextGuard { previous };
     f()
+}
+
+pub(crate) fn record_last_error(context: ContextId, errno: i32, message: String) {
+    DB_MEMORY.with(|slot| {
+        if let Some(state) = slot
+            .borrow_mut()
+            .iter_mut()
+            .find(|state| state.context == context)
+        {
+            state.last_error = Some(ContextLastError { errno, message });
+        }
+    });
+}
+
+pub(crate) fn last_error(context: ContextId) -> Option<ContextLastError> {
+    DB_MEMORY.with(|slot| {
+        slot.borrow()
+            .iter()
+            .find(|state| state.context == context)
+            .and_then(|state| state.last_error.clone())
+    })
+}
+
+pub(crate) fn last_errno(context: ContextId) -> i32 {
+    last_error(context).map_or(0, |error| error.errno)
 }
 
 #[cfg(any(test, feature = "canister-api-test-failpoints"))]
@@ -184,7 +229,7 @@ pub fn ensure_capacity(end_offset: u64) -> Result<(), StableMemoryError> {
     with_memory(|memory| ensure_memory_capacity(memory, end_offset))?
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn read(offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
     if dst.is_empty() {
         return Ok(());
@@ -230,28 +275,6 @@ pub fn write(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
         memory.write(offset, bytes);
         Ok(())
     })??;
-
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_stable_data_write(bytes.len());
-
-    #[cfg(any(test, feature = "canister-api-test-failpoints"))]
-    if hit_write_trap_failpoint() {
-        fail_after_stable_write();
-    }
-
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub(crate) fn write_preallocated(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    checked_end(offset, bytes.len())?;
-    with_memory(|memory| {
-        debug_assert_capacity(memory, offset, bytes.len(), "write_preallocated");
-        memory.write(offset, bytes);
-    })?;
 
     #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
     crate::read_metrics::record_stable_data_write(bytes.len());
@@ -366,19 +389,19 @@ fn debug_assert_capacity(memory: &DbMemory, offset: u64, len: usize, operation: 
     }
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn reset_for_tests() {
     clear_initialization();
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
     clear_failpoint();
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn set_next_context_id_for_tests(value: u64) {
     NEXT_CONTEXT_ID.with(|next| next.set(value));
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub(crate) fn clear_initialization() {
     DB_MEMORY.with(|memory| memory.borrow_mut().clear());
     REGISTERED_MEMORY.with(|memory| memory.borrow_mut().clear());
@@ -387,14 +410,12 @@ pub(crate) fn clear_initialization() {
     NEXT_CONTEXT_ID.with(|next| next.set(1));
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
     clear_failpoint();
-    crate::stable::meta::clear_superblock_cache();
+    advance_cache_generation();
 }
 
 pub(crate) fn clear_failed_initialization(context: ContextId) {
     DB_MEMORY.with(|memory| {
-        memory
-            .borrow_mut()
-            .retain(|(stored_context, _)| *stored_context != context);
+        memory.borrow_mut().retain(|state| state.context != context);
     });
     REGISTERED_MEMORY.with(|memory| {
         memory
@@ -415,10 +436,10 @@ pub(crate) fn clear_failed_initialization(context: ContextId) {
     FAILPOINTS.with(|slot| {
         slot.borrow_mut().remove(&context);
     });
-    crate::stable::meta::clear_superblock_cache();
+    advance_cache_generation();
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn snapshot_for_tests() -> Vec<u8> {
     let len = usize::try_from(size_pages().saturating_mul(STABLE_PAGE_SIZE))
         .expect("test memory size fits usize");
@@ -427,7 +448,7 @@ pub fn snapshot_for_tests() -> Vec<u8> {
     out
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
     reset_for_tests();
     let memory = memory_for_tests();
@@ -438,12 +459,13 @@ pub fn restore_for_tests(snapshot: Vec<u8>) -> DbMemory {
         assert!(memory.grow(pages) >= 0, "snapshot memory grows");
         memory.write(0, &snapshot);
     }
-    crate::stable::meta::clear_superblock_cache();
     memory
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, debug_assertions))]
 pub fn memory_for_tests() -> DbMemory {
+    use crate::stable::memory_manager::{MemoryId, MemoryManager};
+
     MemoryManager::init(DefaultMemoryImpl::default()).get(MemoryId::new(42))
 }
 
@@ -452,18 +474,24 @@ fn with_memory<T>(f: impl FnOnce(&DbMemory) -> T) -> Result<T, StableMemoryError
     let context = active_context_id()?;
     DB_MEMORY.with(|slot| {
         let slot = slot.borrow();
-        if let Some((stored_context, memory)) = slot.first() {
-            if *stored_context == context {
-                return Ok(f(memory));
+        if let Some(state) = slot.first() {
+            if state.context == context {
+                return Ok(f(&state.memory));
             }
         }
-        for (stored_context, memory) in slot.iter().skip(1) {
-            if *stored_context == context {
-                return Ok(f(memory));
+        for state in slot.iter().skip(1) {
+            if state.context == context {
+                return Ok(f(&state.memory));
             }
         }
         Err(StableMemoryError::NotInitialized)
     })
+}
+
+fn advance_cache_generation() {
+    CACHE_GENERATION.with(|generation| {
+        generation.set(generation.get().wrapping_add(1));
+    });
 }
 
 struct ContextGuard {
@@ -541,7 +569,7 @@ fn hit_write_trap_failpoint() -> bool {
 
 #[cfg(all(target_arch = "wasm32", feature = "canister-api-test-failpoints"))]
 fn fail_after_stable_write() -> ! {
-    ic_cdk::trap("stable write failpoint");
+    crate::ic0_shim::trap("stable write failpoint");
 }
 
 #[cfg(all(

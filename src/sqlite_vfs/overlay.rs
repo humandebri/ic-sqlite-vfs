@@ -12,6 +12,18 @@ use std::cell::RefCell;
 
 const CLEAN_PAGE_CACHE_CAPACITY: usize = 8;
 
+pub(crate) trait BasePageSource {
+    fn read_base_page(&mut self, page_no: u64) -> Result<Vec<u8>, StableMemoryError>;
+}
+
+struct StableBlobBasePageSource;
+
+impl BasePageSource for StableBlobBasePageSource {
+    fn read_base_page(&mut self, page_no: u64) -> Result<Vec<u8>, StableMemoryError> {
+        stable_blob::read_base_page(page_no)
+    }
+}
+
 #[derive(Debug)]
 pub struct Overlay {
     base_size: u64,
@@ -53,6 +65,16 @@ impl Overlay {
     }
 
     pub fn read_at(&mut self, offset: u64, dst: &mut [u8]) -> Result<bool, StableMemoryError> {
+        let mut source = StableBlobBasePageSource;
+        self.read_at_from(&mut source, offset, dst)
+    }
+
+    fn read_at_from<S: BasePageSource>(
+        &mut self,
+        source: &mut S,
+        offset: u64,
+        dst: &mut [u8],
+    ) -> Result<bool, StableMemoryError> {
         if dst.is_empty() {
             return Ok(true);
         }
@@ -64,7 +86,7 @@ impl Overlay {
         let requested = u64::try_from(dst.len()).map_err(|_| StableMemoryError::OffsetOverflow)?;
         let copied = requested.min(self.size - offset);
         let copied_len = usize::try_from(copied).map_err(|_| StableMemoryError::OffsetOverflow)?;
-        self.read_range(offset, &mut dst[..copied_len])?;
+        self.read_range(source, offset, &mut dst[..copied_len])?;
         if copied_len < dst.len() {
             dst[copied_len..].fill(0);
         }
@@ -72,6 +94,16 @@ impl Overlay {
     }
 
     pub fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
+        let mut source = StableBlobBasePageSource;
+        self.write_at_from(&mut source, offset, bytes)
+    }
+
+    fn write_at_from<S: BasePageSource>(
+        &mut self,
+        source: &mut S,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), StableMemoryError> {
         if bytes.is_empty() {
             return Ok(());
         }
@@ -80,7 +112,7 @@ impl Overlay {
         let old_size = self.size;
         if end > old_size {
             self.record_newly_active_zero_pages(old_size, end)?;
-            self.zero_newly_active_partial_pages(old_size, end)?;
+            self.zero_newly_active_partial_pages(source, old_size, end)?;
         }
         let full_page_no = page_no(offset);
         if bytes.len() == page_len() && offset.is_multiple_of(page_size()) {
@@ -100,7 +132,7 @@ impl Overlay {
             let available = page_len() - page_offset;
             let remaining = bytes.len() - written;
             let copied = available.min(remaining);
-            let page = self.load_dirty_page(page_no)?;
+            let page = self.load_dirty_page(source, page_no)?;
             page[page_offset..page_offset + copied]
                 .copy_from_slice(&bytes[written..written + copied]);
             written += copied;
@@ -111,10 +143,19 @@ impl Overlay {
     }
 
     pub fn truncate(&mut self, size: u64) -> Result<(), StableMemoryError> {
+        let mut source = StableBlobBasePageSource;
+        self.truncate_with_source(&mut source, size)
+    }
+
+    fn truncate_with_source<S: BasePageSource>(
+        &mut self,
+        source: &mut S,
+        size: u64,
+    ) -> Result<(), StableMemoryError> {
         let old_size = self.size;
         if size > old_size {
             self.record_newly_active_zero_pages(old_size, size)?;
-            self.zero_newly_active_partial_pages(old_size, size)?;
+            self.zero_newly_active_partial_pages(source, old_size, size)?;
         } else if size < old_size {
             self.record_truncated_zero_pages(size, old_size)?;
         }
@@ -130,7 +171,7 @@ impl Overlay {
 
         let last_page = page_no(size);
         let tail = page_offset(size)?;
-        let page = self.load_dirty_page(last_page)?;
+        let page = self.load_dirty_page(source, last_page)?;
         page[tail..].fill(0);
         Ok(())
     }
@@ -166,8 +207,9 @@ impl Overlay {
         }
     }
 
-    fn zero_newly_active_partial_pages(
+    fn zero_newly_active_partial_pages<S: BasePageSource>(
         &mut self,
+        source: &mut S,
         old_size: u64,
         new_size: u64,
     ) -> Result<(), StableMemoryError> {
@@ -188,7 +230,7 @@ impl Overlay {
             } else {
                 page_offset(end_absolute)?
             };
-            let page = self.load_dirty_page(old_page_no)?;
+            let page = self.load_dirty_page(source, old_page_no)?;
             page[start..end].fill(0);
         }
 
@@ -196,7 +238,7 @@ impl Overlay {
             let new_page_no = page_no(new_size);
             if new_page_no != old_page_no {
                 let end = page_offset(new_size)?;
-                let page = self.load_dirty_page(new_page_no)?;
+                let page = self.load_dirty_page(source, new_page_no)?;
                 page[..end].fill(0);
             }
         }
@@ -204,7 +246,11 @@ impl Overlay {
         Ok(())
     }
 
-    fn load_dirty_page(&mut self, page_no: u64) -> Result<&mut Vec<u8>, StableMemoryError> {
+    fn load_dirty_page<S: BasePageSource>(
+        &mut self,
+        source: &mut S,
+        page_no: u64,
+    ) -> Result<&mut Vec<u8>, StableMemoryError> {
         if let Some(index) = self.dirty_page_index(page_no) {
             return Ok(&mut self.pages[index].1);
         }
@@ -213,7 +259,7 @@ impl Overlay {
         } else {
             match self.take_clean_page(page_no) {
                 Some(page) => page,
-                None => stable_blob::read_base_page(page_no)?,
+                None => source.read_base_page(page_no)?,
             }
         };
         self.pages.push((page_no, page));
@@ -285,7 +331,12 @@ impl Overlay {
         self.clean_pages.push((page_no, page));
     }
 
-    fn read_range(&mut self, offset: u64, dst: &mut [u8]) -> Result<(), StableMemoryError> {
+    fn read_range<S: BasePageSource>(
+        &mut self,
+        source: &mut S,
+        offset: u64,
+        dst: &mut [u8],
+    ) -> Result<(), StableMemoryError> {
         let mut copied_total = 0_usize;
         while copied_total < dst.len() {
             let absolute = checked_add(
@@ -306,7 +357,7 @@ impl Overlay {
                 dst[copied_total..copied_total + copied]
                     .copy_from_slice(&page[page_offset..page_offset + copied]);
             } else {
-                let page = stable_blob::read_base_page(page_no)?;
+                let page = source.read_base_page(page_no)?;
                 dst[copied_total..copied_total + copied]
                     .copy_from_slice(&page[page_offset..page_offset + copied]);
                 self.insert_clean_page(page_no, page);
@@ -435,9 +486,21 @@ fn checked_add(left: u64, right: u64) -> Result<u64, StableMemoryError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{page_len, page_size, Overlay};
+    use super::{page_len, page_size, BasePageSource, Overlay};
     use crate::sqlite_vfs::stable_blob;
-    use crate::stable::memory;
+    use crate::stable::memory::{self, StableMemoryError};
+
+    struct TestBasePageSource {
+        page: Vec<u8>,
+        reads: Vec<u64>,
+    }
+
+    impl BasePageSource for TestBasePageSource {
+        fn read_base_page(&mut self, page_no: u64) -> Result<Vec<u8>, StableMemoryError> {
+            self.reads.push(page_no);
+            Ok(self.page.clone())
+        }
+    }
 
     #[test]
     fn later_overlapping_write_wins_regardless_of_offset_order() {
@@ -466,6 +529,24 @@ mod tests {
         let mut out = vec![0; 4];
         assert!(overlay.read_at(0, &mut out).unwrap());
         assert_eq!(out.as_slice(), b"a\0\0z");
+    }
+
+    #[test]
+    fn clean_base_reads_use_injected_source_and_cache() {
+        let mut overlay = Overlay::new(page_size());
+        let mut source = TestBasePageSource {
+            page: vec![11_u8; page_len()],
+            reads: Vec::new(),
+        };
+        let mut first = [0_u8; 16];
+        let mut second = [0_u8; 16];
+
+        assert!(overlay.read_at_from(&mut source, 0, &mut first).unwrap());
+        assert!(overlay.read_at_from(&mut source, 8, &mut second).unwrap());
+
+        assert_eq!(first, [11_u8; 16]);
+        assert_eq!(second, [11_u8; 16]);
+        assert_eq!(source.reads, vec![0]);
     }
 
     #[test]

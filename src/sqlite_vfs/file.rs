@@ -31,6 +31,39 @@ pub enum FileKind {
     Temp(TempFile),
 }
 
+enum IoMetric {
+    Read(usize),
+    Write(usize),
+    FileSize,
+    Lock,
+    Unlock,
+    CheckReservedLock,
+    FileControl,
+    DeviceCharacteristics,
+}
+
+fn record_metric(metric: IoMetric) {
+    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    {
+        match metric {
+            IoMetric::Read(amount) => crate::read_metrics::record_x_read(amount),
+            IoMetric::Write(amount) => crate::read_metrics::record_x_write(amount),
+            IoMetric::FileSize => crate::read_metrics::record_x_file_size(),
+            IoMetric::Lock => crate::read_metrics::record_x_lock(),
+            IoMetric::Unlock => crate::read_metrics::record_x_unlock(),
+            IoMetric::CheckReservedLock => crate::read_metrics::record_x_check_reserved_lock(),
+            IoMetric::FileControl => crate::read_metrics::record_x_file_control(),
+            IoMetric::DeviceCharacteristics => {
+                crate::read_metrics::record_x_device_characteristics()
+            }
+        }
+    }
+    #[cfg(not(any(test, debug_assertions, feature = "bench-profile")))]
+    {
+        let _ = metric;
+    }
+}
+
 impl IcStableFile {
     pub fn new(
         kind: FileKind,
@@ -73,6 +106,8 @@ pub static IO_METHODS: ffi::sqlite3_io_methods = ffi::sqlite3_io_methods {
     xFetch: None,
     xUnfetch: None,
 };
+
+// === FFI callback boundary ===
 
 /// # Safety
 ///
@@ -117,8 +152,7 @@ unsafe extern "C" fn x_read(
         };
     }
     memory::with_context(file.context, || {
-        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-        crate::read_metrics::record_x_read(amount);
+        record_metric(IoMetric::Read(amount));
         let result = if file.read_only {
             let block = match &file.read_snapshot {
                 Some(block) => block,
@@ -180,8 +214,7 @@ unsafe extern "C" fn x_write(
         };
     }
     memory::with_context(file.context, || {
-        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-        crate::read_metrics::record_x_write(amount);
+        record_metric(IoMetric::Write(amount));
         match stable_blob::write_at(offset, bytes) {
             Ok(()) => ffi::SQLITE_OK,
             Err(error) => {
@@ -225,8 +258,7 @@ unsafe extern "C" fn x_file_size(
     file: *mut ffi::sqlite3_file,
     out: *mut ffi::sqlite3_int64,
 ) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_file_size();
+    record_metric(IoMetric::FileSize);
     let file = &mut *file.cast::<IcStableFile>();
     if let FileKind::Temp(temp) = &file.kind {
         let Ok(size) = ffi::sqlite3_int64::try_from(temp.len()) else {
@@ -279,8 +311,7 @@ unsafe extern "C" fn x_file_size(
 }
 
 unsafe extern "C" fn x_lock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_lock();
+    record_metric(IoMetric::Lock);
     let file = &mut *file.cast::<IcStableFile>();
     if !matches!(file.kind, FileKind::Main) {
         return ffi::SQLITE_OK;
@@ -290,8 +321,7 @@ unsafe extern "C" fn x_lock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int
 }
 
 unsafe extern "C" fn x_unlock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_unlock();
+    record_metric(IoMetric::Unlock);
     let file = &mut *file.cast::<IcStableFile>();
     if !matches!(file.kind, FileKind::Main) {
         return ffi::SQLITE_OK;
@@ -301,8 +331,7 @@ unsafe extern "C" fn x_unlock(file: *mut ffi::sqlite3_file, level: c_int) -> c_i
 }
 
 unsafe extern "C" fn x_check_reserved_lock(file: *mut ffi::sqlite3_file, out: *mut c_int) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_check_reserved_lock();
+    record_metric(IoMetric::CheckReservedLock);
     let file = &mut *file.cast::<IcStableFile>();
     if !matches!(file.kind, FileKind::Main) {
         *out = 0;
@@ -321,8 +350,7 @@ unsafe extern "C" fn x_file_control(
     op: c_int,
     arg: *mut c_void,
 ) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_file_control();
+    record_metric(IoMetric::FileControl);
     let file = &mut *file.cast::<IcStableFile>();
     match op {
         ffi::SQLITE_FCNTL_LOCKSTATE => write_c_int(arg, lock::level_for(file.context)),
@@ -360,8 +388,7 @@ unsafe extern "C" fn x_sector_size(_file: *mut ffi::sqlite3_file) -> c_int {
 }
 
 unsafe extern "C" fn x_device_characteristics(file: *mut ffi::sqlite3_file) -> c_int {
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
-    crate::read_metrics::record_x_device_characteristics();
+    record_metric(IoMetric::DeviceCharacteristics);
     let file = &mut *file.cast::<IcStableFile>();
     if file.powersafe_overwrite {
         // Stable writes affect only the requested byte range; image publish
@@ -371,6 +398,8 @@ unsafe extern "C" fn x_device_characteristics(file: *mut ffi::sqlite3_file) -> c
         0
     }
 }
+
+// === Safe callback helpers ===
 
 fn checked_amount(amount: c_int) -> Option<usize> {
     if amount < 0 {
@@ -396,8 +425,8 @@ unsafe fn write_c_int(arg: *mut c_void, value: c_int) -> c_int {
 #[cfg(test)]
 mod tests {
     use super::{
-        install, x_check_reserved_lock, x_close, x_device_characteristics, x_file_control, x_lock,
-        x_read, x_unlock,
+        install, x_check_reserved_lock, x_close, x_device_characteristics, x_file_control,
+        x_file_size, x_lock, x_read, x_sync, x_truncate, x_unlock, x_write,
     };
     use super::{FileKind, IcStableFile};
     use crate::sqlite_vfs::{ffi, lock, stable_blob, vfs};
@@ -422,6 +451,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn file_control_handles_supported_opcodes() {
         let context = reset();
         let mut storage = MaybeUninit::<IcStableFile>::uninit();
@@ -521,6 +551,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn reserved_lock_is_visible_across_main_file_handles() {
         let context = reset();
         let mut first = MaybeUninit::<IcStableFile>::uninit();
@@ -566,5 +597,113 @@ mod tests {
             assert_eq!(x_close(raw), ffi::SQLITE_OK);
         }
         assert_eq!(out, [b'b', b'c', 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn invalid_main_file_read_boundaries_return_read_errors() {
+        let context = reset();
+        let mut storage = MaybeUninit::<IcStableFile>::uninit();
+        let raw = unsafe { install_main_file(&mut storage, context) };
+        let mut out = [0_u8; 1];
+
+        unsafe {
+            assert_eq!(
+                x_read(raw, out.as_mut_ptr().cast::<c_void>(), -1, 0),
+                ffi::SQLITE_IOERR_READ
+            );
+            assert_eq!(
+                x_read(raw, out.as_mut_ptr().cast::<c_void>(), 1, -1),
+                ffi::SQLITE_IOERR_READ
+            );
+            assert_eq!(x_close(raw), ffi::SQLITE_OK);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn invalid_main_file_write_and_truncate_boundaries_return_errors() {
+        let context = reset();
+        let mut storage = MaybeUninit::<IcStableFile>::uninit();
+        let raw = unsafe { install_main_file(&mut storage, context) };
+        let input = [1_u8; 1];
+
+        unsafe {
+            assert_eq!(
+                x_write(raw, input.as_ptr().cast::<c_void>(), -1, 0),
+                ffi::SQLITE_IOERR_WRITE
+            );
+            assert_eq!(
+                x_write(raw, input.as_ptr().cast::<c_void>(), 1, -1),
+                ffi::SQLITE_IOERR_WRITE
+            );
+            assert_eq!(x_truncate(raw, -1), ffi::SQLITE_IOERR_TRUNCATE);
+            assert_eq!(x_close(raw), ffi::SQLITE_OK);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn read_only_main_file_write_propagates_last_errno() {
+        let context = reset();
+        let mut storage = MaybeUninit::<IcStableFile>::uninit();
+        let raw = storage.as_mut_ptr().cast::<ffi::sqlite3_file>();
+        unsafe {
+            install(raw, FileKind::Main, true, context);
+        }
+        let input = [1_u8; 1];
+
+        let rc = memory::with_context(context, || unsafe {
+            x_write(raw, input.as_ptr().cast::<c_void>(), 1, 0)
+        });
+        assert_eq!(rc, ffi::SQLITE_READONLY);
+
+        unsafe {
+            let mut errno = 0;
+            assert_eq!(
+                x_file_control(
+                    raw,
+                    ffi::SQLITE_FCNTL_LAST_ERRNO,
+                    ptr::addr_of_mut!(errno).cast::<c_void>(),
+                ),
+                ffi::SQLITE_OK
+            );
+            assert_eq!(errno, ffi::SQLITE_READONLY);
+            assert_eq!(x_close(raw), ffi::SQLITE_OK);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn temp_file_callbacks_cover_size_sync_and_truncate_boundaries() {
+        let context = reset();
+        let mut storage = MaybeUninit::<IcStableFile>::uninit();
+        let raw = storage.as_mut_ptr().cast::<ffi::sqlite3_file>();
+        unsafe {
+            install(raw, FileKind::Temp(Default::default()), false, context);
+        }
+        let input = *b"abcd";
+        let mut out = [9_u8; 6];
+
+        unsafe {
+            assert_eq!(
+                x_write(raw, input.as_ptr().cast::<c_void>(), 4, 0),
+                ffi::SQLITE_OK
+            );
+            let mut size = -1;
+            assert_eq!(x_file_size(raw, ptr::addr_of_mut!(size)), ffi::SQLITE_OK);
+            assert_eq!(size, 4);
+            assert_eq!(
+                x_read(raw, out.as_mut_ptr().cast::<c_void>(), 6, 0),
+                ffi::SQLITE_IOERR_SHORT_READ
+            );
+            assert_eq!(out, [b'a', b'b', b'c', b'd', 0, 0]);
+            assert_eq!(x_sync(raw, 0), ffi::SQLITE_OK);
+            assert_eq!(x_truncate(raw, -1), ffi::SQLITE_IOERR_TRUNCATE);
+            assert_eq!(x_truncate(raw, 2), ffi::SQLITE_OK);
+            assert_eq!(x_file_size(raw, ptr::addr_of_mut!(size)), ffi::SQLITE_OK);
+            assert_eq!(size, 2);
+            assert_eq!(x_close(raw), ffi::SQLITE_OK);
+        }
     }
 }

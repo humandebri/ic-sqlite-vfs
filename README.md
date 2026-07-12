@@ -52,8 +52,8 @@ This crate uses the shorter path:
 SQLite -> sqlite3_io_methods xRead/xWrite -> selected VirtualMemory
 ```
 
-Why not wasi2ic? In the local KV benchmark, the direct VFS path uses 7.8x fewer
-instructions for reset + insert and 6.5x fewer for insert/update.
+Why not wasi2ic? In the local KV benchmark, the direct VFS path uses 7.7x fewer
+instructions for reset + insert and 6.4x fewer for insert/update.
 
 ## Stable Memory Ownership
 
@@ -489,7 +489,7 @@ crate provides `sqlite3_os_init()` and registers only the `icstable` VFS.
 
 ## Benchmarks
 
-Measured locally on 2026-06-26 with PocketIC. The main metric is IC
+Measured locally on 2026-07-03 with PocketIC. The main metric is IC
 instructions from `ic_cdk::api::performance_counter(0)`.
 
 The benchmark harness lives in `benchmarks/kv-canister` and can be run with:
@@ -514,29 +514,29 @@ stops before `BenchReport` metadata collection.
 
 | Workload | ic-sqlite-vfs | wasi2ic + ic-rusqlite | Result |
 |---|---:|---:|---:|
-| reset + insert, 1000 rows | 10.80M | 83.87M | 7.8x fewer instructions |
-| insert only into empty table, 1000 rows | 10.29M | 83.27M | 8.1x fewer instructions |
-| insert only into empty table, 5000 rows | 60.95M | 426.93M | 7.0x fewer instructions |
-| append insert, 5000 existing + 1000 new | 13.55M | 86.21M | 6.4x fewer instructions |
-| insert/update upsert, 1000 rows | 13.35M | 86.53M | 6.5x fewer instructions |
-| update only by primary key, 1000 rows | 16.76M | 81.20M | 4.8x fewer instructions |
-| update only by primary key, 5000 rows | 91.05M | 413.12M | 4.5x fewer instructions |
+| reset + insert, 1000 rows | 10.90M | 83.87M | 7.7x fewer instructions |
+| insert only into empty table, 1000 rows | 10.40M | 83.27M | 8.0x fewer instructions |
+| insert only into empty table, 5000 rows | 61.51M | 426.93M | 6.9x fewer instructions |
+| append insert, 5000 existing + 1000 new | 13.65M | 86.21M | 6.3x fewer instructions |
+| insert/update upsert, 1000 rows | 13.45M | 86.53M | 6.4x fewer instructions |
+| update only by primary key, 1000 rows | 16.86M | 81.20M | 4.8x fewer instructions |
+| update only by primary key, 5000 rows | 91.60M | 413.12M | 4.5x fewer instructions |
 | point read, 1 key | 0.048M | 0.014M | wasi2ic lower on this harness |
-| point read, 10 keys | 0.135M | 0.109M | wasi2ic lower on this harness |
-| point read, 100 keys | 1.01M | 1.05M | ic-sqlite-vfs lower |
-| point read, 1000 keys | 10.05M | 10.69M | ic-sqlite-vfs lower |
-| bulk read ordered scan, 100 rows | 0.236M | 0.233M | wasi2ic lower on this harness |
-| bulk read ordered scan, 1000 rows | 1.37M | 1.66M | ic-sqlite-vfs lower |
-| bulk read ordered scan, 5000 rows | 6.46M | 7.99M | ic-sqlite-vfs lower |
+| point read, 10 keys | 0.136M | 0.109M | wasi2ic lower on this harness |
+| point read, 100 keys | 1.02M | 1.05M | ic-sqlite-vfs lower |
+| point read, 1000 keys | 10.12M | 10.69M | ic-sqlite-vfs lower |
+| bulk read ordered scan, 100 rows | 0.237M | 0.233M | wasi2ic lower on this harness |
+| bulk read ordered scan, 1000 rows | 1.38M | 1.66M | ic-sqlite-vfs lower |
+| bulk read ordered scan, 5000 rows | 6.50M | 7.99M | ic-sqlite-vfs lower |
 | `WHERE key IN (...)`, 100 keys | 1.31M | 1.65M | ic-sqlite-vfs lower |
-| `WHERE key IN (...)`, 1000 keys | 14.35M | 18.41M | ic-sqlite-vfs lower |
+| `WHERE key IN (...)`, 1000 keys | 14.40M | 18.41M | ic-sqlite-vfs lower |
 
 Additional read-helper checks from the same 1000-row PocketIC run:
 
 | Workload | ic-sqlite-vfs |
 |---|---:|
-| repeated public helper point read, 1000 keys | 12.43M |
-| repeated prepare-each point read, 1000 keys | 39.41M |
+| repeated public helper point read, 1000 keys | 12.46M |
+| repeated prepare-each point read, 1000 keys | 39.51M |
 
 Additional limit-case checks from the same PocketIC run:
 
@@ -544,10 +544,10 @@ Additional limit-case checks from the same PocketIC run:
 |---|---:|
 | large blob insert/readback, 64 KiB | 0.97M |
 | large blob insert/readback, 256 KiB | 2.26M |
-| unbounded `ORDER BY`, 5000 rows | 66.48M |
-| join, 2000 rows | 17.04M |
-| repeated single-row update, 1000-row DB, 20 writes | 3.39M |
-| repeated single-row update, 5000-row DB, 20 writes | 3.42M |
+| unbounded `ORDER BY`, 5000 rows | 67.02M |
+| join, 2000 rows | 17.31M |
+| repeated single-row update, 1000-row DB, 20 writes | 3.43M |
+| repeated single-row update, 5000-row DB, 20 writes | 3.45M |
 
 Repeated point reads execute one SQLite statement per key inside the canister.
 They mostly measure bind/reset/step wrapper overhead, not stable-memory I/O.
@@ -567,8 +567,8 @@ path into open, prepare, formatting, execute, VFS read/write, stable write,
 stable grow, and commit phase metrics. `bench_growth_profile` breaks repeated
 single-row updates into update open, formatting, prepare, execute, changes,
 VFS/stable writes, stable grow, and commit metrics.
-In the 1000-key `WHERE key IN (...)` profile, row scan is about 10.31M
-instructions and SQLite prepare is about 3.52M instructions.
+In the 1000-key `WHERE key IN (...)` profile, row scan is about 10.30M
+instructions and SQLite prepare is about 3.53M instructions.
 In the 1000-row upsert profile, SQLite statement execution dominates; update
 open work is about 0.007M instructions after the write connection is warm.
 In the 20-write growth profile, cached UPDATE statements reduce prepare work to
@@ -673,6 +673,14 @@ Current coverage:
 - long-running transaction endurance
 - PocketIC upgrade persistence
 - wasm import audit: only `ic0.*`
+
+SQLite's public TCL `alltest` is an advisory upstream compatibility check, not
+an icstable VFS release gate. The standard configuration reaches the end with
+classified test-harness mismatches. The bundled-equivalent configuration
+reaches the end only after excluding tests that conflict with its intentional
+compile-time omissions; see
+[docs/SQLITE_PUBLIC_TEST_RESULTS.md](docs/SQLITE_PUBLIC_TEST_RESULTS.md) for the
+exact scope, results, and release interpretation.
 
 ## Operations
 

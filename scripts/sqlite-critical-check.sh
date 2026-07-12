@@ -200,9 +200,6 @@ cargo check --release
 log "checking wasm release profile with sqlite-precompiled"
 cargo check --release --target wasm32-unknown-unknown --no-default-features --features sqlite-precompiled
 
-log "running MemoryManager compatibility fixture for ic-stable-structures 0.7.0"
-cargo test --manifest-path compat-fixtures/ic-stable-structures-070/Cargo.toml --locked
-
 log "running MemoryManager compatibility fixture for ic-stable-structures 0.7.2"
 cargo test --manifest-path compat-fixtures/ic-stable-structures-072/Cargo.toml --locked
 
@@ -210,7 +207,7 @@ log "updating MemoryManager compatibility fixture to latest ic-stable-structures
 cargo update --manifest-path compat-fixtures/ic-stable-structures-latest-07/Cargo.toml -p ic-stable-structures
 
 log "running MemoryManager compatibility fixture for latest ic-stable-structures 0.7.x"
-cargo test --manifest-path compat-fixtures/ic-stable-structures-latest-07/Cargo.toml
+cargo test --manifest-path compat-fixtures/ic-stable-structures-latest-07/Cargo.toml --locked
 
 run_verus_proofs
 

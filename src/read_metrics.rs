@@ -31,27 +31,50 @@ pub struct ReadMetrics {
 }
 
 static METRICS_ENABLED: AtomicBool = AtomicBool::new(false);
-static X_READ_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_READ_BYTES: AtomicU64 = AtomicU64::new(0);
-static X_WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
-static X_FILE_SIZE_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_LOCK_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_UNLOCK_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_CHECK_RESERVED_LOCK_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_FILE_CONTROL_CALLS: AtomicU64 = AtomicU64::new(0);
-static X_DEVICE_CHARACTERISTICS_CALLS: AtomicU64 = AtomicU64::new(0);
-static STABLE_DATA_READ_CALLS: AtomicU64 = AtomicU64::new(0);
-static STABLE_DATA_READ_BYTES: AtomicU64 = AtomicU64::new(0);
-static STABLE_DATA_WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
-static STABLE_DATA_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
-static STABLE_GROW_CALLS: AtomicU64 = AtomicU64::new(0);
-static STABLE_GROW_PAGES: AtomicU64 = AtomicU64::new(0);
-static SUPERBLOCK_LOADS: AtomicU64 = AtomicU64::new(0);
-static COMMIT_LOAD: AtomicU64 = AtomicU64::new(0);
-static COMMIT_CAPACITY: AtomicU64 = AtomicU64::new(0);
-static COMMIT_PAGE_WRITE: AtomicU64 = AtomicU64::new(0);
-static COMMIT_SUPERBLOCK_STORE: AtomicU64 = AtomicU64::new(0);
+
+macro_rules! read_metric_counters {
+    ($macro:ident) => {
+        $macro! {
+            X_READ_CALLS,
+            X_READ_BYTES,
+            X_WRITE_CALLS,
+            X_WRITE_BYTES,
+            X_FILE_SIZE_CALLS,
+            X_LOCK_CALLS,
+            X_UNLOCK_CALLS,
+            X_CHECK_RESERVED_LOCK_CALLS,
+            X_FILE_CONTROL_CALLS,
+            X_DEVICE_CHARACTERISTICS_CALLS,
+            STABLE_DATA_READ_CALLS,
+            STABLE_DATA_READ_BYTES,
+            STABLE_DATA_WRITE_CALLS,
+            STABLE_DATA_WRITE_BYTES,
+            STABLE_GROW_CALLS,
+            STABLE_GROW_PAGES,
+            SUPERBLOCK_LOADS,
+            COMMIT_LOAD,
+            COMMIT_CAPACITY,
+            COMMIT_PAGE_WRITE,
+            COMMIT_SUPERBLOCK_STORE,
+        }
+    };
+}
+
+macro_rules! define_read_metric_counters {
+    ($($counter:ident),+ $(,)?) => {
+        $(static $counter: AtomicU64 = AtomicU64::new(0);)+
+
+        const COUNTER_COUNT: usize = [$(
+            stringify!($counter)
+        ),+].len();
+
+        fn counters() -> [&'static AtomicU64; COUNTER_COUNT] {
+            [$(&$counter),+]
+        }
+    };
+}
+
+read_metric_counters!(define_read_metric_counters);
 
 #[doc(hidden)]
 #[inline(always)]
@@ -177,7 +200,6 @@ pub(crate) fn record_superblock_load() {
 }
 
 #[inline(always)]
-#[allow(dead_code)]
 pub(crate) fn record_commit_load(instructions: u64) {
     add(&COMMIT_LOAD, instructions);
 }
@@ -195,32 +217,6 @@ pub(crate) fn record_commit_page_write(instructions: u64) {
 #[inline(always)]
 pub(crate) fn record_commit_superblock_store(instructions: u64) {
     add(&COMMIT_SUPERBLOCK_STORE, instructions);
-}
-
-fn counters() -> [&'static AtomicU64; 21] {
-    [
-        &X_READ_CALLS,
-        &X_READ_BYTES,
-        &X_WRITE_CALLS,
-        &X_WRITE_BYTES,
-        &X_FILE_SIZE_CALLS,
-        &X_LOCK_CALLS,
-        &X_UNLOCK_CALLS,
-        &X_CHECK_RESERVED_LOCK_CALLS,
-        &X_FILE_CONTROL_CALLS,
-        &X_DEVICE_CHARACTERISTICS_CALLS,
-        &STABLE_DATA_READ_CALLS,
-        &STABLE_DATA_READ_BYTES,
-        &STABLE_DATA_WRITE_CALLS,
-        &STABLE_DATA_WRITE_BYTES,
-        &STABLE_GROW_CALLS,
-        &STABLE_GROW_PAGES,
-        &SUPERBLOCK_LOADS,
-        &COMMIT_LOAD,
-        &COMMIT_CAPACITY,
-        &COMMIT_PAGE_WRITE,
-        &COMMIT_SUPERBLOCK_STORE,
-    ]
 }
 
 #[inline(always)]
@@ -247,14 +243,88 @@ pub(crate) fn metrics_enabled() -> bool {
     METRICS_ENABLED.load(Ordering::Relaxed)
 }
 
-#[inline(always)]
-pub(crate) fn instruction_counter() -> u64 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        ic_cdk::api::performance_counter(0)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn every_counter_records_when_metrics_are_enabled() {
+        reset_read_metrics();
+
+        record_x_read(3);
+        record_x_write(5);
+        record_x_file_size();
+        record_x_lock();
+        record_x_unlock();
+        record_x_check_reserved_lock();
+        record_x_file_control();
+        record_x_device_characteristics();
+        record_stable_data_read(7);
+        record_stable_data_write(11);
+        record_stable_grow(13);
+        record_superblock_load();
+        record_commit_load(17);
+        record_commit_capacity(19);
+        record_commit_page_write(23);
+        record_commit_superblock_store(29);
+
+        assert_eq!(
+            read_metrics_snapshot(),
+            ReadMetrics {
+                x_read_calls: 1,
+                x_read_bytes: 3,
+                x_write_calls: 1,
+                x_write_bytes: 5,
+                x_file_size_calls: 1,
+                x_lock_calls: 1,
+                x_unlock_calls: 1,
+                x_check_reserved_lock_calls: 1,
+                x_file_control_calls: 1,
+                x_device_characteristics_calls: 1,
+                stable_data_read_calls: 1,
+                stable_data_read_bytes: 7,
+                stable_data_write_calls: 1,
+                stable_data_write_bytes: 11,
+                stable_grow_calls: 1,
+                stable_grow_pages: 13,
+                superblock_loads: 1,
+                commit_load: 17,
+                commit_capacity: 19,
+                commit_page_write: 23,
+                commit_superblock_store: 29,
+            }
+        );
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        0
+
+    #[test]
+    #[serial_test::serial]
+    fn reset_read_metrics_clears_every_counter_and_enables_metrics() {
+        for counter in counters() {
+            counter.store(41, Ordering::Relaxed);
+        }
+        disable_read_metrics();
+
+        reset_read_metrics();
+
+        assert!(metrics_enabled());
+        assert_eq!(counters().len(), COUNTER_COUNT);
+        assert_eq!(read_metrics_snapshot(), ReadMetrics::default());
+        assert!(counters()
+            .iter()
+            .all(|counter| counter.load(Ordering::Relaxed) == 0));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn disabled_metrics_ignore_recorders() {
+        reset_read_metrics();
+        disable_read_metrics();
+
+        record_x_read(3);
+        record_stable_data_write(5);
+        record_commit_superblock_store(7);
+
+        assert_eq!(read_metrics_snapshot(), ReadMetrics::default());
     }
 }

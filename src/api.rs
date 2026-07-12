@@ -216,8 +216,7 @@ fn kv_count() -> Result<u64, String> {
 fn db_meta() -> Result<DbMeta, String> {
     require_controller()?;
     let block = Superblock::load().map_err(|error| error.to_string())?;
-    let stats =
-        crate::sqlite_vfs::stable_blob::storage_stats().map_err(|error| error.to_string())?;
+    let stats = Db::storage_stats().map_err(error_text)?;
     let stable_pages = memory::size_pages();
     Ok(DbMeta {
         db_size: block.db_size,
@@ -302,7 +301,7 @@ fn db_test_clear_failpoints() -> Result<(), String> {
     require_controller()?;
     crate::stable::memory::clear_failpoint();
     crate::db::statement::clear_step_failpoint();
-    crate::sqlite_vfs::stable_blob::rollback_update();
+    Db::rollback_update();
     Ok(())
 }
 
