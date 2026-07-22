@@ -24,7 +24,18 @@ scripts/build-sqlite-precompiled.sh
 The script uses `wasm32-wasi-clang` by default. Set `WASI_CC` or `LLVM_AR` when
 using non-standard tool locations.
 Both `sqlite-precompiled` regeneration and `sqlite-bundled` use
-`vendor/sqlite/build-flags.txt` as the SQLite compile flag source.
+`vendor/sqlite/build-flags.txt` as the SQLite definition source. Canister Wasm
+builds also use `vendor/sqlite/wasm-compiler-flags.txt`, which selects `-O3`
+and WebAssembly SIMD with `-msimd128`. Native test builds do not receive the
+Wasm-only compiler flags.
+
+The resulting canister module requires a WebAssembly runtime with `simd128`
+support. Current ICP and the pinned PocketIC test environment support it.
+Archive regeneration also writes
+`vendor/sqlite/wasm32-unknown-unknown/lib/libsqlite3.build-metadata`. Run
+`scripts/check-sqlite-precompiled.sh` to verify that the checked-in archive
+matches the SQLite source, definition flags, Wasm compiler flags, shim headers,
+and generation script recorded by that metadata.
 Local time modifiers are intentionally omitted; use UTC date/time functions in
 canister SQL.
 

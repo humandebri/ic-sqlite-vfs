@@ -96,6 +96,11 @@ recover拡張は製品で使用しておらず、icstable VFSを経由しない�
 SQLite公開TCLテストはadvisoryとし、現在のリリースゲートには追加しない。
 同梱SQLiteのsource IDまたは`vendor/sqlite/build-flags.txt`を変更した場合は、公開fuzzとTCLテストを再実行し、許容リスト外の新規不一致がないことを確認する。
 
+2026年7月22日のWasmコード生成変更では、source IDと`vendor/sqlite/build-flags.txt`を変更せず、`vendor/sqlite/wasm-compiler-flags.txt`に`-O3`と`-msimd128`を設定した。
+公開TCLテストはネイティブのUnix VFSを使用し、出荷するWasmの最適化やSIMD命令を検証できないため、この変更では再実行していない。
+代わりに、precompiled／bundledの両構成でrelease Wasmを生成し、`simd128` feature、`ic0`以外のimport禁止、10 MiBのcode section上限、100 MiBのmodule上限を検査した。
+さらにPocketICでVFS回帰、upgrade、failure injection、性能回帰を実行し、出荷経路の挙動と計測値を確認した。
+
 今回、標準構成は従来停止していた箇所以降を含め、無除外で全スイート末尾まで実施した。
 同梱相当構成は、上記の既知非互換を除外した適用可能範囲で全スイート末尾まで実施した。
 除外した公開TCLテストと、非公開かつ有償のTH3は実施範囲に含まれない。

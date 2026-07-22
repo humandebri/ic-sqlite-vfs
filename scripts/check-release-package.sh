@@ -31,7 +31,11 @@ require_path "docs/PUBLIC_API_2_0.snapshot"
 require_path "LICENSE-APACHE"
 require_path "LICENSE-MIT"
 require_path "scripts/check-release-version.sh"
+require_path "scripts/check-sqlite-precompiled.sh"
+require_path "scripts/check-wasm-contract.sh"
 require_path "tests/public_api.rs"
+require_path "vendor/sqlite/wasm-compiler-flags.txt"
+require_path "vendor/sqlite/wasm32-unknown-unknown/lib/libsqlite3.build-metadata"
 
 reject_pattern '(^|/)target/'
 reject_pattern '(^|/)[.]DS_Store$'

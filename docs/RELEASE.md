@@ -13,17 +13,24 @@ cargo check --release --target wasm32-unknown-unknown --no-default-features --fe
 cargo test --tests
 cargo test --test public_api
 bash scripts/sqlite-critical-check.sh
-cargo build --target wasm32-unknown-unknown
-cargo build --target wasm32-unknown-unknown --features canister-api
+scripts/check-sqlite-precompiled.sh
+cargo build --release --target wasm32-unknown-unknown
+cargo build --release --target wasm32-unknown-unknown --features canister-api
 cargo package --no-verify --allow-dirty
 cargo package --list --allow-dirty
 scripts/check-release-package.sh
 npm run test:pocketic:perf
 npm run build:wasm
 wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm
+scripts/check-wasm-contract.sh target/pocketic/ic_sqlite_vfs.wasm
 ```
 
-`wasm-objdump` の import は `ic0.*` のみ許可する。`env.*` が出た場合は release しない。
+`scripts/check-wasm-contract.sh` は import が `ic0.*` のみであること、
+`simd128` target feature が存在すること、Wasm 全体と code section が ICP の
+上限内であることを検査する。いずれかを満たさない場合は release しない。
+`scripts/check-sqlite-precompiled.sh` は、同梱するarchiveが記録済みのSQLite
+ソース、定義、Wasm compiler flag、shim header、生成スクリプトと一致することを
+検査する。入力を変更した場合はarchiveとbuild metadataを同時に再生成する。
 GitHub Release artifact は `sqlite-precompiled,canister-api` の release profile
 で build した `target/pocketic/ic_sqlite_vfs.wasm` に統一する。
 `scripts/sqlite-critical-check.sh` は基礎検査、Verus proof、PocketIC regression、
@@ -31,7 +38,7 @@ PocketIC performance/capacity regression を実行する。package contents は 
 と release gate で明示実行する。
 SQLite公開TCL `alltest` はUnix VFSを検査するadvisory testであり、icstable VFSのrelease gateには含めない。
 公開TCLテストを全件合格したとは表記しない。
-同梱SQLiteのsource IDまたはcompile flagを変更した場合は、`docs/SQLITE_PUBLIC_TEST_RESULTS.md`の条件で公開fuzzとTCLテストを再実行する。標準構成では既存の不一致との差分と全スイート末尾への到達を確認し、同梱相当構成では記録済みの非互換除外後に新規不一致がないことと全スイート末尾への到達を確認する。
+同梱SQLiteのsource IDまたは`vendor/sqlite/build-flags.txt`を変更した場合は、`docs/SQLITE_PUBLIC_TEST_RESULTS.md`の条件で公開fuzzとTCLテストを再実行する。標準構成では既存の不一致との差分と全スイート末尾への到達を確認し、同梱相当構成では記録済みの非互換除外後に新規不一致がないことと全スイート末尾への到達を確認する。`vendor/sqlite/wasm-compiler-flags.txt`だけを変更した場合、Unix VFSを使うネイティブ公開TCLテストでは出荷Wasmのコード生成を検証できないため、Wasm成果物の契約検査、PocketIC回帰試験、および性能回帰試験で判定する。
 PocketIC regression の
 `PocketIC trap after dirty page write rolls back before superblock publish` は
 in-place commit の rollback 契約を確認する release blocker とする。このテストは
@@ -75,6 +82,8 @@ equivalent rollback.
 - npm: `11.14.1`
 - dfx: `0.31.0`
 - PocketIC: `@dfinity/pic` が起動する `pocket-ic`
+- vendored SQLite archive regeneration: `wasm32-wasi-clang 23.0.0git`,
+  `llvm-ar 22.1.1`
 
 `rust-toolchain.toml` は Rust toolchain と wasm targets を固定する。CI と
 release workflow も `Cargo.toml` の `rust-version` と同じ `1.95.0` を使う。

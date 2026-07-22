@@ -37,18 +37,13 @@ jobs:
       - run: npm ci
       - run: cargo fmt --check
       - run: bash scripts/check-release-version.sh
+      - run: scripts/check-sqlite-precompiled.sh
       - run: VERUS_REQUIRED=1 bash scripts/sqlite-critical-check.sh
-      - run: cargo build --target wasm32-unknown-unknown
-      - run: cargo build --target wasm32-unknown-unknown --features canister-api
+      - run: cargo build --release --target wasm32-unknown-unknown
+      - run: cargo build --release --target wasm32-unknown-unknown --features canister-api
+      - run: scripts/check-wasm-contract.sh target/wasm32-unknown-unknown/release/ic_sqlite_vfs.wasm
       - run: npm run test:pocketic:regression
       - run: npm run test:pocketic:perf
       - run: scripts/check-release-package.sh
       - run: npm run build:wasm
-      - name: Check wasm imports
-        run: |
-          imports="$(wasm-objdump -x target/pocketic/ic_sqlite_vfs.wasm | grep '<-' || true)"
-          echo "$imports"
-          if echo "$imports" | grep -v '<- ic0\.'; then
-            echo "unexpected non-ic0 import" >&2
-            exit 1
-          fi
+      - run: scripts/check-wasm-contract.sh target/pocketic/ic_sqlite_vfs.wasm

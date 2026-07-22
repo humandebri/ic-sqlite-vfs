@@ -477,10 +477,17 @@ SQLITE_DEFAULT_MEMSTATUS=0
 SQLITE_TEMP_STORE=3
 ```
 
-The authoritative SQLite flag list is `vendor/sqlite/build-flags.txt`.
-`sqlite-bundled` reads it during Cargo builds, and
-`scripts/build-sqlite-precompiled.sh` uses it when regenerating the vendored
-archive.
+The authoritative SQLite definition list is `vendor/sqlite/build-flags.txt`.
+The canister-Wasm compiler flags are defined separately in
+`vendor/sqlite/wasm-compiler-flags.txt`; they currently select `-O3` and
+`-msimd128`. `sqlite-bundled` reads both files for `wasm32-unknown-unknown`
+builds, and `scripts/build-sqlite-precompiled.sh` uses the same files when
+regenerating the vendored archive. Native test builds use the SQLite definitions
+without the Wasm-only compiler flags.
+
+The shipped precompiled archive therefore requires a WebAssembly runtime with
+`simd128` support. The performance-oriented build increases canister Wasm size
+in exchange for lower SQLite instruction counts.
 FTS5, UTC date/time functions, and JSON functions are enabled. Local time
 modifiers are omitted because canister SQL should use UTC time.
 
@@ -489,8 +496,10 @@ crate provides `sqlite3_os_init()` and registers only the `icstable` VFS.
 
 ## Benchmarks
 
-Measured locally on 2026-07-03 with PocketIC. The main metric is IC
-instructions from `ic_cdk::api::performance_counter(0)`.
+Measured locally on 2026-07-22 with PocketIC after compiling SQLite with the
+`-O3` and `-msimd128` flags. The three repeated runs produced identical
+instruction counts. The main metric is IC instructions from
+`ic_cdk::api::performance_counter(0)`.
 
 The benchmark harness lives in `benchmarks/kv-canister` and can be run with:
 
@@ -514,40 +523,40 @@ stops before `BenchReport` metadata collection.
 
 | Workload | ic-sqlite-vfs | wasi2ic + ic-rusqlite | Result |
 |---|---:|---:|---:|
-| reset + insert, 1000 rows | 10.90M | 83.87M | 7.7x fewer instructions |
-| insert only into empty table, 1000 rows | 10.40M | 83.27M | 8.0x fewer instructions |
-| insert only into empty table, 5000 rows | 61.51M | 426.93M | 6.9x fewer instructions |
-| append insert, 5000 existing + 1000 new | 13.65M | 86.21M | 6.3x fewer instructions |
-| insert/update upsert, 1000 rows | 13.45M | 86.53M | 6.4x fewer instructions |
-| update only by primary key, 1000 rows | 16.86M | 81.20M | 4.8x fewer instructions |
-| update only by primary key, 5000 rows | 91.60M | 413.12M | 4.5x fewer instructions |
-| point read, 1 key | 0.048M | 0.014M | wasi2ic lower on this harness |
-| point read, 10 keys | 0.136M | 0.109M | wasi2ic lower on this harness |
-| point read, 100 keys | 1.02M | 1.05M | ic-sqlite-vfs lower |
-| point read, 1000 keys | 10.12M | 10.69M | ic-sqlite-vfs lower |
-| bulk read ordered scan, 100 rows | 0.237M | 0.233M | wasi2ic lower on this harness |
-| bulk read ordered scan, 1000 rows | 1.38M | 1.66M | ic-sqlite-vfs lower |
-| bulk read ordered scan, 5000 rows | 6.50M | 7.99M | ic-sqlite-vfs lower |
-| `WHERE key IN (...)`, 100 keys | 1.31M | 1.65M | ic-sqlite-vfs lower |
-| `WHERE key IN (...)`, 1000 keys | 14.40M | 18.41M | ic-sqlite-vfs lower |
+| reset + insert, 1000 rows | 10.33M | 83.87M | 8.1x fewer instructions |
+| insert only into empty table, 1000 rows | 9.87M | 83.27M | 8.4x fewer instructions |
+| insert only into empty table, 5000 rows | 56.77M | 426.93M | 7.5x fewer instructions |
+| append insert, 5000 existing + 1000 new | 12.53M | 86.21M | 6.9x fewer instructions |
+| insert/update upsert, 1000 rows | 12.32M | 86.53M | 7.0x fewer instructions |
+| update only by primary key, 1000 rows | 16.60M | 81.20M | 4.9x fewer instructions |
+| update only by primary key, 5000 rows | 90.60M | 413.12M | 4.6x fewer instructions |
+| point read, 1 key | 0.047M | 0.014M | wasi2ic lower on this harness |
+| point read, 10 keys | 0.127M | 0.109M | wasi2ic lower on this harness |
+| point read, 100 keys | 0.934M | 1.05M | ic-sqlite-vfs lower |
+| point read, 1000 keys | 9.32M | 10.69M | ic-sqlite-vfs lower |
+| bulk read ordered scan, 100 rows | 0.218M | 0.233M | ic-sqlite-vfs lower |
+| bulk read ordered scan, 1000 rows | 1.27M | 1.66M | ic-sqlite-vfs lower |
+| bulk read ordered scan, 5000 rows | 6.01M | 7.99M | ic-sqlite-vfs lower |
+| `WHERE key IN (...)`, 100 keys | 1.27M | 1.65M | ic-sqlite-vfs lower |
+| `WHERE key IN (...)`, 1000 keys | 13.70M | 18.41M | ic-sqlite-vfs lower |
 
 Additional read-helper checks from the same 1000-row PocketIC run:
 
 | Workload | ic-sqlite-vfs |
 |---|---:|
-| repeated public helper point read, 1000 keys | 12.46M |
-| repeated prepare-each point read, 1000 keys | 39.51M |
+| repeated public helper point read, 1000 keys | 11.60M |
+| repeated prepare-each point read, 1000 keys | 36.08M |
 
 Additional limit-case checks from the same PocketIC run:
 
 | Workload | ic-sqlite-vfs |
 |---|---:|
-| large blob insert/readback, 64 KiB | 0.97M |
-| large blob insert/readback, 256 KiB | 2.26M |
-| unbounded `ORDER BY`, 5000 rows | 67.02M |
-| join, 2000 rows | 17.31M |
-| repeated single-row update, 1000-row DB, 20 writes | 3.43M |
-| repeated single-row update, 5000-row DB, 20 writes | 3.45M |
+| large blob insert/readback, 64 KiB | 0.94M |
+| large blob insert/readback, 256 KiB | 2.23M |
+| unbounded `ORDER BY`, 5000 rows | 62.90M |
+| join, 2000 rows | 16.04M |
+| repeated single-row update, 1000-row DB, 20 writes | 3.35M |
+| repeated single-row update, 5000-row DB, 20 writes | 3.38M |
 
 Repeated point reads execute one SQLite statement per key inside the canister.
 They mostly measure bind/reset/step wrapper overhead, not stable-memory I/O.
@@ -567,8 +576,8 @@ path into open, prepare, formatting, execute, VFS read/write, stable write,
 stable grow, and commit phase metrics. `bench_growth_profile` breaks repeated
 single-row updates into update open, formatting, prepare, execute, changes,
 VFS/stable writes, stable grow, and commit metrics.
-In the 1000-key `WHERE key IN (...)` profile, row scan is about 10.30M
-instructions and SQLite prepare is about 3.53M instructions.
+In the 1000-key `WHERE key IN (...)` profile, row scan is about 9.92M
+instructions and SQLite prepare is about 3.29M instructions.
 In the 1000-row upsert profile, SQLite statement execution dominates; update
 open work is about 0.007M instructions after the write connection is warm.
 In the 20-write growth profile, cached UPDATE statements reduce prepare work to
@@ -608,7 +617,7 @@ Wasm size:
 
 | Implementation | Wasm |
 |---|---:|
-| ic-sqlite-vfs reference canister | 1.62 MB |
+| ic-sqlite-vfs reference canister | 2.22 MB |
 | wasi2ic KV benchmark canister | 3.03 MB |
 
 The instruction gap comes from removing WASI fd emulation and mapping SQLite

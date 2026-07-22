@@ -1,0 +1,3 @@
+# Performance-oriented compiler flags for SQLite canister Wasm builds.
+-O3
+-msimd128

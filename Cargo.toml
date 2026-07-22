@@ -41,8 +41,10 @@ include = [
   "/tests/**/*.rs",
   "/vendor/sqlite/bindings/**",
   "/vendor/sqlite/build-flags.txt",
+  "/vendor/sqlite/wasm-compiler-flags.txt",
   "/vendor/sqlite/src/**",
   "/vendor/sqlite/wasm32-unknown-unknown/lib/libsqlite3.a",
+  "/vendor/sqlite/wasm32-unknown-unknown/lib/libsqlite3.build-metadata",
 ]
 
 [features]

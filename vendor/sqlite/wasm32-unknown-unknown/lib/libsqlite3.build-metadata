@@ -1,0 +1,5 @@
+format=1
+build_inputs_sha256=55697687514f35fcdec95720d8113e97c41cbd4efa5ee78ea0844a3849ddaa01
+archive_sha256=de184de6d9592e206b30b26dd31c7336bcbbae7b60881f607b70c5d5f6fa69d8
+compiler_version=clang version 23.0.0git
+archiver_version=Homebrew LLVM version 22.1.1

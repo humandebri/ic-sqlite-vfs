@@ -8,6 +8,8 @@ import { startPocketIcServer } from "./server.mjs";
 const wasm = resolve("target/pocketic/ic_sqlite_vfs_kv_bench.wasm");
 const timeout = 600_000;
 const maxLimitCaseInstructions = 10_000_000_000n;
+const standardRegressionPercent = 15n;
+const optimizedSqliteRegressionPercent = 5n;
 
 const result = (ok) => IDL.Variant({ Ok: ok, Err: IDL.Text });
 
@@ -216,19 +218,24 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
   try {
     const resetActor = await setupActor(pic);
     const reset = await callReport("bench_reset_1000_clean", resetActor.bench_reset(1_000));
-    assertWithinBaseline("bench_reset_1000_clean", reset, 10_623_761n, 25n, 10n);
+    assertWithinBaseline("bench_reset_1000_clean", reset, 10_331_010n);
     await callReport("db_stats_after_reset_1000_clean", resetActor.db_stats());
 
     const readActor = await setupActor(pic);
     await callReport("bench_reset_1000_for_point_read", readActor.bench_reset(1_000));
     const read1 = await assertLimitCase("bench_read_1", readActor.bench_read(1));
-    assertWithinBaseline("bench_read_1", read1, 46_515n, 25n, 10n);
+    assertWithinBaseline("bench_read_1", read1, 46_775n);
     const read10 = await assertLimitCase("bench_read_10", readActor.bench_read(10));
-    assertWithinBaseline("bench_read_10", read10, 132_896n, 25n, 10n);
+    assertWithinBaseline("bench_read_10", read10, 127_237n);
     const read100 = await assertLimitCase("bench_read_100", readActor.bench_read(100));
-    assertWithinBaseline("bench_read_100", read100, 999_756n, 25n, 10n);
+    assertWithinBaseline("bench_read_100", read100, 934_459n);
     const read = await callReport("bench_read_1000", readActor.bench_read(1_000));
-    assertWithinBaseline("bench_read", read, 9_982_767n, 25n, 10n);
+    assertWithinBaseline(
+      "bench_read",
+      read,
+      9_324_551n,
+      optimizedSqliteRegressionPercent,
+    );
     const publicHelperRead = await assertLimitCase(
       "bench_read_public_helper_1000",
       readActor.bench_read_public_helper(1_000),
@@ -237,8 +244,8 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
       "bench_read_prepare_each_1000",
       readActor.bench_read_prepare_each(1_000),
     );
-    assertWithinBaseline("bench_read_public_helper_1000", publicHelperRead, 11_965_551n, 25n, 10n);
-    assertWithinBaseline("bench_read_prepare_each_1000", prepareEachRead, 39_354_703n, 25n, 10n);
+    assertWithinBaseline("bench_read_public_helper_1000", publicHelperRead, 11_595_311n);
+    assertWithinBaseline("bench_read_prepare_each_1000", prepareEachRead, 36_083_668n);
     assert(
       publicHelperRead.instructions * 2n <= prepareEachRead.instructions,
       `public helper read should reuse prepared statements: public=${formatReport(publicHelperRead)}, prepareEach=${formatReport(prepareEachRead)}`,
@@ -253,7 +260,12 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
     const writeActor = await setupActor(pic);
     await callReport("bench_reset_1000_for_write", writeActor.bench_reset(1_000));
     const write = await callReport("bench_write_1000_clean", writeActor.bench_write(1_000));
-    assertWithinBaseline("bench_write_1000_clean", write, 13_174_459n, 25n, 10n);
+    assertWithinBaseline(
+      "bench_write_1000_clean",
+      write,
+      12_324_382n,
+      optimizedSqliteRegressionPercent,
+    );
     await callReport("db_stats_after_write_clean", writeActor.db_stats());
 
     const writeProfileActor = await setupActor(pic);
@@ -273,7 +285,12 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
       await callReport("db_stats_after_insert_only_5000", actor.db_stats());
       return report;
     });
-    assertWithinBaseline("bench_insert_only_5000", insert5000, 60_218_159n, 25n, 10n);
+    assertWithinBaseline(
+      "bench_insert_only_5000",
+      insert5000,
+      56_768_316n,
+      optimizedSqliteRegressionPercent,
+    );
     await scenario(pic, "append_insert_5000_1000", async (actor) => {
       await assertLimitCase(
         "bench_append_insert_5000_1000",
@@ -290,14 +307,14 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
       await callReport("db_stats_after_update_only_5000", actor.db_stats());
       return report;
     });
-    assertWithinBaseline("bench_update_only_5000", update5000, 90_402_768n, 25n, 10n);
+    assertWithinBaseline("bench_update_only_5000", update5000, 90_603_324n);
 
     const bulkActor = await setupActor(pic);
     await callReport("bench_reset_5000_clean", bulkActor.bench_reset(5_000));
     await assertLimitCase("bench_many_rows_100", bulkActor.bench_many_rows(100));
     await assertLimitCase("bench_many_rows_1000", bulkActor.bench_many_rows(1_000));
     const bulk5000 = await assertLimitCase("bench_many_rows_5000", bulkActor.bench_many_rows(5_000));
-    assertWithinBaseline("bench_many_rows_5000", bulk5000, 6_460_904n, 25n, 10n);
+    assertWithinBaseline("bench_many_rows_5000", bulk5000, 6_009_759n);
     const getMany100 = await assertLimitCase(
       "bench_get_many_in_100",
       bulkActor.bench_get_many_in(100),
@@ -306,8 +323,8 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
       "bench_get_many_in_1000",
       bulkActor.bench_get_many_in(1_000),
     );
-    assertWithinBaseline("bench_get_many_in_100", getMany100, 1_313_458n, 25n, 10n);
-    assertWithinBaseline("bench_get_many_in_1000", getMany1000, 14_353_642n, 25n, 10n);
+    assertWithinBaseline("bench_get_many_in_100", getMany100, 1_273_992n);
+    assertWithinBaseline("bench_get_many_in_1000", getMany1000, 13_699_888n);
     const getManyProfile = await callReport(
       "bench_get_many_in_profile",
       bulkActor.bench_get_many_in_profile(1_000),
@@ -323,7 +340,7 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
       await callReport("db_stats_after_large_blob_64k", actor.db_stats());
       return report;
     });
-    assertWithinBaseline("bench_large_blob_64k", largeBlob64k, 918_765n, 25n, 10n);
+    assertWithinBaseline("bench_large_blob_64k", largeBlob64k, 937_503n);
     const largeBlob256k = await scenario(pic, "large_blob_256k", async (actor) => {
       const report = await assertLimitCase(
         "bench_large_blob_256k",
@@ -332,7 +349,7 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
       await callReport("db_stats_after_large_blob_256k", actor.db_stats());
       return report;
     });
-    assertWithinBaseline("bench_large_blob_256k", largeBlob256k, 2_188_597n, 25n, 10n);
+    assertWithinBaseline("bench_large_blob_256k", largeBlob256k, 2_226_232n);
 
     const orderBy = await scenario(pic, "unbounded_order_by_5000", async (actor) => {
       const report = await assertLimitCase(
@@ -342,21 +359,21 @@ test("PocketIC instruction and limit-case regression checks", { timeout }, async
       await callReport("db_stats_after_unbounded_order_by_5000", actor.db_stats());
       return report;
     });
-    assertWithinBaseline("bench_unbounded_order_by_5000", orderBy, 65_926_719n, 25n, 10n);
+    assertWithinBaseline("bench_unbounded_order_by_5000", orderBy, 62_901_298n);
     const join = await scenario(pic, "join_2000", async (actor) => {
       const report = await assertLimitCase("bench_join_2000", actor.bench_join(2_000));
       await callReport("db_stats_after_join_2000", actor.db_stats());
       return report;
     });
-    assertWithinBaseline("bench_join_2000", join, 16_613_620n, 25n, 10n);
+    assertWithinBaseline("bench_join_2000", join, 16_035_708n);
     const growth1k = await scenario(pic, "growth_1000_20", async (actor) =>
       assertLimitCase("bench_growth_1000_20", actor.bench_growth(1_000, 20)),
     );
     const growth5k = await scenario(pic, "growth_5000_20", async (actor) =>
       assertLimitCase("bench_growth_5000_20", actor.bench_growth(5_000, 20)),
     );
-    assertWithinBaseline("bench_growth_1000_20", growth1k, 2_631_116n, 25n, 10n);
-    assertWithinBaseline("bench_growth_5000_20", growth5k, 2_670_918n, 25n, 10n);
+    assertWithinBaseline("bench_growth_1000_20", growth1k, 3_349_374n);
+    assertWithinBaseline("bench_growth_5000_20", growth5k, 3_376_251n);
     assert(
       growth5k.instructions <= growth1k.instructions * 2n,
       `bench_growth should not scale with DB size: 1k=${formatReport(growth1k)}, 5k=${formatReport(growth5k)}`,
@@ -417,8 +434,13 @@ async function callReport(name, promise) {
   return report;
 }
 
-function assertWithinBaseline(name, report, baseline, multiplier, divisor) {
-  const limit = (baseline * multiplier) / divisor;
+function assertWithinBaseline(
+  name,
+  report,
+  baseline,
+  regressionPercent = standardRegressionPercent,
+) {
+  const limit = (baseline * (100n + regressionPercent)) / 100n;
   assert(
     report.instructions <= limit,
     `${name} instruction regression: baseline=${baseline}, limit=${limit}, ${formatReport(report)}`,

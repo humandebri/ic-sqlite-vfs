@@ -144,20 +144,24 @@ for workflow in .github/workflows/ci.yml .github/workflows/release.yml; do
     echo "$workflow does not use $expected_rust_toolchain_action" >&2
     exit 1
   fi
-  if grep -Fq "target/wasm32-unknown-unknown/debug/ic_sqlite_vfs.wasm" "$workflow"; then
-    echo "$workflow still checks or uploads debug wasm; expected target/pocketic/ic_sqlite_vfs.wasm" >&2
-    exit 1
-  fi
   if ! grep -Fq "target/pocketic/ic_sqlite_vfs.wasm" "$workflow"; then
     echo "$workflow does not check or upload target/pocketic/ic_sqlite_vfs.wasm" >&2
     exit 1
   fi
-  if ! grep -Fxq "      - run: cargo build --target wasm32-unknown-unknown" "$workflow"; then
-    echo "$workflow does not run default-feature wasm build" >&2
+  if ! grep -Fxq "      - run: cargo build --release --target wasm32-unknown-unknown" "$workflow"; then
+    echo "$workflow does not run release default-feature wasm build" >&2
     exit 1
   fi
-  if ! grep -Fxq "      - run: cargo build --target wasm32-unknown-unknown --features canister-api" "$workflow"; then
-    echo "$workflow does not run default-feature canister-api wasm build" >&2
+  if ! grep -Fxq "      - run: cargo build --release --target wasm32-unknown-unknown --features canister-api" "$workflow"; then
+    echo "$workflow does not run release default-feature canister-api wasm build" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc "scripts/check-wasm-contract.sh" "$workflow")" -lt 2 ]]; then
+    echo "$workflow does not check both bundled and precompiled Wasm contracts" >&2
+    exit 1
+  fi
+  if ! grep -Fxq "      - run: scripts/check-sqlite-precompiled.sh" "$workflow"; then
+    echo "$workflow does not verify the precompiled SQLite provenance" >&2
     exit 1
   fi
   if ! grep -Fxq "      - run: VERUS_REQUIRED=1 bash scripts/sqlite-critical-check.sh" "$workflow"; then
