@@ -123,10 +123,27 @@ test("IC instruction budgets interrupt SQL and leave the cached connection usabl
     // exercises the contract that a published write must not become an error.
     const warmCommit = await update(1000, 128, [100_000_000n], 20_000_000n);
     assert.deepEqual(warmCommit.error, []);
-    const publishedOverrun = await update(1000, 128, [warmCommit.instructions[0] - 1000n], 1n);
-    assert.deepEqual(publishedOverrun.error, []);
-    assert.equal(publishedOverrun.stored_rows, 1000n);
-    assert.equal(publishedOverrun.committed_over_soft_limit, true);
+    // Heap/page allocation changes can make the next operation cheaper than
+    // calibration. Search a small bounded range within this fixture's commit
+    // cost rather than assuming a 1,000-instruction gap always produces overrun.
+    let publishedOverrun;
+    for (const gap of [1000n, 10_000n, 50_000n, 100_000n, 200_000n]) {
+      const limit = warmCommit.instructions[0] - gap;
+      const candidate = await update(1000, 128, [limit], 1n);
+      if (candidate.error.length !== 0) {
+        assert.match(candidate.error[0], /update budget exceeded: Instructions/);
+        assert.equal(candidate.stored_rows, 0n);
+        assert.equal(candidate.committed_bytes, 0n);
+        continue;
+      }
+      assert.equal(candidate.stored_rows, 1000n);
+      assert.equal(candidate.committed_over_soft_limit, candidate.instructions[0] > limit);
+      if (candidate.committed_over_soft_limit) {
+        publishedOverrun = candidate;
+        break;
+      }
+    }
+    assert.ok(publishedOverrun, "no successful post-publication soft overrun observed");
     console.log(JSON.stringify({ interruptedUpdate: instructionUpdate, committedUpdate, publishedOverrun },
       (_, value) => typeof value === "bigint" ? value.toString() : value));
     const overhead = await actor.db_test_query_overhead(10_000);

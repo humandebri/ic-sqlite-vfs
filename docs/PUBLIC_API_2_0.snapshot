@@ -40,11 +40,14 @@ src/db/connection.rs:pub fn query_text_iter_text_len_sum<'value, I>(
 src/db/connection.rs:pub fn raw(&self) -> *mut ffi::sqlite3 {
 src/db/connection.rs:pub struct CachedStatement<'connection> {
 src/db/connection.rs:pub struct Connection {
+src/db/migrate.rs:pub fn adopt_checksums(connection: &Connection, migrations: &[Migration]) -> Result<(), DbError> {
 src/db/migrate.rs:pub fn apply(connection: &Connection, migrations: &[Migration]) -> Result<(), DbError> {
 src/db/migrate.rs:pub sql: &'static str,
 src/db/migrate.rs:pub struct Migration {
 src/db/migrate.rs:pub version: u64,
 src/db/mod.rs:pub enum DbError {
+src/db/mod.rs:pub fn adopt_migration_checksums(
+src/db/mod.rs:pub fn adopt_migration_checksums(migrations: &[migrate::Migration]) -> Result<(), DbError> {
 src/db/mod.rs:pub fn db_checksum() -> Result<u64, DbError> {
 src/db/mod.rs:pub fn db_checksum(self) -> Result<u64, DbError> {
 src/db/mod.rs:pub fn init(memory: DbMemory) -> Result<(), DbError> {
