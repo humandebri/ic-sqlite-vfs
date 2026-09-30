@@ -1,7 +1,7 @@
 # API Stability
 
-This file defines the active `2.x` compatibility contract. The current public
-crate is `2.0.0`; production deployments should pin exact versions.
+This file defines the active `2.x` compatibility contract. The repository
+version is `2.1.0`; production deployments should pin exact versions.
 
 ## Stability Contract
 

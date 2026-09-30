@@ -20,7 +20,7 @@ stable memory.
 
 ## Status
 
-Current public release: `2.0.0`.
+Repository version: `2.1.0` (release preparation).
 
 The core VFS, transaction facade, checksum flow, and upgrade persistence tests
 are in place. The repository carries the active `2.x` compatibility contract
@@ -33,12 +33,11 @@ direct `ic-stable-structures` dependency for SQLite storage.
 See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `2.0` compatibility
 contract.
 
-### Unreleased additions on this branch
+### Additions in 2.1.0
 
-The published `2.0.0` package does not include the new budget and measurement
-APIs described below. They are implemented in this working branch and remain
-under review; the dependency example using `version = "2.0.0"` refers to the
-published API.
+Version `2.1.0` adds the budget, measurement and migration-checksum APIs
+described below. See [release notes](docs/RELEASE.md) for compatibility and
+upgrade requirements. Publish availability is tracked by the release process.
 
 | Area | Implemented in this branch | Still proposed / not implemented |
 | --- | --- | --- |
@@ -308,7 +307,7 @@ only for this repository's reference canister.
 
 ```toml
 [dependencies]
-ic-sqlite-vfs = { version = "2.0.0", default-features = false, features = ["sqlite-precompiled"] }
+ic-sqlite-vfs = { version = "2.1.0", default-features = false, features = ["sqlite-precompiled"] }
 ```
 
 `sqlite-precompiled` links the vendored `wasm32-unknown-unknown` SQLite archive
@@ -461,7 +460,7 @@ This detects accidental edits; it is not protection against an actor that can
 modify migration metadata. It is separate from the full database-image checksum.
 Storage adds one checksum table and 32 digest bytes per recorded migration plus
 SQLite overhead, with no staging areas or stable-layout/MemoryId changes.
-These additions are unreleased; published `2.0.0` retains version-only history.
+Migration runners predating this feature retain version-only history.
 See [migration checksum validation and size impact](docs/MIGRATION_CHECKSUM_VALIDATION.md).
 
 ```rust

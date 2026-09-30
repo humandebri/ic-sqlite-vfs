@@ -57,4 +57,5 @@ jobs:
           fi
       - uses: softprops/action-gh-release@v3
         with:
+          body_path: docs/RELEASE_2_1_0.md
           files: target/pocketic/ic_sqlite_vfs.wasm

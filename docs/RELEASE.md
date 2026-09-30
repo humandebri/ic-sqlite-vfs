@@ -44,7 +44,13 @@ check scripts を含め、`target/`、`node_modules/`、`package-lock.json` を
 含めない。PocketIC fixture は nested Cargo package なので crates.io
 tarballではなく git tag checkout 側のrelease gateで検証する。
 
-## 2.0.0 Notes
+## 2.1.0 Notes
+
+See [2.1.0 release notes](RELEASE_2_1_0.md) for budgets, measurements, migration
+checksums, dependency updates and upgrade requirements. The tag workflow uses
+these notes as the GitHub Release body.
+
+## 2.0.0 Layout Notes
 
 2.0.0 は breaking stable-layout release。v8 は SQLite image を
 `db_base_offset` 以降に in-place 保存する。v6 segmented page-map stable
