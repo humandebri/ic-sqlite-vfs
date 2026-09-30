@@ -20,5 +20,6 @@ typedef __UINTPTR_TYPE__ uintptr_t;
 #define UINT16_MAX 65535
 #define UINT32_MAX 4294967295U
 #define UINT64_MAX 18446744073709551615ULL
+#define UINT64_C(value) value##ULL
 
 #endif

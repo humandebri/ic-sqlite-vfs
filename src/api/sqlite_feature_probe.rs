@@ -7,6 +7,31 @@ use crate::{Db, DbError};
 
 pub fn run() -> Result<(), String> {
     Db::update(|connection| {
+        let version =
+            connection.query_scalar::<String>("SELECT sqlite_version()", crate::params![])?;
+        let source =
+            connection.query_scalar::<String>("SELECT sqlite_source_id()", crate::params![])?;
+        expect_text(
+            "SQLite version",
+            &version,
+            crate::sqlite_vfs::ffi::SQLITE_VERSION.to_str().unwrap(),
+        )?;
+        expect_text(
+            "SQLite source ID",
+            &source,
+            crate::sqlite_vfs::ffi::SQLITE_SOURCE_ID.to_str().unwrap(),
+        )?;
+        connection.execute_batch("CREATE VIRTUAL TABLE temp.db_test_corrupt_fts USING fts5(body); INSERT INTO temp.db_test_corrupt_fts VALUES('alpha beta')")?;
+        for block in [vec![0u8, 0, 0, 0], vec![0, 0, 0, 3], vec![0, 0]] {
+            connection.execute_batch("SAVEPOINT malformed_leaf")?;
+            connection.execute("UPDATE temp.db_test_corrupt_fts_data SET block=?1 WHERE id>10", crate::params![block])?;
+            let result = connection.query_scalar::<i64>("SELECT count(*) FROM temp.db_test_corrupt_fts WHERE db_test_corrupt_fts MATCH 'alpha'", crate::params![]);
+            if !matches!(result, Err(DbError::Sqlite(code, _)) if code & 0xff == crate::sqlite_vfs::ffi::SQLITE_CORRUPT) {
+                return Err(feature_probe_error("malformed FTS leaf was not rejected".into()));
+            }
+            connection.execute_batch("ROLLBACK TO malformed_leaf; RELEASE malformed_leaf")?;
+            expect_i64("FTS5 recovery", connection.query_scalar::<i64>("SELECT count(*) FROM temp.db_test_corrupt_fts WHERE db_test_corrupt_fts MATCH 'alpha'", crate::params![])?, 1)?;
+        }
         connection
             .execute_batch("CREATE VIRTUAL TABLE temp.db_test_fts USING fts5(title, body);")?;
         connection.execute(

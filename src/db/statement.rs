@@ -91,6 +91,21 @@ impl<'connection> Statement<'connection> {
         }
     }
 
+    /// SQLite counters since preparation (or the last explicit reset).
+    /// Cached statements accumulate counters across executions until reset.
+    pub fn metrics(&self) -> crate::db::StatementMetrics {
+        crate::db::StatementMetrics::read(self.raw.as_ptr(), false)
+    }
+
+    /// Returns the current counters and resets the execution counters to zero.
+    pub fn reset_metrics(&mut self) -> crate::db::StatementMetrics {
+        crate::db::StatementMetrics::read(self.raw.as_ptr(), true)
+    }
+
+    pub(crate) fn is_read_only(&self) -> bool {
+        unsafe { ffi::sqlite3_stmt_readonly(self.raw.as_ptr()) != 0 }
+    }
+
     pub(crate) fn parameter_count(&self) -> usize {
         self.parameter_count
     }
@@ -240,6 +255,38 @@ impl<'connection> Statement<'connection> {
         values: &[&dyn ToSql],
     ) -> Result<Rows<'statement, 'connection>, DbError> {
         self.reset_and_bind(values)?;
+        Ok(Rows {
+            statement: self,
+            done: false,
+            clear_bindings_on_drop: false,
+        })
+    }
+
+    /// Check the soft instruction budget between individual parameter copies.
+    pub(crate) fn query_with_bind_check<'statement>(
+        &'statement mut self,
+        values: &[&dyn ToSql],
+        mut check: impl FnMut() -> Result<(), crate::db::QueryError>,
+    ) -> Result<Rows<'statement, 'connection>, crate::db::QueryError> {
+        let reset_rc = unsafe { ffi::sqlite3_reset(self.raw.as_ptr()) };
+        if reset_rc != ffi::SQLITE_OK {
+            return Err(sqlite_error(self.db, reset_rc).into());
+        }
+        if values.len() != self.parameter_count {
+            return Err(DbError::ParameterCountMismatch {
+                expected: self.parameter_count,
+                actual: values.len(),
+            }
+            .into());
+        }
+        for (index, value) in values.iter().enumerate() {
+            check()?;
+            let param =
+                std::ffi::c_int::try_from(index + 1).map_err(|_| DbError::TooManyParameters)?;
+            let bound = value.bind_to(self.raw.as_ptr(), param);
+            check()?;
+            bound?;
+        }
         Ok(Rows {
             statement: self,
             done: false,

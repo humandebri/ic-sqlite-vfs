@@ -48,6 +48,7 @@ include = [
 [features]
 default = ["sqlite-bundled"]
 bench-profile = []
+query-metrics = []
 canister-api = []
 canister-api-test-failpoints = ["canister-api"]
 sqlite-bundled = []

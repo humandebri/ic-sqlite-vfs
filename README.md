@@ -33,6 +33,31 @@ direct `ic-stable-structures` dependency for SQLite storage.
 See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `2.0` compatibility
 contract.
 
+### Unreleased additions on this branch
+
+The published `2.0.0` package does not include the new budget and measurement
+APIs described below. They are implemented in this working branch and remain
+under review; the dependency example using `version = "2.0.0"` refers to the
+published API.
+
+| Area | Implemented in this branch | Still proposed / not implemented |
+| --- | --- | --- |
+| Query measurement | `query_profiled`, statement counters, prepare/bind/execute instruction deltas, result rows/payload bytes, optional VFS/stable read counters | Public per-call write-I/O byte counters and result-encoding measurements |
+| Query budgets | `query_with_budget`: IC soft instruction limit, row/payload caps, scoped SQL/value limits | A hard instruction ceiling or a limit on total Rust/Candid memory |
+| Update budgets | `update_with_budget`: one write statement in a managed transaction, commit reserve, dirty-page/payload caps and commit metrics | Budgets spanning an arbitrary multi-statement closure |
+| Data transfer | Existing logical read/storage primitives | Public bounded import/export, resumable staging/validation and atomic activation, maintenance-mode coordination |
+| Migrations | Existing version-based migrations | SQL-content checksums and batched backfill helpers |
+| Build options | Existing precompiled/bundled link paths; optional `query-metrics` | Separate minimal and FTS5-enabled SQLite profiles |
+
+The vendored SQLite source and Wasm archive have also been updated to 3.53.4,
+and `anyhow` to 1.0.103 in the active library/example/benchmark/fuzz lockfiles.
+Migration, prepared statements, savepoints, multiple-database `DbHandle`, FTS5
+and JSON were already available; they are not new additions here.
+
+No custom SQL parser/planner, ORM, backup CLI or cross-message transaction
+support is added. Proposed items above describe remaining scope, not a release
+commitment.
+
 ## Why
 
 SQLite already has the abstraction IC canisters need: `sqlite3_vfs` and
@@ -285,6 +310,120 @@ See [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) for details and rationale.
 For migration from `ic-sqlite` or `ic-rusqlite`, see
 [docs/MIGRATING_FROM_IC_SQLITE.md](docs/MIGRATING_FROM_IC_SQLITE.md).
 
+The following budget and measured-query APIs are unreleased branch additions.
+
+### Budgeted updates
+
+`Db::update_with_budget` (also on `DbHandle`) executes one SQL write with
+positional parameters in a dedicated synchronous transaction. Its
+`UpdateReport` retains metrics on failure and returns the direct affected-row
+count on success. `RETURNING` rows are drained without collecting them.
+
+```rust
+use ic_sqlite_vfs::{params, Db};
+use ic_sqlite_vfs::db::UpdateBudget;
+
+let report = Db::update_with_budget(
+    "UPDATE kv SET value = ?1 WHERE key = ?2",
+    params!["new value", "key"],
+    UpdateBudget {
+        max_instructions: Some(50_000_000),
+        commit_reserve_instructions: 10_000_000,
+        max_dirty_pages: 64,
+        max_changed_bytes: 1024 * 1024,
+        ..UpdateBudget::default()
+    },
+);
+let metrics = report.metrics;
+let changed_rows = report.result;
+```
+
+The execution soft limit is `max_instructions - commit_reserve_instructions`.
+The reserve must be positive and smaller than the total limit. Checks include
+connection acquisition, prepare, each parameter copy, stepping and SQLite
+COMMIT. Before stable publication, any SQL or budget failure discards the
+whole overlay and invalidates the write connection. Rollback runs after the
+interrupt handler and scoped SQLite limits have been removed.
+
+Final stable publication is deliberately uninterrupted. If its cost plus
+cleanup exceeds the configured soft total, the API returns success with
+`committed_over_soft_limit = true`; it never reports a budget failure after
+publishing changes. Reserve enough instructions for commit, rollback and
+response encoding below the IC message ceiling. This is a soft limit and
+cannot guarantee avoidance of every IC trap. Candid encoding is outside the
+reported total.
+
+Dirty limits are enforced before adding a page to the overlay, including pages
+flushed during SQLite COMMIT. Bytes count full 16 KiB SQLite pages. Defaults
+allow 64 resident dirty pages / 1 MiB, with no instruction limit. Metrics include
+peak dirty pages, peak dirty-page payload bytes, committed bytes and commit
+instructions. SQLite's page cache, clean overlay cache and container metadata
+are outside that byte count. Both limits are per transaction and database
+handle, with no stable-layout or MemoryId changes.
+
+The API permits one write statement, including transactional DDL and triggers.
+Transaction-control SQL, PRAGMAs, ATTACH/DETACH and temporary-database operations
+are rejected so SQL cannot escape the managed transaction. Use the existing
+`Db::update` closure for workflows outside this contract. SQL/value size limits
+are scoped to the call and do not increase existing SQLite limits. Continue to
+use trusted application SQL and enforce caller authorization separately.
+
+### Measured queries and execution budgets
+
+`Db::query_profiled` (also on `DbHandle`) measures one read-only SQL statement
+and returns typed rows plus SQLite VM steps, full-scan steps, sort counts and
+result payload counts. IC builds also report instruction deltas for prepare,
+bind and execution, plus a total including connection acquisition and cleanup.
+Metrics remain available when SQL, binding, mapping or budget checks fail.
+
+```rust
+use ic_sqlite_vfs::{params, Db};
+use ic_sqlite_vfs::db::QueryBudget;
+
+let report = Db::query_with_budget(
+    "SELECT value FROM kv WHERE key = ?1",
+    params!["key"],
+    QueryBudget {
+        max_instructions: Some(10_000_000), // illustrative IC soft limit
+        max_rows: 100,
+        max_result_bytes: 64 * 1024,
+        ..QueryBudget::default()
+    },
+    |row| row.get::<String>(0),
+);
+let metrics = report.metrics; // available even if report.result is Err
+let rows = report.result;
+```
+
+The default budget caps rows at 10,000 and result payload, SQL text and SQLite
+value lengths at 1 MiB each; it does **not** impose an instruction budget.
+Configure `max_instructions` for your application and leave headroom below the
+IC message limit for cleanup and response encoding. `progress_interval` controls
+approximate SQLite VM steps between checks, not IC instructions. Host builds
+reject instruction budgets and report `None` for IC instruction measurements.
+
+Rows and bytes are checked before mapping; failure discards partial results.
+Payload accounting uses zero bytes for NULL, eight for INTEGER/REAL and SQLite's
+byte length for TEXT/BLOB. It excludes Rust container overhead, allocations made
+by the mapper and Candid encoding. Keep the synchronous mapper focused on reading
+the row. A long mapper or individual VFS operation cannot be preempted.
+`query_profiled` has no additional input, row or instruction limits; use the
+budgeted API when bounded work is required.
+
+Enable `query-metrics` to include logical VFS read calls/bytes and physical stable
+data read calls/bytes in `report.metrics.vfs`. Detailed counters are optional;
+no new dependencies or stable storage fields are required. See
+[measured overhead and reproduction steps](docs/QUERY_BUDGET_MEASUREMENTS.md).
+For prepared and
+cached statements used through the existing APIs, `statement.metrics()` reads
+SQLite counters and `statement.reset_metrics()` reads and resets execution
+counters. Counters otherwise accumulate across reuse.
+
+Instruction budgets temporarily own the connection's SQLite progress handler.
+Do not install another handler via `Connection::raw` on that connection.
+Nested measured queries on the same connection are rejected. The API does not
+provide authorization or tenant isolation, or a guarantee against every trap.
+
 Minimal canister pattern:
 
 `Db::migrate` records applied migration versions, so migration SQL should be a
@@ -489,8 +628,36 @@ crate provides `sqlite3_os_init()` and registers only the `icstable` VFS.
 
 ## Benchmarks
 
-Measured locally on 2026-06-26 with PocketIC. The main metric is IC
-instructions from `ic_cdk::api::performance_counter(0)`.
+### Branch before/after comparison (2026-09-30)
+
+Compared with HEAD `1386239` before these changes, the existing KV workloads
+changed by -0.683% to +0.659% in IC instructions. The uncompressed benchmark
+Wasm grew from 1,618,926 to 1,633,141 bytes (+0.878%). Both builds used the same
+Rust 1.95.0 release configuration and PocketIC 12.0.0. Two runs per build
+returned identical reports; result checksums, DB sizes and stable-memory
+pages/bytes matched between builds.
+
+| Existing workload | Instruction change |
+| --- | ---: |
+| 1,000 point reads | +0.537% |
+| 5,000 inserts | +0.376% |
+| 5,000 updates | +0.659% |
+| 5,000 rows in one result | -0.010% |
+
+See [full before/after results and reproduction](docs/BENCHMARK_COMPARISON.md).
+This combines library and SQLite changes and does not isolate their individual
+costs. Heap high-water usage was not measured.
+
+On a separate fixed 10,000-row query, opting into `query_profiled` adds about
+5.4% instructions and `query_with_budget` about 20.6% relative to the existing
+collection path. See [query/update budget measurements](docs/QUERY_BUDGET_MEASUREMENTS.md)
+for conditions, interruption/recovery checks and optional instrumentation costs.
+
+### Historical wasi2ic comparison (2026-06-26)
+
+The comparison below was measured locally on 2026-06-26 with PocketIC; the
+wasi2ic comparator was not rerun for the branch comparison above. The main
+metric is IC instructions from `ic_cdk::api::performance_counter(0)`.
 
 The benchmark harness lives in `benchmarks/kv-canister` and can be run with:
 

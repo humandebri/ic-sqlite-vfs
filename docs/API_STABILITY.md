@@ -192,3 +192,68 @@ The `2.0` line freezes these surfaces for all `2.x` releases:
 stable-memory images readable. A future layout change must either keep reading
 version `8` in place or provide a documented migration that reads version `8`
 and publishes the new layout atomically.
+
+## Measured query APIs (additive)
+
+`Db` and `DbHandle` provide `query_profiled` and `query_with_budget` for one
+read-only SQL statement with positional parameters and typed row mapping.
+Both return a `QueryReport<T>` whose `result` contains all rows or a
+`QueryError`; metrics remain available on execution errors. The existing
+`DbError` enum and existing query/update signatures are unchanged.
+
+Instruction budgets use the IC performance counter, not SQLite VM steps, and
+are soft limits. Host builds reject instruction budgets explicitly and return
+`None` for IC instruction measurements. Row and payload-byte limits are checked
+before invoking the mapper; payload bytes exclude mapper allocations and Candid
+encoding. No partial result is returned on failure. SQL and value limits use
+SQLite limits, scoped to the call, and never raise pre-existing limits.
+
+An observed query owns its connection's progress handler when an instruction
+budget is enabled. Applications must not install an independent progress handler
+on that connection through `Connection::raw`. Observed queries cannot nest on
+the same connection. Cleanup restores SQLite limits and removes the installed
+handler on errors or Rust unwinding. IC traps retain their normal message
+rollback semantics; this API cannot prevent every instruction-limit trap.
+
+`Statement::metrics` exposes SQLite statement counters. Counters accumulate
+across repeated executions, including cached statement reuse;
+`Statement::reset_metrics` reads and resets execution counters. Statement memory
+is a current allocation estimate and is not reset. SQLite's 32-bit counters can
+overflow during very long executions.
+
+The optional `query-metrics` feature includes VFS and stable data read counters
+in `QueryMetrics::vfs`, including connection acquisition. Without the feature
+that field is `None`, and release builds do not retain detailed instrumentation
+unless another diagnostic feature such as `bench-profile` enables it. Counters
+are transient; no stable layout or MemoryId ownership changes are required.
+
+## Budgeted update APIs
+
+`Db`/`DbHandle::update_with_budget` executes one SQL write with positional
+parameters in an isolated transaction. `UpdateReport.result` returns a direct
+SQLite affected-row count (zero for ordinary DDL) or `UpdateError`; metrics
+remain available on SQL and budget failures. The existing `Db::update` API and
+`DbError` are unchanged. `StableMemoryError` adds `WriteBudgetExceeded` for the
+internal overlay-to-VFS error path; handle that additive error variant when
+matching the public enum exhaustively.
+
+Instruction limits reserve `commit_reserve_instructions` from the configured
+total. An execution or page-budget failure before stable publication discards
+the full transaction and invalidates the write connection. Final publication
+runs uninterrupted under the existing IC trap/rollback contract. A successful
+publication over the soft total remains success and sets
+`committed_over_soft_limit`; callers must size the reserve and message headroom.
+No result encoding or caller work after return is included in metrics.
+
+Page and byte limits bound peak resident dirty-page payloads in the overlay,
+not SQLite's own cache, total process memory or byte-level SQL changes.
+Temporary databases, PRAGMAs, transaction-control and ATTACH/DETACH statements
+are rejected by SQLite's authorizer; no custom SQL parser is introduced.
+All budget state is transient and scoped to the existing database context.
+
+Budget limits do not add variants to the existing `StableMemoryError` enum.
+The budgeted facade classifies the transient overlay failure as
+`UpdateError::BudgetExceeded`. On a caught host panic during parameter binding,
+RAII cleanup rolls back SQLite and invalidates the write connection before
+removing the overlay; the first subsequent update can execute normally.
+This does not provide crash atomicity for native stable-memory publication.

@@ -89,7 +89,12 @@ impl Superblock {
         if let Some(block) = SUPERBLOCK_CACHE.with(|cache| cache.borrow().get(&context).cloned()) {
             return Ok(block);
         }
-        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+        #[cfg(any(
+            test,
+            debug_assertions,
+            feature = "bench-profile",
+            feature = "query-metrics"
+        ))]
         crate::read_metrics::record_superblock_load();
         if memory::size_pages() == 0 {
             let fresh = Self::fresh();

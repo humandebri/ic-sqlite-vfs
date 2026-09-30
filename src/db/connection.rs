@@ -10,7 +10,7 @@ use crate::db::statement::Statement;
 use crate::db::value::ToSql;
 use crate::db::{pragmas, DbError};
 use crate::sqlite_vfs::ffi;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
@@ -18,6 +18,7 @@ use std::ptr::{self, NonNull};
 pub struct Connection {
     raw: NonNull<ffi::sqlite3>,
     cached: RefCell<StatementCache>,
+    pub(crate) query_observer_active: Cell<bool>,
 }
 
 pub struct CachedStatement<'connection> {
@@ -136,6 +137,7 @@ impl Connection {
         Ok(Self {
             raw,
             cached: RefCell::new(StatementCache::new()),
+            query_observer_active: Cell::new(false),
         })
     }
 

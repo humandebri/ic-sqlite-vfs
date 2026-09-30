@@ -6,15 +6,20 @@
 pub mod connection;
 pub mod migrate;
 pub mod pragmas;
+pub mod query;
 pub mod row;
 pub mod statement;
 pub mod transaction;
+pub mod update;
 pub mod value;
 
 use crate::sqlite_vfs::stable_blob;
 use crate::stable::memory::{self, ContextId, DbMemory};
 use crate::stable::meta::Superblock;
 use connection::Connection;
+pub use query::{
+    BudgetKind, QueryBudget, QueryError, QueryMetrics, QueryReport, StatementMetrics, VfsMetrics,
+};
 pub use row::{FromColumn, Row, TextLen};
 pub use stable_blob::ChecksumRefresh;
 use std::cell::RefCell;
@@ -22,6 +27,7 @@ use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::rc::Rc;
 pub use transaction::UpdateConnection;
+pub use update::{UpdateBudget, UpdateBudgetKind, UpdateError, UpdateMetrics, UpdateReport};
 pub use value::{Null, ToSql, Value, NULL};
 
 thread_local! {
@@ -123,11 +129,50 @@ impl Db {
         Self::default_handle()?.update(f)
     }
 
+    /// Executes one SQL write with rollback on pre-publication budget failure.
+    pub fn update_with_budget(
+        sql: &str,
+        values: &[&dyn ToSql],
+        budget: UpdateBudget,
+    ) -> UpdateReport {
+        match Self::default_handle() {
+            Ok(handle) => handle.update_with_budget(sql, values, budget),
+            Err(error) => UpdateReport::failed(error),
+        }
+    }
+
     pub fn query<T, F>(f: F) -> Result<T, DbError>
     where
         F: FnOnce(&Connection) -> Result<T, DbError>,
     {
         Self::default_handle()?.query(f)
+    }
+
+    /// Executes one read-only SQL statement and returns metrics even on failure.
+    pub fn query_with_budget<T, F>(
+        sql: &str,
+        values: &[&dyn ToSql],
+        budget: QueryBudget,
+        map: F,
+    ) -> QueryReport<T>
+    where
+        F: FnMut(&Row<'_>) -> Result<T, DbError>,
+    {
+        match Self::default_handle() {
+            Ok(handle) => handle.query_with_budget(sql, values, budget, map),
+            Err(error) => QueryReport::failed(error),
+        }
+    }
+
+    /// Measures one read-only SQL statement without imposing query budgets.
+    pub fn query_profiled<T, F>(sql: &str, values: &[&dyn ToSql], map: F) -> QueryReport<T>
+    where
+        F: FnMut(&Row<'_>) -> Result<T, DbError>,
+    {
+        match Self::default_handle() {
+            Ok(handle) => handle.query_profiled(sql, values, map),
+            Err(error) => QueryReport::failed(error),
+        }
     }
 
     pub fn migrate(migrations: &[migrate::Migration]) -> Result<(), DbError> {
@@ -201,11 +246,55 @@ impl DbHandle {
         })
     }
 
+    /// See [`update::UpdateBudget`] for commit reservation and page-limit semantics.
+    pub fn update_with_budget(
+        self,
+        sql: &str,
+        values: &[&dyn ToSql],
+        budget: UpdateBudget,
+    ) -> UpdateReport {
+        update::run(self, sql, values, budget)
+    }
+
     pub fn query<T, F>(self, f: F) -> Result<T, DbError>
     where
         F: FnOnce(&Connection) -> Result<T, DbError>,
     {
         self.with_context(|| with_read_connection(self.context, f))
+    }
+
+    /// See [`query::QueryBudget`] for scope and soft-limit semantics.
+    pub fn query_with_budget<T, F>(
+        self,
+        sql: &str,
+        values: &[&dyn ToSql],
+        budget: QueryBudget,
+        map: F,
+    ) -> QueryReport<T>
+    where
+        F: FnMut(&Row<'_>) -> Result<T, DbError>,
+    {
+        self.measured_query(sql, values, budget, map)
+    }
+
+    pub fn query_profiled<T, F>(self, sql: &str, values: &[&dyn ToSql], map: F) -> QueryReport<T>
+    where
+        F: FnMut(&Row<'_>) -> Result<T, DbError>,
+    {
+        self.measured_query(sql, values, QueryBudget::unlimited(), map)
+    }
+
+    fn measured_query<T, F>(
+        self,
+        sql: &str,
+        values: &[&dyn ToSql],
+        budget: QueryBudget,
+        map: F,
+    ) -> QueryReport<T>
+    where
+        F: FnMut(&Row<'_>) -> Result<T, DbError>,
+    {
+        query::run(self, sql, values, budget, map)
     }
 
     pub fn migrate(self, migrations: &[migrate::Migration]) -> Result<(), DbError> {

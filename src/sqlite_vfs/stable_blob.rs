@@ -580,19 +580,34 @@ fn commit_overlay_in_place(
     Ok(())
 }
 
-#[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+#[cfg(any(
+    test,
+    debug_assertions,
+    feature = "bench-profile",
+    feature = "query-metrics"
+))]
 #[inline(always)]
 fn commit_profile_enabled() -> bool {
     crate::read_metrics::metrics_enabled()
 }
 
-#[cfg(not(any(test, debug_assertions, feature = "bench-profile")))]
+#[cfg(not(any(
+    test,
+    debug_assertions,
+    feature = "bench-profile",
+    feature = "query-metrics"
+)))]
 #[inline(always)]
 fn commit_profile_enabled() -> bool {
     false
 }
 
-#[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+#[cfg(any(
+    test,
+    debug_assertions,
+    feature = "bench-profile",
+    feature = "query-metrics"
+))]
 #[inline(always)]
 fn commit_profile_start(enabled: bool) -> Option<u64> {
     if enabled {
@@ -602,7 +617,12 @@ fn commit_profile_start(enabled: bool) -> Option<u64> {
     }
 }
 
-#[cfg(not(any(test, debug_assertions, feature = "bench-profile")))]
+#[cfg(not(any(
+    test,
+    debug_assertions,
+    feature = "bench-profile",
+    feature = "query-metrics"
+)))]
 #[inline(always)]
 fn commit_profile_start(_enabled: bool) -> Option<u64> {
     None
@@ -610,7 +630,12 @@ fn commit_profile_start(_enabled: bool) -> Option<u64> {
 
 macro_rules! commit_profile_recorder {
     ($name:ident, $record:ident) => {
-        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+        #[cfg(any(
+            test,
+            debug_assertions,
+            feature = "bench-profile",
+            feature = "query-metrics"
+        ))]
         #[inline(always)]
         fn $name(start: Option<u64>) {
             if let Some(start) = start {
@@ -620,7 +645,12 @@ macro_rules! commit_profile_recorder {
             }
         }
 
-        #[cfg(not(any(test, debug_assertions, feature = "bench-profile")))]
+        #[cfg(not(any(
+            test,
+            debug_assertions,
+            feature = "bench-profile",
+            feature = "query-metrics"
+        )))]
         #[inline(always)]
         fn $name(_start: Option<u64>) {}
     };
@@ -937,7 +967,12 @@ fn read_logical_page_slice(
         physical,
         u64::try_from(in_page).map_err(|_| StableMemoryError::OffsetOverflow)?,
     )?;
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    #[cfg(any(
+        test,
+        debug_assertions,
+        feature = "bench-profile",
+        feature = "query-metrics"
+    ))]
     crate::read_metrics::record_stable_data_read(dst.len());
     memory::read_preallocated(stable_offset, dst)
 }
@@ -970,13 +1005,23 @@ fn read_logical_page_slice_with_page_cache(
         return Ok(());
     }
     if in_page == 0 && dst.len() == page_len() {
-        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+        #[cfg(any(
+            test,
+            debug_assertions,
+            feature = "bench-profile",
+            feature = "query-metrics"
+        ))]
         crate::read_metrics::record_stable_data_read(dst.len());
         return memory::read_preallocated(physical, dst);
     }
     if dst.len() < page_len() {
         let mut page = zero_page();
-        #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+        #[cfg(any(
+            test,
+            debug_assertions,
+            feature = "bench-profile",
+            feature = "query-metrics"
+        ))]
         crate::read_metrics::record_stable_data_read(page.len());
         memory::read_preallocated(physical, &mut page)?;
         let end = in_page + dst.len();
@@ -988,7 +1033,12 @@ fn read_logical_page_slice_with_page_cache(
         physical,
         u64::try_from(in_page).map_err(|_| StableMemoryError::OffsetOverflow)?,
     )?;
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    #[cfg(any(
+        test,
+        debug_assertions,
+        feature = "bench-profile",
+        feature = "query-metrics"
+    ))]
     crate::read_metrics::record_stable_data_read(dst.len());
     memory::read_preallocated(stable_offset, dst)
 }

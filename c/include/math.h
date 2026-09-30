@@ -2,6 +2,7 @@
 #define IC_SQLITE_MATH_H
 
 #define HUGE_VAL (__builtin_huge_val())
+#define INFINITY (__builtin_inff())
 
 static inline double fabs(double x) { return x < 0 ? -x : x; }
 static inline int isnan(double x) { return x != x; }
