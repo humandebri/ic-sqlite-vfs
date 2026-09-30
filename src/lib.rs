@@ -14,7 +14,12 @@ pub mod api;
 pub mod bench_support;
 pub mod config;
 pub mod db;
-#[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+#[cfg(any(
+    test,
+    debug_assertions,
+    feature = "bench-profile",
+    feature = "query-metrics"
+))]
 #[doc(hidden)]
 mod read_metrics;
 #[doc(hidden)]
@@ -52,6 +57,9 @@ macro_rules! named_params {
 
 #[cfg(feature = "canister-api")]
 use api::{ChecksumRefresh, DbMeta};
+
+#[cfg(feature = "canister-api-test-failpoints")]
+use api::query_budget_probe::{BudgetProbeReport, QueryOverheadReport, UpdateProbeReport};
 
 #[cfg(feature = "canister-api")]
 ic_cdk::export_candid!();

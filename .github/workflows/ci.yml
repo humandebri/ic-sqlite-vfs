@@ -38,9 +38,11 @@ jobs:
       - run: cargo fmt --check
       - run: bash scripts/check-release-version.sh
       - run: VERUS_REQUIRED=1 bash scripts/sqlite-critical-check.sh
+      - run: cargo test --features query-metrics,canister-api-test-failpoints
       - run: cargo build --target wasm32-unknown-unknown
       - run: cargo build --target wasm32-unknown-unknown --features canister-api
       - run: npm run test:pocketic:regression
+      - run: npm run test:pocketic:query-budget
       - run: npm run test:pocketic:perf
       - run: scripts/check-release-package.sh
       - run: npm run build:wasm

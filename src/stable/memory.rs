@@ -231,7 +231,12 @@ pub fn write(offset: u64, bytes: &[u8]) -> Result<(), StableMemoryError> {
         Ok(())
     })??;
 
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    #[cfg(any(
+        test,
+        debug_assertions,
+        feature = "bench-profile",
+        feature = "query-metrics"
+    ))]
     crate::read_metrics::record_stable_data_write(bytes.len());
 
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
@@ -253,7 +258,12 @@ pub(crate) fn write_preallocated(offset: u64, bytes: &[u8]) -> Result<(), Stable
         memory.write(offset, bytes);
     })?;
 
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    #[cfg(any(
+        test,
+        debug_assertions,
+        feature = "bench-profile",
+        feature = "query-metrics"
+    ))]
     crate::read_metrics::record_stable_data_write(bytes.len());
 
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
@@ -272,7 +282,12 @@ pub(crate) fn write_prechecked(offset: u64, bytes: &[u8]) -> Result<(), StableMe
         memory.write(offset, bytes);
     })?;
 
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    #[cfg(any(
+        test,
+        debug_assertions,
+        feature = "bench-profile",
+        feature = "query-metrics"
+    ))]
     crate::read_metrics::record_stable_data_write(bytes.len());
 
     #[cfg(any(test, feature = "canister-api-test-failpoints"))]
@@ -338,7 +353,12 @@ fn ensure_memory_capacity(memory: &DbMemory, end_offset: u64) -> Result<(), Stab
         });
     }
 
-    #[cfg(any(test, debug_assertions, feature = "bench-profile"))]
+    #[cfg(any(
+        test,
+        debug_assertions,
+        feature = "bench-profile",
+        feature = "query-metrics"
+    ))]
     crate::read_metrics::record_stable_grow(pages);
     Ok(())
 }

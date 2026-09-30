@@ -1,7 +1,8 @@
 //! Debug read metrics for SQLite VFS performance probes.
 //!
 //! Counters are process-local diagnostics. They are compiled out of release
-//! builds so canister API and stable data layout stay unchanged.
+//! builds unless `bench-profile` or `query-metrics` is enabled. Counters never
+//! change the stable data layout.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -55,6 +56,7 @@ static COMMIT_SUPERBLOCK_STORE: AtomicU64 = AtomicU64::new(0);
 
 #[doc(hidden)]
 #[inline(always)]
+#[cfg(any(test, debug_assertions, feature = "bench-profile"))]
 pub fn reset_read_metrics() {
     for counter in counters() {
         counter.store(0, Ordering::Relaxed);
@@ -64,6 +66,7 @@ pub fn reset_read_metrics() {
 
 #[doc(hidden)]
 #[inline(always)]
+#[cfg(any(test, debug_assertions, feature = "bench-profile"))]
 pub fn disable_read_metrics() {
     METRICS_ENABLED.store(false, Ordering::Relaxed);
 }
@@ -197,6 +200,7 @@ pub(crate) fn record_commit_superblock_store(instructions: u64) {
     add(&COMMIT_SUPERBLOCK_STORE, instructions);
 }
 
+#[cfg(any(test, debug_assertions, feature = "bench-profile"))]
 fn counters() -> [&'static AtomicU64; 21] {
     [
         &X_READ_CALLS,
@@ -240,6 +244,12 @@ fn add(counter: &AtomicU64, value: u64) {
 #[inline(always)]
 fn byte_count(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+#[inline(always)]
+#[cfg(feature = "query-metrics")]
+pub(crate) fn set_metrics_enabled(enabled: bool) -> bool {
+    METRICS_ENABLED.swap(enabled, Ordering::Relaxed)
 }
 
 #[inline(always)]

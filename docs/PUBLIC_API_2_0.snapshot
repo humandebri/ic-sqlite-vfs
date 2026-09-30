@@ -55,27 +55,71 @@ src/db/mod.rs:pub fn migrate(migrations: &[migrate::Migration]) -> Result<(), Db
 src/db/mod.rs:pub fn migrate(self, migrations: &[migrate::Migration]) -> Result<(), DbError> {
 src/db/mod.rs:pub fn query<T, F>(f: F) -> Result<T, DbError>
 src/db/mod.rs:pub fn query<T, F>(self, f: F) -> Result<T, DbError>
+src/db/mod.rs:pub fn query_profiled<T, F>(self, sql: &str, values: &[&dyn ToSql], map: F) -> QueryReport<T>
+src/db/mod.rs:pub fn query_profiled<T, F>(sql: &str, values: &[&dyn ToSql], map: F) -> QueryReport<T>
+src/db/mod.rs:pub fn query_with_budget<T, F>(
+src/db/mod.rs:pub fn query_with_budget<T, F>(
 src/db/mod.rs:pub fn refresh_checksum() -> Result<u64, DbError> {
 src/db/mod.rs:pub fn refresh_checksum(self) -> Result<u64, DbError> {
 src/db/mod.rs:pub fn refresh_checksum_chunk(max_bytes: u64) -> Result<ChecksumRefresh, DbError> {
 src/db/mod.rs:pub fn refresh_checksum_chunk(self, max_bytes: u64) -> Result<ChecksumRefresh, DbError> {
 src/db/mod.rs:pub fn update<T, F>(f: F) -> Result<T, DbError>
 src/db/mod.rs:pub fn update<T, F>(self, f: F) -> Result<T, DbError>
+src/db/mod.rs:pub fn update_with_budget(
+src/db/mod.rs:pub fn update_with_budget(
 src/db/mod.rs:pub mod connection;
 src/db/mod.rs:pub mod migrate;
 src/db/mod.rs:pub mod pragmas;
+src/db/mod.rs:pub mod query;
 src/db/mod.rs:pub mod row;
 src/db/mod.rs:pub mod statement;
 src/db/mod.rs:pub mod transaction;
+src/db/mod.rs:pub mod update;
 src/db/mod.rs:pub mod value;
 src/db/mod.rs:pub struct Db;
 src/db/mod.rs:pub struct DbHandle {
+src/db/mod.rs:pub use query::{
 src/db/mod.rs:pub use row::{FromColumn, Row, TextLen};
 src/db/mod.rs:pub use stable_blob::ChecksumRefresh;
 src/db/mod.rs:pub use transaction::UpdateConnection;
+src/db/mod.rs:pub use update::{UpdateBudget, UpdateBudgetKind, UpdateError, UpdateMetrics, UpdateReport};
 src/db/mod.rs:pub use value::{Null, ToSql, Value, NULL};
 src/db/pragmas.rs:pub fn apply_read_only(connection: &Connection) -> Result<(), DbError> {
 src/db/pragmas.rs:pub fn apply_read_write(connection: &Connection, apply_page_size: bool) -> Result<(), DbError> {
+src/db/query.rs:pub autoindex_rows: u32,
+src/db/query.rs:pub bind_instructions: Option<u64>,
+src/db/query.rs:pub enum BudgetKind {
+src/db/query.rs:pub enum QueryError {
+src/db/query.rs:pub execute_instructions: Option<u64>,
+src/db/query.rs:pub full_scan_steps: u32,
+src/db/query.rs:pub instructions: Option<u64>,
+src/db/query.rs:pub max_instructions: Option<u64>,
+src/db/query.rs:pub max_result_bytes: u64,
+src/db/query.rs:pub max_rows: u64,
+src/db/query.rs:pub max_sql_bytes: Option<u32>,
+src/db/query.rs:pub max_value_bytes: Option<u32>,
+src/db/query.rs:pub metrics: QueryMetrics,
+src/db/query.rs:pub prepare_instructions: Option<u64>,
+src/db/query.rs:pub progress_interval: u32,
+src/db/query.rs:pub read_bytes: u64,
+src/db/query.rs:pub read_calls: u64,
+src/db/query.rs:pub reprepares: u32,
+src/db/query.rs:pub result: Result<Vec<T>, QueryError>,
+src/db/query.rs:pub result_bytes: u64,
+src/db/query.rs:pub result_rows: u64,
+src/db/query.rs:pub runs: u32,
+src/db/query.rs:pub sorts: u32,
+src/db/query.rs:pub stable_data_read_bytes: u64,
+src/db/query.rs:pub stable_data_read_calls: u64,
+src/db/query.rs:pub statement: StatementMetrics,
+src/db/query.rs:pub statement_memory_bytes: u32,
+src/db/query.rs:pub struct QueryBudget {
+src/db/query.rs:pub struct QueryMetrics {
+src/db/query.rs:pub struct QueryReport<T> {
+src/db/query.rs:pub struct StatementMetrics {
+src/db/query.rs:pub struct VfsMetrics {
+src/db/query.rs:pub vfs: Option<VfsMetrics>,
+src/db/query.rs:pub vm_steps: u32,
 src/db/row.rs:pub fn get<T: FromColumn>(&self, index: usize) -> Result<T, DbError> {
 src/db/row.rs:pub struct Row<'row> {
 src/db/row.rs:pub struct TextLen(pub usize);
@@ -89,6 +133,7 @@ src/db/statement.rs:pub fn execute_i64_text(&mut self, first: i64, second: &str)
 src/db/statement.rs:pub fn execute_named(&mut self, values: &[(&str, &dyn ToSql)]) -> Result<(), DbError> {
 src/db/statement.rs:pub fn execute_text_text(&mut self, first: &str, second: &str) -> Result<(), DbError> {
 src/db/statement.rs:pub fn execute_text_text_profiled(
+src/db/statement.rs:pub fn metrics(&self) -> crate::db::StatementMetrics {
 src/db/statement.rs:pub fn next_row(&mut self) -> Result<Option<Row<'_>>, DbError> {
 src/db/statement.rs:pub fn next_text_len_zero(&mut self) -> Result<Option<usize>, DbError> {
 src/db/statement.rs:pub fn query<'statement>(
@@ -115,6 +160,7 @@ src/db/statement.rs:pub fn query_text_iter_ephemeral<'statement, I>(
 src/db/statement.rs:pub fn query_text_iter_text_len_sum<'value, I>(&mut self, values: I) -> Result<u64, DbError>
 src/db/statement.rs:pub fn query_text_iter_text_len_sum_profiled<'value, I>(
 src/db/statement.rs:pub fn query_texts<'statement>(
+src/db/statement.rs:pub fn reset_metrics(&mut self) -> crate::db::StatementMetrics {
 src/db/statement.rs:pub ordinal: u64,
 src/db/statement.rs:pub reset_bind: u64,
 src/db/statement.rs:pub reset_bind: u64,
@@ -130,6 +176,30 @@ src/db/statement.rs:pub struct Statement<'connection> {
 src/db/transaction.rs:pub fn run_immediate<T, F>(connection: &Connection, f: F) -> Result<T, DbError>
 src/db/transaction.rs:pub fn savepoint<T, F>(&mut self, f: F) -> Result<T, DbError>
 src/db/transaction.rs:pub struct UpdateConnection<'connection> {
+src/db/update.rs:pub bind_instructions: Option<u64>,
+src/db/update.rs:pub commit_instructions: Option<u64>,
+src/db/update.rs:pub commit_reserve_instructions: u64,
+src/db/update.rs:pub committed_bytes: u64,
+src/db/update.rs:pub committed_over_soft_limit: bool,
+src/db/update.rs:pub enum UpdateBudgetKind {
+src/db/update.rs:pub enum UpdateError {
+src/db/update.rs:pub execute_instructions: Option<u64>,
+src/db/update.rs:pub instructions: Option<u64>,
+src/db/update.rs:pub max_changed_bytes: u64,
+src/db/update.rs:pub max_dirty_pages: u64,
+src/db/update.rs:pub max_instructions: Option<u64>,
+src/db/update.rs:pub max_sql_bytes: Option<u32>,
+src/db/update.rs:pub max_value_bytes: Option<u32>,
+src/db/update.rs:pub metrics: UpdateMetrics,
+src/db/update.rs:pub overlay_peak_bytes: u64,
+src/db/update.rs:pub peak_dirty_pages: u64,
+src/db/update.rs:pub prepare_instructions: Option<u64>,
+src/db/update.rs:pub progress_interval: u32,
+src/db/update.rs:pub result: Result<u64, UpdateError>,
+src/db/update.rs:pub statement: StatementMetrics,
+src/db/update.rs:pub struct UpdateBudget {
+src/db/update.rs:pub struct UpdateMetrics {
+src/db/update.rs:pub struct UpdateReport {
 src/db/value.rs:pub const NULL: Null = Null;
 src/db/value.rs:pub enum Value<'value> {
 src/db/value.rs:pub fn to_sql_ref<T: ToSql>(value: &T) -> &dyn ToSql {

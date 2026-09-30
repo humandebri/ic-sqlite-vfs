@@ -36,6 +36,22 @@ impl Row<'_> {
         T::read(self, index)
     }
 
+    // Count SQLite payload before the user mapper can allocate owned values.
+    // NULL = 0, INTEGER/REAL = 8, TEXT/BLOB = sqlite3_column_bytes.
+    pub(crate) fn payload_bytes(&self) -> u64 {
+        let count = unsafe { ffi::sqlite3_column_count(self.raw) };
+        (0..count).fold(0_u64, |total, index| {
+            let bytes = match unsafe { ffi::sqlite3_column_type(self.raw, index) } {
+                ffi::SQLITE_INTEGER | ffi::SQLITE_FLOAT => 8,
+                ffi::SQLITE_TEXT | ffi::SQLITE_BLOB => {
+                    unsafe { ffi::sqlite3_column_bytes(self.raw, index) }.max(0) as u64
+                }
+                _ => 0,
+            };
+            total.saturating_add(bytes)
+        })
+    }
+
     fn check_index(&self, index: usize) -> Result<(), DbError> {
         let count = unsafe { ffi::sqlite3_column_count(self.raw) };
         let count = usize::try_from(count).unwrap_or(0);

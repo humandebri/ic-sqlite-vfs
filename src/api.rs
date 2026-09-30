@@ -15,6 +15,8 @@ use serde::Deserialize;
 use std::cell::RefCell;
 
 #[cfg(feature = "canister-api-test-failpoints")]
+pub(crate) mod query_budget_probe;
+#[cfg(feature = "canister-api-test-failpoints")]
 mod sqlite_feature_probe;
 
 const MIGRATIONS: &[Migration] = &[

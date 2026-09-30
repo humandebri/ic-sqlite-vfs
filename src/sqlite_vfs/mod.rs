@@ -10,7 +10,7 @@ pub mod file;
 #[cfg(target_arch = "wasm32")]
 pub mod libc;
 pub mod lock;
-mod overlay;
+pub(crate) mod overlay;
 pub mod register;
 pub mod stable_blob;
 pub mod temp;

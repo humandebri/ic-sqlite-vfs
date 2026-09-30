@@ -14,11 +14,26 @@ const CLEAN_PAGE_CACHE_CAPACITY: usize = 8;
 
 #[derive(Debug)]
 pub struct Overlay {
+    write_budget: Option<WriteBudget>,
     base_size: u64,
     size: u64,
     pages: Vec<(u64, Vec<u8>)>,
     clean_pages: Vec<(u64, Vec<u8>)>,
     zero_extents: Vec<ZeroExtent>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WriteStats {
+    pub dirty_pages: u64,
+    pub peak_bytes: u64,
+    pub exceeded: Option<bool>, // false = pages, true = bytes
+}
+
+#[derive(Debug)]
+struct WriteBudget {
+    max_pages: u64,
+    max_bytes: u64,
+    stats: WriteStats,
 }
 
 thread_local! {
@@ -28,6 +43,7 @@ thread_local! {
 impl Overlay {
     pub fn new(base_size: u64) -> Self {
         Self {
+            write_budget: None,
             base_size,
             size: base_size,
             pages: Vec::new(),
@@ -208,6 +224,7 @@ impl Overlay {
         if let Some(index) = self.dirty_page_index(page_no) {
             return Ok(&mut self.pages[index].1);
         }
+        self.admit_dirty_page()?;
         let page = if self.page_is_zero_masked(page_no) {
             vec![0_u8; page_len()]
         } else {
@@ -228,7 +245,30 @@ impl Overlay {
             self.pages[index].1.copy_from_slice(bytes);
             return Ok(());
         }
+        self.admit_dirty_page()?;
         self.pages.push((page_no, bytes.to_vec()));
+        Ok(())
+    }
+
+    fn admit_dirty_page(&mut self) -> Result<(), StableMemoryError> {
+        let Some(budget) = &mut self.write_budget else {
+            return Ok(());
+        };
+        let pages = self.pages.len() as u64 + 1;
+        let bytes = pages.saturating_mul(page_size());
+        if budget.stats.exceeded.is_some() || pages > budget.max_pages || bytes > budget.max_bytes {
+            if budget.stats.exceeded.is_none() {
+                budget.stats.exceeded = Some(pages <= budget.max_pages);
+            }
+            // Preserve the existing public error enum. This internal VFS error
+            // aborts SQLite I/O; the sticky stats above supply the public
+            // UpdateError::BudgetExceeded kind at the budgeted API boundary.
+            return Err(StableMemoryError::Failpoint(
+                "overlay write budget exceeded",
+            ));
+        }
+        budget.stats.dirty_pages = budget.stats.dirty_pages.max(pages);
+        budget.stats.peak_bytes = budget.stats.peak_bytes.max(bytes);
         Ok(())
     }
 
@@ -356,6 +396,44 @@ pub fn take() -> Option<Overlay> {
         let mut slot = slot.borrow_mut();
         let index = overlay_index(&slot, context)?;
         Some(slot.swap_remove(index).1)
+    })
+}
+
+pub(crate) fn dirty_page_count() -> u64 {
+    let Ok(context) = memory::active_context_id() else {
+        return 0;
+    };
+    OVERLAY.with(|slot| {
+        let slot = slot.borrow();
+        overlay_index(&slot, context)
+            .map(|index| slot[index].1.pages.len() as u64)
+            .unwrap_or(0)
+    })
+}
+
+pub(crate) fn set_write_budget(max_pages: u64, max_bytes: u64) {
+    let context = memory::active_context_id().expect("active update context");
+    OVERLAY.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let index = overlay_index(&slot, context).expect("active update overlay");
+        slot[index].1.write_budget = Some(WriteBudget {
+            max_pages,
+            max_bytes,
+            stats: WriteStats::default(),
+        });
+    });
+}
+
+pub(crate) fn write_stats() -> WriteStats {
+    let Ok(context) = memory::active_context_id() else {
+        return WriteStats::default();
+    };
+    OVERLAY.with(|slot| {
+        let slot = slot.borrow();
+        overlay_index(&slot, context)
+            .and_then(|index| slot[index].1.write_budget.as_ref())
+            .map(|budget| budget.stats)
+            .unwrap_or_default()
     })
 }
 
