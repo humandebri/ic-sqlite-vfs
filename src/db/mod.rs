@@ -179,6 +179,11 @@ impl Db {
         Self::default_handle()?.migrate(migrations)
     }
 
+    /// Explicitly trust the supplied SQL for already-applied legacy migrations.
+    pub fn adopt_migration_checksums(migrations: &[migrate::Migration]) -> Result<(), DbError> {
+        Self::default_handle()?.adopt_migration_checksums(migrations)
+    }
+
     pub fn integrity_check() -> Result<String, DbError> {
         Self::default_handle()?.integrity_check()
     }
@@ -313,6 +318,14 @@ impl DbHandle {
             }
             Ok(())
         })
+    }
+
+    /// Atomically record missing checksums without executing migration SQL.
+    pub fn adopt_migration_checksums(
+        self,
+        migrations: &[migrate::Migration],
+    ) -> Result<(), DbError> {
+        self.update(|connection| migrate::adopt_checksums(connection, migrations))
     }
 
     pub fn integrity_check(self) -> Result<String, DbError> {

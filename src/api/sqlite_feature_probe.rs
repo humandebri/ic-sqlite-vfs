@@ -7,6 +7,7 @@ use crate::{Db, DbError};
 
 pub fn run() -> Result<(), String> {
     Db::update(|connection| {
+        probe_migration_checksums(connection)?;
         let version =
             connection.query_scalar::<String>("SELECT sqlite_version()", crate::params![])?;
         let source =
@@ -137,6 +138,52 @@ fn expect_i64(label: &str, actual: i64, expected: i64) -> Result<(), DbError> {
 
 fn feature_probe_error(message: String) -> DbError {
     DbError::Constraint(format!("SQLite feature probe failed: {message}"))
+}
+
+// Run through the actual linked Wasm/SQLite/VFS, then restore the application's
+// history. The surrounding facade transaction handles any probe error.
+fn probe_migration_checksums(
+    connection: &crate::db::connection::Connection,
+) -> Result<(), DbError> {
+    use crate::db::migrate::{self, Migration};
+    let original = Migration {
+        version: i64::MAX as u64,
+        sql: "CREATE TEMP TABLE db_test_migration_checksum(x INTEGER)",
+    };
+    let changed = Migration {
+        sql: "CREATE TEMP TABLE db_test_migration_checksum(x TEXT)",
+        ..original
+    };
+    connection.execute_batch("SAVEPOINT checksum_probe")?;
+    migrate::apply(connection, &[original])?;
+    migrate::apply(connection, &[original])?;
+    let result = migrate::apply(connection, &[changed]);
+    if !matches!(result, Err(DbError::Sqlite(code, message)) if code == crate::sqlite_vfs::ffi::SQLITE_CONSTRAINT && message.contains("migration checksum mismatch"))
+    {
+        return Err(feature_probe_error(
+            "migration checksum change was not rejected".into(),
+        ));
+    }
+    // Recreate the shape of a legacy entry, then explicitly adopt its SQL.
+    connection.execute(
+        "DELETE FROM __ic_sqlite_migration_checksums WHERE version=?1",
+        crate::params![i64::MAX],
+    )?;
+    migrate::apply(connection, &[changed])?; // Unknown historical SQL stays unknown.
+    let count = connection.query_scalar::<i64>(
+        "SELECT count(*) FROM __ic_sqlite_migration_checksums WHERE version=?1",
+        crate::params![i64::MAX],
+    )?;
+    expect_i64("legacy checksum count", count, 0)?;
+    migrate::adopt_checksums(connection, &[original])?; // Must not rerun CREATE.
+    let result = migrate::apply(connection, &[changed]);
+    if !matches!(result, Err(DbError::Sqlite(code, _)) if code == crate::sqlite_vfs::ffi::SQLITE_CONSTRAINT)
+    {
+        return Err(feature_probe_error(
+            "adopted migration checksum was not checked".into(),
+        ));
+    }
+    connection.execute_batch("ROLLBACK TO checksum_probe; RELEASE checksum_probe")
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 # API Stability
 
-This file defines the active `2.x` compatibility contract. The current public
-crate is `2.0.0`; production deployments should pin exact versions.
+This file defines the active `2.x` compatibility contract. The repository
+version is `2.1.0`; production deployments should pin exact versions.
 
 ## Stability Contract
 
@@ -98,9 +98,17 @@ compatibility, but normal v8 operation sets `page_table_offset = 0`.
 The resource state exposed through `db_meta` is part of the layout contract:
 `db_size` is the logical image length, `db_base_offset` is the current physical
 base, `active_bytes` is the logical active payload size
-`SUPERBLOCK_SIZE + db_size`, `allocated_bytes` is the selected stable-memory
+`SUPERBLOCK_SIZE + db_size`, `allocated_bytes` is the selected virtual-memory
 high-water mark, `orphan_bytes_estimate` is high-water slack outside
 `active_bytes`, and `page_table_bytes` is always `0` for v8.
+
+`stable_pages` is the selected VirtualMemory's size in 64 KiB pages, and
+`stable_bytes` is that size in bytes. These fields, including `allocated_bytes`,
+do not measure total raw stable-memory allocation or MemoryManager bucket slack.
+The default MemoryManager acquires 128-page (8 MiB) raw buckets plus metadata.
+Virtual growth within a bucket can leave raw allocation unchanged; crossing
+bucket boundaries can allocate another bucket. Raw `stable64_size` and canister
+resource metrics are required for physical-capacity and storage-cost analysis.
 
 Logical SQLite page `n` lives at:
 
@@ -121,9 +129,9 @@ rollback of all stable-memory writes from the current message execution. A
 normal commit must therefore perform no inter-canister call, `await`, or
 `ic0.call_perform`. The grep-based runtime-contract CI check is a guard for this
 contract, not a standalone proof.
-When the final image fits in existing stable-memory capacity, repeated normal
+When the final image fits in existing virtual-memory capacity, repeated normal
 commits must not increase `allocated_bytes` or the high-water mark. When a
-normal commit exceeds current capacity, it may grow stable memory only to the
+normal commit exceeds current capacity, it may grow the selected virtual memory only to the
 stable-page-rounded end required by the final image and dirty page writes.
 Truncate stores whole-page tail ranges as v8 zero-mask extents. Dirty writes
 materialize pages by removing those ranges. Non-page-boundary truncate marks the
@@ -257,3 +265,28 @@ The budgeted facade classifies the transient overlay failure as
 RAII cleanup rolls back SQLite and invalidates the write connection before
 removing the overlay; the first subsequent update can execute normally.
 This does not provide crash atomicity for native stable-memory publication.
+
+## Migration SQL checksums (additive)
+
+`Db::migrate` and `DbHandle::migrate` preserve their signatures and verify
+SHA-256 over each supplied migration's exact UTF-8 SQL. Newly applied versions
+receive 32-byte BLOB checksums in `__ic_sqlite_migration_checksums`; the original
+`__ic_sqlite_migrations(version)` table and stable layout remain unchanged.
+All known checksums are verified before executing pending SQL. Mismatches use
+the existing `DbError::Sqlite(SQLITE_CONSTRAINT, message)` with the version in
+the message; no variants are added to the existing exhaustive error enum.
+The facade rolls back SQL, version entries and checksum records together.
+
+Version-only legacy records remain unknown and are skipped for compatibility.
+`Db::adopt_migration_checksums` and `DbHandle::adopt_migration_checksums` explicitly
+trust caller-supplied SQL for already-applied versions, without executing it or
+changing a recorded checksum. Validate the full supplied list before recording
+any missing hashes. Adoption cannot establish historical SQL identity. The
+low-level `migrate::apply` and `migrate::adopt_checksums` require the caller to
+provide a transaction; use the facade for atomicity.
+
+Keep the complete migration list to check all versions. Old library versions
+will not verify these checksums and may add further unverified entries. SQL is
+trusted application input, and direct manipulation of either history table is
+outside this check's protection. The algorithm is SHA-256 (no normalization),
+independent of database-image checksum verification.

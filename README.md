@@ -20,7 +20,7 @@ stable memory.
 
 ## Status
 
-Current public release: `2.0.0`.
+Repository version: `2.1.0` (release preparation).
 
 The core VFS, transaction facade, checksum flow, and upgrade persistence tests
 are in place. The repository carries the active `2.x` compatibility contract
@@ -33,21 +33,20 @@ direct `ic-stable-structures` dependency for SQLite storage.
 See [docs/API_STABILITY.md](docs/API_STABILITY.md) for the `2.0` compatibility
 contract.
 
-### Unreleased additions on this branch
+### Additions in 2.1.0
 
-The published `2.0.0` package does not include the new budget and measurement
-APIs described below. They are implemented in this working branch and remain
-under review; the dependency example using `version = "2.0.0"` refers to the
-published API.
+Version `2.1.0` adds the budget, measurement and migration-checksum APIs
+described below. See [release notes](docs/RELEASE.md) for compatibility and
+upgrade requirements. Publish availability is tracked by the release process.
 
 | Area | Implemented in this branch | Still proposed / not implemented |
 | --- | --- | --- |
 | Query measurement | `query_profiled`, statement counters, prepare/bind/execute instruction deltas, result rows/payload bytes, optional VFS/stable read counters | Public per-call write-I/O byte counters and result-encoding measurements |
 | Query budgets | `query_with_budget`: IC soft instruction limit, row/payload caps, scoped SQL/value limits | A hard instruction ceiling or a limit on total Rust/Candid memory |
 | Update budgets | `update_with_budget`: one write statement in a managed transaction, commit reserve, dirty-page/payload caps and commit metrics | Budgets spanning an arbitrary multi-statement closure |
-| Data transfer | Existing logical read/storage primitives | Public bounded import/export, resumable staging/validation and atomic activation, maintenance-mode coordination |
-| Migrations | Existing version-based migrations | SQL-content checksums and batched backfill helpers |
-| Build options | Existing precompiled/bundled link paths; optional `query-metrics` | Separate minimal and FTS5-enabled SQLite profiles |
+| Data transfer | Existing logical read/storage primitives | Import/export staging is outside the current scope |
+| Migrations | Version history plus SHA-256 SQL checksums and explicit legacy adoption | No backfill helper is planned |
+| Build options | Existing precompiled/bundled link paths; optional `query-metrics` | Separate minimal/FTS5 profiles are outside the current scope |
 
 The vendored SQLite source and Wasm archive have also been updated to 3.53.4,
 and `anyhow` to 1.0.103 in the active library/example/benchmark/fuzz lockfiles.
@@ -100,6 +99,15 @@ Fresh images start the SQLite bytes at `64KiB`.
 The crate does not own the canister's raw stable memory. Raw stable memory is
 managed by a `MemoryManager<DefaultMemoryImpl>` with the same stable layout as
 the `ic-stable-structures` 0.7 MemoryManager.
+
+`db_meta.stable_pages`, `stable_bytes` and `allocated_bytes`, and the matching
+benchmark fields, measure the selected **virtual memory**. They do not report
+raw canister allocation. The default MemoryManager reserves raw memory in
+128-page (8 MiB) buckets plus metadata; a 64 KiB increase in virtual size may
+fit in an existing bucket, while crossing a bucket boundary can reserve another
+8 MiB. Use raw `stable64_size` and canister resource metrics for actual capacity
+and storage-cost analysis. Deleting SQL rows does not guarantee memory shrinks.
+
 Use `MemoryManager::init_strict` for upgrade-sensitive deployments. The
 non-strict `MemoryManager::init` compatibility path may initialize MemoryManager
 metadata on non-empty raw stable memory that does not already contain a
@@ -299,7 +307,7 @@ only for this repository's reference canister.
 
 ```toml
 [dependencies]
-ic-sqlite-vfs = { version = "2.0.0", default-features = false, features = ["sqlite-precompiled"] }
+ic-sqlite-vfs = { version = "2.1.0", default-features = false, features = ["sqlite-precompiled"] }
 ```
 
 `sqlite-precompiled` links the vendored `wasm32-unknown-unknown` SQLite archive
@@ -429,8 +437,31 @@ Minimal canister pattern:
 `Db::migrate` records applied migration versions, so migration SQL should be a
 strictly increasing, versioned step rather than an idempotent `IF NOT EXISTS`
 schema initializer. Migration SQL must be static trusted SQL; do not build it
-from user input. The migration registry stores only versions and does not
-depend on SQLite date/time functions.
+from user input. It does not depend on SQLite date/time functions.
+
+Newly applied migrations also store SHA-256 of the exact UTF-8 SQL bytes in
+`__ic_sqlite_migration_checksums`. On subsequent calls, all known checksums are
+verified before any pending migration SQL executes. Even a whitespace/comment
+change is rejected with `DbError::Sqlite(SQLITE_CONSTRAINT, message)` naming the
+version. Change the schema by adding a new version instead. The migration SQL,
+version entry and checksum are committed together by the facade.
+
+The existing `__ic_sqlite_migrations(version)` schema is preserved. Legacy
+version-only entries remain unverified and are skipped for compatibility;
+missing checksums are never inferred automatically. After independently
+reviewing the historical SQL, callers can explicitly register their chosen
+baseline using `Db::adopt_migration_checksums(MIGRATIONS)` (also on `DbHandle`).
+This executes no migration SQL, requires every supplied version to be applied,
+and never overwrites a known checksum. Adoption is an assertion of trust, not
+proof of which SQL previously ran. Keep the full migration list in deployment
+code: only supplied versions can be checked.
+
+This detects accidental edits; it is not protection against an actor that can
+modify migration metadata. It is separate from the full database-image checksum.
+Storage adds one checksum table and 32 digest bytes per recorded migration plus
+SQLite overhead, with no staging areas or stable-layout/MemoryId changes.
+Migration runners predating this feature retain version-only history.
+See [migration checksum validation and size impact](docs/MIGRATION_CHECKSUM_VALIDATION.md).
 
 ```rust
 use ic_sqlite_vfs::db::migrate::Migration;
@@ -630,12 +661,13 @@ crate provides `sqlite3_os_init()` and registers only the `icstable` VFS.
 
 ### Branch before/after comparison (2026-09-30)
 
-Compared with HEAD `1386239` before these changes, the existing KV workloads
+The following comparison covers the query/update budget changes before the
+migration checksum addition. Compared with HEAD `1386239`, the existing KV workloads
 changed by -0.683% to +0.659% in IC instructions. The uncompressed benchmark
 Wasm grew from 1,618,926 to 1,633,141 bytes (+0.878%). Both builds used the same
 Rust 1.95.0 release configuration and PocketIC 12.0.0. Two runs per build
-returned identical reports; result checksums, DB sizes and stable-memory
-pages/bytes matched between builds.
+returned identical reports; result checksums, DB sizes and selected virtual-memory
+pages/bytes matched between builds. Raw stable-memory allocation was not compared.
 
 | Existing workload | Instruction change |
 | --- | ---: |

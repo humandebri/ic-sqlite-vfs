@@ -111,11 +111,14 @@ fn chunked_checksum_refresh_matches_one_shot_for_varied_chunk_sizes() {
     let expected = Db::db_checksum().unwrap();
     for chunk_size in [1_u64, 7, 64, 4096, 16 * 1024, 20 * 1024] {
         let mut latest = Db::refresh_checksum_chunk(chunk_size).unwrap();
-        let mut guard = 0_u32;
+        let max_calls = latest.db_size.div_ceil(chunk_size).max(1);
+        let mut calls = 1_u64;
         while !latest.complete {
+            let previous_bytes = latest.scanned_bytes;
             latest = Db::refresh_checksum_chunk(chunk_size).unwrap();
-            guard += 1;
-            assert!(guard < 100_000);
+            calls += 1;
+            assert!(latest.scanned_bytes > previous_bytes);
+            assert!(calls <= max_calls);
         }
         assert_eq!(latest.checksum, expected);
         assert_eq!(latest.scanned_bytes, latest.db_size);

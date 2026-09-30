@@ -2,7 +2,7 @@
 
 ## Result
 
-The existing API workloads changed by **−0.683% to +0.659%** in measured IC instructions. The uncompressed benchmark Wasm grew by **14,215 bytes (+0.878%)**. Two baseline and two final-current full suite executions passed; intermediate runs also passed. Each execution produced 47 reports, including 34 instruction measurements; every report was identical between repetitions of the same build. Reported row counts, checksums, database sizes and stable-memory pages/bytes matched between baseline and current wherever those fields were present.
+The existing API workloads changed by **−0.683% to +0.659%** in measured IC instructions. The uncompressed benchmark Wasm grew by **14,215 bytes (+0.878%)**. Two baseline and two final-current full suite executions passed; intermediate runs also passed. Each execution produced 47 reports, including 34 instruction measurements; every report was identical between repetitions of the same build. Reported row counts, checksums, database sizes and selected virtual-memory pages/bytes matched between baseline and current wherever those fields were present.
 
 This is a small, reproducible cost increase for several existing operations; it is not zero overhead. These workloads did not show a large regression.
 
@@ -15,7 +15,7 @@ This is a small, reproducible cost increase for several existing operations; it 
 - Both Wasms import only `ic0`.
 - Measurements use the existing endpoints’ `performance_counter(0)` scopes. They do not include full response encoding/transport, do not measure wall-clock latency and are not production cycle-price estimates.
 - This comparison combines SQLite and library changes. It does not isolate the contribution of each change. The new budgeted APIs are not invoked by the existing benchmark.
-- Stable-memory consumption is compared; heap high-water usage was not measured. No universal performance bound or production message-limit guarantee is implied.
+- Selected virtual-memory consumption is compared; raw stable-memory allocation and heap high-water usage were not measured. No universal performance bound or production message-limit guarantee is implied.
 
 ## Existing workload IC instructions
 
@@ -114,3 +114,8 @@ BENCH_WASM=target/bench-comparison/current-build/wasm32-unknown-unknown/release/
 BENCH_REPORT=target/bench-comparison/current-fresh.jsonl \
 node --test target/bench-comparison/comparison.test.mjs
 ```
+
+`stable_pages` / `stable_bytes` in the raw reports describe the selected
+VirtualMemory. The default MemoryManager allocates raw 8 MiB buckets plus
+metadata, so these figures cannot establish raw allocation or storage-cycle
+costs. See [memory ownership and capacity](../README.md#stable-memory-ownership).

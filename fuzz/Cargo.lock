@@ -303,12 +303,13 @@ dependencies = [
 
 [[package]]
 name = "ic-sqlite-vfs"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "candid",
  "cc",
  "ic-cdk",
  "serde",
+ "sha2",
  "thiserror 2.0.18",
 ]
 

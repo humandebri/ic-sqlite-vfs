@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { PocketIc, createIdentity } from "@dfinity/pic";
 import { idlFactory } from "./idl.mjs";
@@ -13,6 +14,10 @@ const serverStartTimeout = 120_000;
 
 test("PocketIC stable image survives upgrade", { timeout }, async () => {
   await withPocketIc("stableImageSurvivesUpgrade", stableImageSurvivesUpgrade);
+});
+
+test("PocketIC migration checksum mismatch rejects upgrade without changing state", { timeout }, async () => {
+  await withPocketIc("migrationChecksumMismatchPreservesState", migrationChecksumMismatchPreservesState);
 });
 
 test("PocketIC precompiled SQLite archive exposes expected features", { timeout }, async () => {
@@ -161,6 +166,55 @@ async function dirtyPageWriteTrapRollsBackBeforeSuperblockPublish(pic, name) {
   assert.deepEqual(await actor.db_integrity_check(), { Ok: "ok" });
   const afterMeta = await actor.db_meta();
   assert.deepEqual(afterMeta, beforeMeta);
+}
+
+async function migrationChecksumMismatchPreservesState(pic, name) {
+  // Change only SQL keyword casing in the production artifact's migration data.
+  // Equal byte lengths preserve the Wasm layout while changing the SQL digest.
+  // Require exactly one match so a fixture change cannot silently test another path.
+  const changedWasm = await readFile(wasm);
+  const originalSql = Buffer.from("CREATE TABLE kv (\n            key TEXT PRIMARY KEY NOT NULL,\n            value TEXT NOT NULL\n        );");
+  const changedSql = Buffer.from(originalSql);
+  changedSql.write("create", 0, "utf8");
+  const offset = changedWasm.indexOf(originalSql);
+  assert.notEqual(offset, -1, "production migration SQL fixture was not found");
+  assert.equal(changedWasm.indexOf(originalSql, offset + 1), -1, "migration SQL fixture must be unique");
+  changedSql.copy(changedWasm, offset);
+
+  // Always install the current artifact: a legacy version-only history would
+  // intentionally skip checksum verification until explicitly adopted.
+  step(name, "install canister with checksummed migration history");
+  const { actor, canisterId } = await pic.setupCanister({ idlFactory, wasm });
+  assert.deepEqual(await actor.kv_put("survives", "before-rejected-upgrade"), { Ok: null });
+  assert.deepEqual(await actor.kv_set_note("survives", "preserved-note"), { Ok: null });
+  const beforeMeta = await actor.db_meta();
+  assert.equal("Ok" in beforeMeta, true);
+  const beforeStatus = await pic.canisterStatus({ canisterId });
+  assert.ok(beforeStatus.moduleHash instanceof Uint8Array);
+  const beforeStable = await pic.getStableMemory(canisterId);
+
+  step(name, "reject upgrade with changed migration SQL");
+  await assert.rejects(
+    pic.upgradeCanister({ canisterId, wasm: changedWasm }),
+    /migration checksum mismatch/,
+  );
+
+  step(name, "verify module, complete stable image and database are preserved");
+  const afterStatus = await pic.canisterStatus({ canisterId });
+  assert.deepEqual(afterStatus.moduleHash, beforeStatus.moduleHash);
+  assert.deepEqual(await pic.getStableMemory(canisterId), beforeStable);
+  assert.deepEqual(await actor.db_meta(), beforeMeta);
+  assert.deepEqual(await actor.kv_get("survives"), { Ok: ["before-rejected-upgrade"] });
+  assert.deepEqual(await actor.kv_get_note("survives"), { Ok: ["preserved-note"] });
+  assert.deepEqual(await actor.db_integrity_check(), { Ok: "ok" });
+  assert.deepEqual(await actor.kv_put("after-rejected-upgrade", "works"), { Ok: null });
+  assert.deepEqual(await actor.kv_get("after-rejected-upgrade"), { Ok: ["works"] });
+
+  step(name, "verify an unchanged migration can still upgrade");
+  await pic.upgradeCanister({ canisterId, wasm });
+  const upgraded = pic.createActor(idlFactory, canisterId);
+  assert.deepEqual(await upgraded.kv_get("after-rejected-upgrade"), { Ok: ["works"] });
+  assert.deepEqual(await upgraded.db_integrity_check(), { Ok: "ok" });
 }
 
 async function precompiledSqliteArchiveHasExpectedFeatures(pic, name) {
