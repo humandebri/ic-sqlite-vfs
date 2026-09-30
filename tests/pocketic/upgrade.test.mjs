@@ -6,6 +6,7 @@ import { idlFactory } from "./idl.mjs";
 import { startPocketIcServer } from "./server.mjs";
 
 const wasm = resolve("target/pocketic/ic_sqlite_vfs.wasm");
+const upgradeFromWasm = resolve(process.env.UPGRADE_FROM_WASM ?? wasm);
 const failpointWasm = resolve("target/pocketic/ic_sqlite_vfs_failpoints.wasm");
 const timeout = 600_000;
 const serverStartTimeout = 120_000;
@@ -80,7 +81,7 @@ function step(name, message) {
 
 async function stableImageSurvivesUpgrade(pic, name) {
   step(name, "setup canister");
-  const { actor, canisterId } = await pic.setupCanister({ idlFactory, wasm });
+  const { actor, canisterId } = await pic.setupCanister({ idlFactory, wasm: upgradeFromWasm });
 
   step(name, "write initial rows");
   assert.deepEqual(await actor.kv_put("survives", "before-upgrade"), { Ok: null });
